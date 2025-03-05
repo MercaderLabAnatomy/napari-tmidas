@@ -1,0 +1,57 @@
+name: napari-tmidas
+display_name: T-MIDAS
+# use 'hidden' to remove plugin from napari hub search results
+visibility: public
+# see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
+categories: ["Annotation", "Segmentation", "Acquisition"]
+contributions:
+  commands:
+    - id: napari-tmidas.get_reader
+      python_name: napari_tmidas._reader:napari_get_reader
+      title: Open data with T-MIDAS
+    - id: napari-tmidas.write_multiple
+      python_name: napari_tmidas._writer:write_multiple
+      title: Save multi-layer data with T-MIDAS
+    - id: napari-tmidas.write_single_image
+      python_name: napari_tmidas._writer:write_single_image
+      title: Save image data with T-MIDAS
+    - id: napari-tmidas.make_sample_data
+      python_name: napari_tmidas._sample_data:make_sample_data
+      title: Load sample data from T-MIDAS
+    - id: napari-tmidas.make_container_widget
+      python_name: napari_tmidas:ImageThreshold
+      title: Make threshold Container widget
+    - id: napari-tmidas.make_magic_widget
+      python_name: napari_tmidas:threshold_magic_widget
+      title: Make threshold magic widget
+    - id: napari-tmidas.make_function_widget
+      python_name: napari_tmidas:threshold_autogenerate_widget
+      title: Make threshold function widget
+    - id: napari-tmidas.make_qwidget
+      python_name: napari_tmidas:ExampleQWidget
+      title: Make example QWidget
+  readers:
+    - command: napari-tmidas.get_reader
+      accepts_directories: false
+      filename_patterns: ['*.npy']
+  writers:
+    - command: napari-tmidas.write_multiple
+      layer_types: ['image*','labels*']
+      filename_extensions: []
+    - command: napari-tmidas.write_single_image
+      layer_types: ['image']
+      filename_extensions: ['.npy']
+  sample_data:
+    - command: napari-tmidas.make_sample_data
+      display_name: T-MIDAS
+      key: unique_id.1
+  widgets:
+    - command: napari-tmidas.make_container_widget
+      display_name: Container Threshold
+    - command: napari-tmidas.make_magic_widget
+      display_name: Magic Threshold
+    - command: napari-tmidas.make_function_widget
+      autogenerate: true
+      display_name: Autogenerate Threshold
+    - command: napari-tmidas.make_qwidget
+      display_name: Example QWidget
