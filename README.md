@@ -43,7 +43,7 @@ To install the latest development version:
    
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
-9. You can click on the images to show them in the viewer. For example first click on the original, then the processed image to see an overlay.
+9. You can click on the images to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
     
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
