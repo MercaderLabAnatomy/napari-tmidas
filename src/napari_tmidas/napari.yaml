@@ -18,18 +18,9 @@ contributions:
     - id: napari-tmidas.make_sample_data
       python_name: napari_tmidas._sample_data:make_sample_data
       title: Load sample data from T-MIDAS
-    # - id: napari-tmidas.make_container_widget
-    #   python_name: napari_tmidas:ImageThreshold
-    #   title: Make threshold Container widget
-    # - id: napari-tmidas.make_magic_widget
-    #   python_name: napari_tmidas:threshold_magic_widget
-    #   title: Make threshold magic widget
-    # - id: napari-tmidas.make_function_widget
-    #   python_name: napari_tmidas:threshold_autogenerate_widget
-    #   title: Make threshold function widget
-    # - id: napari-tmidas.make_qwidget
-    #   python_name: napari_tmidas:ExampleQWidget
-    #   title: Make example QWidget
+    - id: napari-tmidas._label_inspection # hyphen!
+      python_name: napari_tmidas._label_inspection:label_inspector_widget # underscore!
+      title: Label inspector
     - id: napari-tmidas.file_selector
       python_name: napari_tmidas._file_selector:napari_experimental_provide_dock_widget
       title: File selector
@@ -49,14 +40,7 @@ contributions:
       display_name: T-MIDAS
       key: unique_id.1
   widgets:
-    # - command: napari-tmidas.make_container_widget
-    #   display_name: Container Threshold
-    # - command: napari-tmidas.make_magic_widget
-    #   display_name: Magic Threshold
-    # - command: napari-tmidas.make_function_widget
-    #   autogenerate: true
-    #   display_name: Autogenerate Threshold
-    # - command: napari-tmidas.make_qwidget
-    #   display_name: Example QWidget
     - command: napari-tmidas.file_selector
       display_name: File selector
+    - command: napari-tmidas._label_inspection
+      display_name: Label inspector
