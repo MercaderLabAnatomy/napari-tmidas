@@ -4,10 +4,10 @@
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
 [![Python Version](https://img.shields.io/pypi/pyversions/napari-tmidas.svg?color=green)](https://python.org)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
-[![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas)
+<!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-tmidas)](https://napari-hub.org/plugins/napari-tmidas)
 
-The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful batch image processing features. This is a work in progress (WIP) and an evolutionary step from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
+The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful batch image processing features. This is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ----------------------------------
 
