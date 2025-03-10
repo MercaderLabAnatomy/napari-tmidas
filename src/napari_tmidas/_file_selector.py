@@ -154,7 +154,7 @@ class ProcessedFilesTableWidget(QTableWidget):
         # Remove existing processed layer if it exists
         if self.current_processed_image is not None:
             with contextlib.suppress(KeyError):
-                self.viewer.layers.remove(self.current_processed_image)
+                self.viewer.layers.remove(self.current_original_image)
 
         # Load new image
         try:
@@ -162,9 +162,8 @@ class ProcessedFilesTableWidget(QTableWidget):
             self.current_processed_image = self.viewer.add_image(
                 image, name=f"Processed: {os.path.basename(filepath)}"
             )
-        except (ValueError, TypeError, OSError, tifffile.TiffFileError) as e:
+        except (ValueError, TypeError) as e:
             print(f"Error loading processed image {filepath}: {e}")
-            self.viewer.status = f"Error processing {filepath}: {e}"
 
     def _load_image(self, filepath: str):
         """
@@ -475,12 +474,8 @@ class FileResultsWidget(QWidget):
 
                 # Track processed file
                 processed_files_info.append(
-                    {
-                        "original_file": filepath,
-                        "processed_file": new_filepath,
-                    }
+                    {"original_file": filepath, "processed_file": new_filepath}
                 )
-                self.viewer.status = f"Processed and saved: {new_filename}"
 
             except (
                 ValueError,
@@ -491,5 +486,15 @@ class FileResultsWidget(QWidget):
                 self.viewer.status = f"Error processing {filepath}: {e}"
                 print(f"Error processing {filepath}: {e}")
 
-        # Update the table with the processed files
+        # Update table with processed files
         self.table.update_processed_files(processed_files_info)
+
+        # Update viewer status
+        self.viewer.status = f"Processed {len(processed_files_info)} files with {selected_function_name}"
+
+
+def napari_experimental_provide_dock_widget():
+    """
+    Provide the file selector widget to Napari
+    """
+    return file_selector
