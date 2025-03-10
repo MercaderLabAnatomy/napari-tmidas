@@ -44,6 +44,12 @@ To install the latest development version:
     
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
+Whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly overlay the image pair that you want to inspect. 
+
+### Label inspector
+If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the Label inspector, which automatically saves your changes to the existing label image once you click the `Save and Continue` button.
+
+![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
 
 ## Contributing
