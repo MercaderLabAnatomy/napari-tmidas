@@ -1,4 +1,4 @@
-# Nnapari-tmidas
+# napari-tmidas
 
 [![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/macromeer/napari-tmidas/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
@@ -25,7 +25,8 @@ To install the latest development version:
 ## Usage
 1. You can find the installed plugin here:
    
-![image](https://github.com/user-attachments/assets/41f83fbd-5cc2-4b26-89f7-b4224016a405)
+![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
+
 
 3. After opening the plugin, select the folder with the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
    
