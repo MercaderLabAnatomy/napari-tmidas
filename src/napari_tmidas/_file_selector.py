@@ -90,8 +90,9 @@ class ProcessedFilesTableWidget(QTableWidget):
         # Track file mappings
         self.file_pairs = {}
 
-        # Currently loaded image
-        self.current_loaded_image = None
+        # Currently loaded images
+        self.current_original_image = None
+        self.current_processed_image = None
 
     def add_initial_files(self, file_list: List[str]):
         """
@@ -156,30 +157,60 @@ class ProcessedFilesTableWidget(QTableWidget):
         if event.button() == Qt.LeftButton:
             item = self.itemAt(event.pos())
             if item:
-                # Load the image when clicked
                 filepath = item.data(Qt.UserRole)
                 if filepath:
-                    self._load_image(filepath)
+                    # Determine which column was clicked
+                    column = self.columnAt(event.pos().x())
+                    if column == 0:
+                        # Original image clicked
+                        self._load_original_image(filepath)
+                    elif column == 1 and filepath:
+                        # Processed image clicked
+                        self._load_processed_image(filepath)
 
         super().mousePressEvent(event)
 
-    def _load_image(self, filepath: str):
+    def _load_original_image(self, filepath: str):
         """
-        Load image into viewer, replacing any existing image
+        Load original image into viewer
         """
-        # Remove existing layers
-        if self.current_loaded_image is not None:
+        # Remove existing original layer if it exists
+        if self.current_original_image is not None:
             with contextlib.suppress(Exception):
-                self.viewer.layers.remove(self.current_loaded_image)
+                self.viewer.layers.remove(self.current_original_image)
 
         # Load new image
         try:
             image = tifffile.imread(filepath)
-            self.current_loaded_image = self.viewer.add_image(
-                image, name=os.path.basename(filepath)
+            self.current_original_image = self.viewer.add_image(
+                image, name=f"Original: {os.path.basename(filepath)}"
             )
         except (ValueError, TypeError) as e:
-            print(f"Error loading image {filepath}: {e}")
+            print(f"Error loading original image {filepath}: {e}")
+
+    def _load_processed_image(self, filepath: str):
+        """
+        Load processed image into viewer
+        """
+        # Remove existing processed layer if it exists
+        if self.current_processed_image is not None:
+            with contextlib.suppress(Exception):
+                self.viewer.layers.remove(self.current_processed_image)
+
+        # Load new image
+        try:
+            image = tifffile.imread(filepath)
+            self.current_processed_image = self.viewer.add_image(
+                image, name=f"Processed: {os.path.basename(filepath)}"
+            )
+        except (ValueError, TypeError) as e:
+            print(f"Error loading processed image {filepath}: {e}")
+
+    def _load_image(self, filepath: str):
+        """
+        Legacy method kept for compatibility
+        """
+        self._load_original_image(filepath)
 
 
 @magicgui(
