@@ -23,6 +23,9 @@ To install the latest development version:
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
 ## Usage
+
+### File inspector
+
 1. You can find the installed plugin here:
    
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
