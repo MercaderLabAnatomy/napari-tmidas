@@ -24,26 +24,25 @@ To install the latest development version:
 
 ## Usage
 
-### File inspector
-
-1. You can find the installed plugin here:
+You can find the installed plugin here:
    
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
 
+### File inspector
 
-3. After opening the plugin, select the folder with the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
+1. After opening the plugin, select the folder with the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
    
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
-5. As a result, a table appears with the found images.
+2. As a result, a table appears with the found images.
    
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
-7. Next, select a processing function, set parameters if applicable and `Start Batch Processing`.
+3. Next, select a processing function, set parameters if applicable and `Start Batch Processing`.
    
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
-9. You can click on the images to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
+4. You can click on the images to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
     
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
