@@ -9,18 +9,6 @@
 
 The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful batch image processing features. This is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
-----------------------------------
-
-This [napari] plugin was generated with [copier] using the [napari-plugin-template].
-
-<!--
-Don't miss the full getting started guide to set up your new package:
-https://github.com/napari/napari-plugin-template#getting-started
-
-and review the napari docs for plugin developers:
-https://napari.org/stable/plugins/index.html
--->
-
 ## Installation
 
 First install napari in a virtual environment following latest [Napari installation instructions](https://github.com/Napari/napari?tab=readme-ov-file#installation).
@@ -29,8 +17,6 @@ First install napari in a virtual environment following latest [Napari installat
 You can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
-
-
 
 To install latest development version :
 
@@ -56,10 +42,6 @@ To install latest development version :
 9. You can click on the images to show them in the viewer. For example first click on the original, then the processed image to see an overlay.
     
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
-
-
-
-
 
 
 
@@ -89,6 +71,18 @@ If you encounter any problems, please [file an issue] along with a detailed desc
 [napari-plugin-template]: https://github.com/napari/napari-plugin-template
 
 [file an issue]: https://github.com/macromeer/napari-tmidas/issues
+
+----------------------------------
+
+This [napari] plugin was generated with [copier] using the [napari-plugin-template].
+
+<!--
+Don't miss the full getting started guide to set up your new package:
+https://github.com/napari/napari-plugin-template#getting-started
+
+and review the napari docs for plugin developers:
+https://napari.org/stable/plugins/index.html
+-->
 
 [napari]: https://github.com/napari/napari
 [tox]: https://tox.readthedocs.io/en/latest/
