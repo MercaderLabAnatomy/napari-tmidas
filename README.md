@@ -39,7 +39,7 @@ To install the latest development version:
    
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
-7. Next, select a processing function, set parameters if applicable and start batch processing.
+7. Next, select a processing function, set parameters if applicable and `Start Batch Processing`.
    
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
@@ -50,7 +50,7 @@ To install the latest development version:
 Whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly overlay the image pair that you want to inspect. 
 
 ### Label inspector
-If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the Label inspector, which automatically saves your changes to the existing label image once you click the `Save and Continue` button.
+If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the Label inspector, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
