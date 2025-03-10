@@ -23,6 +23,9 @@ https://napari.org/stable/plugins/index.html
 
 ## Installation
 
+First install napari in a virtual environment following latest [Napari installation instructions](https://github.com/Napari/napari?tab=readme-ov-file#installation).
+
+
 You can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
