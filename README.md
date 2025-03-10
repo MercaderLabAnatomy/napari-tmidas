@@ -1,24 +1,24 @@
-# napari-tmidas
+# Napari T-MIDAS plugin
 
 [![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/macromeer/napari-tmidas/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
 [![Python Version](https://img.shields.io/pypi/pyversions/napari-tmidas.svg?color=green)](https://python.org)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
-<!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-tmidas)](https://napari-hub.org/plugins/napari-tmidas)
+<!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
 
-The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful batch image processing features. This is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
+The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for batch image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful features. This is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ## Installation
 
-First install napari in a virtual environment following latest [Napari installation instructions](https://github.com/Napari/napari?tab=readme-ov-file#installation).
+First install Napari in a virtual environment following the latest [Napari installation instructions](https://github.com/Napari/napari?tab=readme-ov-file#installation).
 
 
-You can install `napari-tmidas` via [pip]:
+After you have activated the environment, you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-To install latest development version :
+To install the latest development version:
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
