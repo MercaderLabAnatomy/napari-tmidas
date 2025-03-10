@@ -36,6 +36,27 @@ To install latest development version :
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
+## Usage
+1. You can find the installed plugin here:
+![image](https://github.com/user-attachments/assets/41f83fbd-5cc2-4b26-89f7-b4224016a405)
+
+2. After opening the plugin, select the folder with the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
+![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
+
+3. As a result, a table appears with the found images.
+![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
+
+4. Next, select a processing function, set parameters if applicable and start batch processing.
+![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
+
+5. You can click on the images to show them in the viewer. For example first click on the original, then the processed image to see an overlay.
+![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
+
+
+
+
+
+
 
 ## Contributing
 
