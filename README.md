@@ -42,11 +42,11 @@ You can find the installed plugin here:
    
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
-4. You can click on the images to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
+4. You can click on the images in the table to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay. 
     
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
-Whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly overlay the image pair that you want to inspect. 
+Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect. 
 
 ### Label inspector
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the Label inspector, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
