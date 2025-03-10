@@ -7,7 +7,7 @@
 [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas)
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-tmidas)](https://napari-hub.org/plugins/napari-tmidas)
 
-Tissue Microscopy Image Data Analysis Suite
+The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful batch image processing features. This is a work in progress (WIP) and an evolutionary step from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ----------------------------------
 
