@@ -30,7 +30,7 @@ You can find the installed plugin here:
 
 ### File inspector
 
-1. After opening the plugin, select the folder with the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
+1. After opening `Plugins > T-MIDAS > File selector`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
    
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
@@ -49,7 +49,7 @@ You can find the installed plugin here:
 Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect. 
 
 ### Label inspector
-If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the Label inspector, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
+If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Label inspector`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
