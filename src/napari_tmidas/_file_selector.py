@@ -4,6 +4,7 @@ import sys
 from typing import Any, Dict, List
 
 import napari
+import numpy as np
 import tifffile
 from magicgui import magicgui
 from qtpy.QtCore import Qt
@@ -149,21 +150,38 @@ class ProcessedFilesTableWidget(QTableWidget):
 
     def _load_processed_image(self, filepath: str):
         """
-        Load processed image into viewer
+        Load processed image into viewer, distinguishing labels by filename pattern
         """
         # Remove existing processed layer if it exists
         if self.current_processed_image is not None:
             with contextlib.suppress(KeyError):
-                self.viewer.layers.remove(self.current_original_image)
+                self.viewer.layers.remove(self.current_processed_image)
 
         # Load new image
         try:
             image = tifffile.imread(filepath)
-            self.current_processed_image = self.viewer.add_image(
-                image, name=f"Processed: {os.path.basename(filepath)}"
-            )
+            filename = os.path.basename(filepath)
+
+            # Check if filename contains label indicators
+            is_label = "labels" in filename or "semantic" in filename
+
+            # Add the layer using the appropriate method
+            if is_label:
+                # Ensure it's an appropriate dtype for labels
+                if not np.issubdtype(image.dtype, np.integer):
+                    image = image.astype(np.uint32)
+
+                self.current_processed_image = self.viewer.add_labels(
+                    image, name=f"Labels: {filename}"
+                )
+            else:
+                self.current_processed_image = self.viewer.add_image(
+                    image, name=f"Processed: {filename}"
+                )
+
         except (ValueError, TypeError) as e:
             print(f"Error loading processed image {filepath}: {e}")
+            self.viewer.status = f"Error processing {filepath}: {e}"
 
     def _load_image(self, filepath: str):
         """

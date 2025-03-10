@@ -62,3 +62,52 @@ if SKIMAGE_AVAILABLE:
         Detect edges using Sobel filter
         """
         return skimage.filters.sobel(image)
+
+    # simple otsu thresholding
+    @BatchProcessingRegistry.register(
+        name="Otsu Thresholding (semantic)",
+        suffix="_otsu_semantic",
+        description="Threshold image using Otsu's method",
+    )
+    def otsu_thresholding(image: np.ndarray) -> np.ndarray:
+        """
+        Threshold image using Otsu's method
+        """
+        thresh = skimage.filters.threshold_otsu(image)
+        return (image > thresh).astype(np.uint32)
+
+    # instance segmentation
+    @BatchProcessingRegistry.register(
+        name="Otsu Thresholding (instance)",
+        suffix="_otsu_labels",
+        description="Threshold image using Otsu's method",
+    )
+    def otsu_thresholding_instance(image: np.ndarray) -> np.ndarray:
+        """
+        Threshold image using Otsu's method
+        """
+        thresh = skimage.filters.threshold_otsu(image)
+        return skimage.measure.label(image > thresh).astype(np.uint32)
+
+    # simple thresholding
+    @BatchProcessingRegistry.register(
+        name="Manual Thresholding (8-bit)",
+        suffix="_thresh",
+        description="Threshold image using a fixed threshold",
+        parameters={
+            "threshold": {
+                "type": int,
+                "default": 128,
+                "min": 0,
+                "max": 255,
+                "description": "Threshold value",
+            },
+        },
+    )
+    def simple_thresholding(
+        image: np.ndarray, threshold: int = 128
+    ) -> np.ndarray:
+        """
+        Threshold image using a fixed threshold
+        """
+        return image > threshold
