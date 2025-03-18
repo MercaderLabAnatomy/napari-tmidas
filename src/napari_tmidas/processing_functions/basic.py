@@ -8,53 +8,35 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 
 @BatchProcessingRegistry.register(
-    name="Min-Max Normalization",
-    suffix="_normalized",
-    description="Normalize image values to range [0, 1] using min-max scaling",
-)
-def normalize_image(image: np.ndarray) -> np.ndarray:
-    """
-    Simple min-max normalization
-    """
-    if image.min() == image.max():
-        return np.zeros_like(image, dtype=float)
-    return (image - image.min()) / (image.max() - image.min())
-
-
-@BatchProcessingRegistry.register(
-    name="Contrast Stretch",
-    suffix="_contrast",
-    description="Stretch the contrast by clipping percentiles and rescaling",
+    name="Gamma Correction",
+    suffix="_gamma",
+    description="Apply gamma correction to the image (>1: enhance bright regions, <1: enhance dark regions)",
     parameters={
-        "low_percentile": {
+        "gamma": {
             "type": float,
-            "default": 2.0,
-            "min": 0.0,
-            "max": 49.0,
-            "description": "Low percentile to clip",
-        },
-        "high_percentile": {
-            "type": float,
-            "default": 98.0,
-            "min": 51.0,
-            "max": 100.0,
-            "description": "High percentile to clip",
+            "default": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "description": "Gamma correction factor",
         },
     },
 )
-def contrast_stretch(
-    image: np.ndarray,
-    low_percentile: float = 2.0,
-    high_percentile: float = 98.0,
-) -> np.ndarray:
+def gamma_correction(image: np.ndarray, gamma: float = 1.0) -> np.ndarray:
     """
-    Stretch contrast by clipping percentiles
+    Apply gamma correction to the image
     """
-    p_low = np.percentile(image, low_percentile)
-    p_high = np.percentile(image, high_percentile)
+    # Determine maximum value based on dtype
+    max_val = (
+        np.iinfo(image.dtype).max
+        if np.issubdtype(image.dtype, np.integer)
+        else 1.0
+    )
 
-    # Clip and normalize
-    image_clipped = np.clip(image, p_low, p_high)
-    if p_high == p_low:
-        return np.zeros_like(image, dtype=float)
-    return (image_clipped - p_low) / (p_high - p_low)
+    # Normalize image to [0, 1]
+    normalized = image.astype(np.float32) / max_val
+
+    # Apply gamma correction
+    corrected = np.power(normalized, gamma)
+
+    # Scale back to original range and dtype
+    return (corrected * max_val).clip(0, max_val).astype(image.dtype)

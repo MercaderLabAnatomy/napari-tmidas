@@ -11,10 +11,13 @@ The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collectio
 
 ## Installation
 
-First install Napari in a virtual environment following the latest [Napari installation instructions](https://github.com/Napari/napari?tab=readme-ov-file#installation).
+First install Napari in a virtual environment:
 
+    mamba create -y -n napari-tmidas -c conda-forge python=3.11
+    mamba activate napari-tmidas
+    python -m pip install "napari[all]"
 
-After you have activated the environment, you can install `napari-tmidas` via [pip]:
+Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
@@ -22,31 +25,37 @@ To install the latest development version:
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
+### Dependencies
+For the File converter, we need some libraries to read some microscopy formats and to write ome-zarr:
+
+    pip install nd2 readlif tiffslide pylibCZIrw ome-zarr
+
+
 ## Usage
 
 You can find the installed plugin here:
-   
+
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
 
 ### File inspector
 
 1. After opening `Plugins > T-MIDAS > File selector`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
-   
+
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
 2. As a result, a table appears with the found images.
-   
+
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
 3. Next, select a processing function, set parameters if applicable and `Start Batch Processing`.
-   
+
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
-4. You can click on the images in the table to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay. 
-    
+4. You can click on the images in the table to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
+
 ![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
-Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect. 
+Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
 
 ### Label inspector
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Label inspector`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
