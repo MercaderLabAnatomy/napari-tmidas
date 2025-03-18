@@ -1,3 +1,4 @@
+import concurrent.futures
 import contextlib
 import os
 import sys
@@ -7,14 +8,17 @@ import napari
 import numpy as np
 import tifffile
 from magicgui import magicgui
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -22,6 +26,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from skimage.io import imread
 
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
@@ -140,10 +145,20 @@ class ProcessedFilesTableWidget(QTableWidget):
 
         # Load new image
         try:
-            image = tifffile.imread(filepath)
-            self.current_original_image = self.viewer.add_image(
-                image, name=f"Original: {os.path.basename(filepath)}"
-            )
+            image = imread(filepath)
+            # check if label image by checking file name
+            is_label = "labels" in os.path.basename(
+                filepath
+            ) or "semantic" in os.path.basename(filepath)
+            if is_label:
+                image = image.astype(np.uint32)
+                self.current_original_image = self.viewer.add_labels(
+                    image, name=f"Labels: {os.path.basename(filepath)}"
+                )
+            else:
+                self.current_original_image = self.viewer.add_image(
+                    image, name=f"Original: {os.path.basename(filepath)}"
+                )
         except (ValueError, TypeError, OSError, tifffile.TiffFileError) as e:
             print(f"Error loading original image {filepath}: {e}")
             self.viewer.status = f"Error processing {filepath}: {e}"
@@ -159,7 +174,7 @@ class ProcessedFilesTableWidget(QTableWidget):
 
         # Load new image
         try:
-            image = tifffile.imread(filepath)
+            image = imread(filepath)
             filename = os.path.basename(filepath)
 
             # Check if filename contains label indicators
@@ -263,11 +278,15 @@ class ParameterWidget(QWidget):
 
 @magicgui(
     call_button="Find and Index Image Files",
-    input_folder={"label": "Select Folder"},
-    input_suffix={"label": "File Suffix (Example: _labels.tif)", "value": ""},
+    input_folder={
+        "widget_type": "LineEdit",
+        "label": "Select Folder",
+        "value": "",
+    },
+    input_suffix={"label": "File Suffix (Example: .tif)", "value": ""},
 )
 def file_selector(
-    viewer: napari.Viewer, input_folder: str, input_suffix: str = "_labels.tif"
+    viewer: napari.Viewer, input_folder: str, input_suffix: str = ".tif"
 ) -> List[str]:
     """
     Find files in a specified input folder with a given suffix and prepare for batch processing.
@@ -303,6 +322,176 @@ def file_selector(
     return matching_files
 
 
+# Modify the file_selector widget to add a browse button after it's created
+def _add_browse_button_to_selector(file_selector_widget):
+    """
+    Add a browse button to the file selector widget
+    """
+    # Get the container widget that holds the input_folder widget
+    container = file_selector_widget.native
+
+    # Create a browse button
+    browse_button = QPushButton("Browse...")
+
+    # Get access to the input_folder widget
+    input_folder_widget = file_selector_widget.input_folder.native
+
+    # Get the parent of the input_folder widget
+    parent_layout = input_folder_widget.parentWidget().layout()
+
+    # Create a container for input field and browse button
+    container_widget = QWidget()
+    h_layout = QHBoxLayout(container_widget)
+    h_layout.setContentsMargins(0, 0, 0, 0)
+
+    # Add the input field to our container
+    h_layout.addWidget(input_folder_widget)
+
+    # Add the browse button
+    h_layout.addWidget(browse_button)
+
+    # Replace the input field with our container
+    # parent = input_folder_widget.parentWidget()
+    layout_index = parent_layout.indexOf(input_folder_widget)
+    parent_layout.removeWidget(input_folder_widget)
+    parent_layout.insertWidget(layout_index, container_widget)
+
+    # Connect button to browse action
+    def browse_folder():
+        folder = QFileDialog.getExistingDirectory(
+            container,
+            "Select Folder",
+            file_selector_widget.input_folder.value or os.path.expanduser("~"),
+        )
+        if folder:
+            file_selector_widget.input_folder.value = folder
+
+    browse_button.clicked.connect(browse_folder)
+
+    return file_selector_widget
+
+
+# Create a modified file_selector with browse button
+file_selector = _add_browse_button_to_selector(file_selector)
+
+
+# Processing worker for multithreading
+class ProcessingWorker(QThread):
+    """
+    Worker thread for processing images in the background
+    """
+
+    # Signals to communicate with the main thread
+    progress_updated = Signal(int)
+    file_processed = Signal(dict)
+    processing_finished = Signal()
+    error_occurred = Signal(str, str)  # filepath, error message
+
+    def __init__(
+        self,
+        file_list,
+        processing_func,
+        param_values,
+        output_folder,
+        input_suffix,
+        output_suffix,
+    ):
+        super().__init__()
+        self.file_list = file_list
+        self.processing_func = processing_func
+        self.param_values = param_values
+        self.output_folder = output_folder
+        self.input_suffix = input_suffix
+        self.output_suffix = output_suffix
+        self.stop_requested = False
+
+    def run(self):
+        """Process files in a separate thread"""
+        # Track processed files
+        processed_files_info = []
+        total_files = len(self.file_list)
+
+        # Create a thread pool for concurrent processing
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Submit tasks
+            future_to_file = {
+                executor.submit(self.process_file, filepath): filepath
+                for filepath in self.file_list
+            }
+
+            # Process as they complete
+            for i, future in enumerate(
+                concurrent.futures.as_completed(future_to_file)
+            ):
+                # Check if cancellation was requested
+                if self.stop_requested:
+                    break
+
+                filepath = future_to_file[future]
+                try:
+                    result = future.result()
+                    if result:
+                        processed_files_info.append(result)
+                        self.file_processed.emit(result)
+                except (
+                    ValueError,
+                    TypeError,
+                    OSError,
+                    tifffile.TiffFileError,
+                ) as e:
+                    self.error_occurred.emit(filepath, str(e))
+
+                # Update progress
+                self.progress_updated.emit(int((i + 1) / total_files * 100))
+
+        # Signal that processing is complete
+        self.processing_finished.emit()
+
+    def process_file(self, filepath):
+        """Process a single file"""
+        try:
+            # Load the image
+            image = imread(filepath)
+            image_dtype = image.dtype
+
+            # Apply processing with parameters
+            processed_image = self.processing_func(image, **self.param_values)
+
+            # Generate new filename
+            filename = os.path.basename(filepath)
+            name, ext = os.path.splitext(filename)
+            new_filename = (
+                name.replace(self.input_suffix, "") + self.output_suffix + ext
+            )
+            new_filepath = os.path.join(self.output_folder, new_filename)
+
+            # Save the processed image
+            if "labels" in new_filename or "semantic" in new_filename:
+                # processed_image = ndi.label(processed_image)[0]
+                tifffile.imwrite(
+                    new_filepath,
+                    processed_image.astype(np.uint32),
+                    compression="zlib",
+                )
+            else:
+                tifffile.imwrite(
+                    new_filepath,
+                    processed_image.astype(image_dtype),
+                    compression="zlib",
+                )
+
+            # Return processing info
+            return {"original_file": filepath, "processed_file": new_filepath}
+
+        except Exception:
+            # Re-raise to be caught by the executor
+            raise
+
+    def stop(self):
+        """Request worker to stop processing"""
+        self.stop_requested = True
+
+
 class FileResultsWidget(QWidget):
     """
     Custom widget to display matching files and enable batch processing
@@ -322,6 +511,26 @@ class FileResultsWidget(QWidget):
         self.file_list = file_list
         self.input_folder = input_folder
         self.input_suffix = input_suffix
+        self.worker = None  # Will hold the processing worker
+
+        # Create main layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Input folder widgets
+        self.input_folder_widget = QLineEdit(self.input_folder)
+        layout.addWidget(self.input_folder_widget)
+
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self.browse_folder)
+        layout.addWidget(browse_button)
+
+        # Create table of files
+        self.table = ProcessedFilesTableWidget(viewer)
+        self.table.add_initial_files(file_list)
+
+        # Add table to layout
+        layout.addWidget(self.table)
 
         # Load all processing functions
         print("Calling discover_and_load_processing_functions")
@@ -330,17 +539,6 @@ class FileResultsWidget(QWidget):
         print("Available processing functions:")
         for func_name in BatchProcessingRegistry.list_functions():
             print(func_name)
-
-        # Create main layout
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Create table of files
-        self.table = ProcessedFilesTableWidget(viewer)
-        self.table.add_initial_files(file_list)
-
-        # Add table to layout
-        layout.addWidget(self.table)
 
         # Create processing function selector
         processing_layout = QVBoxLayout()
@@ -377,17 +575,87 @@ class FileResultsWidget(QWidget):
         )
         output_layout.addWidget(self.output_folder)
 
+        # Thread count selector
+        thread_layout = QHBoxLayout()
+        thread_label = QLabel("Number of threads:")
+        thread_layout.addWidget(thread_label)
+
+        self.thread_count = QSpinBox()
+        self.thread_count.setMinimum(1)
+        self.thread_count.setMaximum(
+            os.cpu_count() or 4
+        )  # Default to CPU count or 4
+        self.thread_count.setValue(
+            max(1, (os.cpu_count() or 4) - 1)
+        )  # Default to CPU count - 1
+        thread_layout.addWidget(self.thread_count)
+
+        output_layout.addLayout(thread_layout)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)  # Hide initially
+
         layout.addLayout(processing_layout)
         layout.addLayout(output_layout)
+        layout.addWidget(self.progress_bar)
 
-        # Add batch processing button
+        # Add batch processing and cancel buttons
+        button_layout = QHBoxLayout()
+
         self.batch_button = QPushButton("Start Batch Processing")
         self.batch_button.clicked.connect(self.start_batch_processing)
-        layout.addWidget(self.batch_button)
+        button_layout.addWidget(self.batch_button)
+
+        self.cancel_button = QPushButton("Cancel Processing")
+        self.cancel_button.clicked.connect(self.cancel_processing)
+        self.cancel_button.setEnabled(False)  # Disabled initially
+        button_layout.addWidget(self.cancel_button)
+
+        layout.addLayout(button_layout)
 
         # Initialize parameters for the first function
         if self.processing_selector.count() > 0:
             self.update_function_info(self.processing_selector.currentText())
+
+        # Container for tracking processed files during batch operation
+        self.processed_files_info = []
+
+    def browse_folder(self):
+        """
+        Open a file dialog to select a folder
+        """
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder", self.input_folder
+        )
+        if folder:
+            self.input_folder = folder
+            self.input_folder_widget.setText(folder)
+            self.validate_selected_folder(folder)
+
+    def validate_selected_folder(self, folder: str):
+        """
+        Validate the selected folder and update the file list
+        """
+        if not os.path.isdir(folder):
+            self.viewer.status = f"Invalid input folder: {folder}"
+            return
+
+        # Find matching files
+        matching_files = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if f.endswith(self.input_suffix)
+        ]
+
+        # Update table with new files
+        self.file_list = matching_files
+        self.table.add_initial_files(matching_files)
+
+        # Update viewer status
+        self.viewer.status = f"Found {len(matching_files)} files"
 
     def update_function_info(self, function_name: str):
         """
@@ -434,7 +702,7 @@ class FileResultsWidget(QWidget):
 
     def start_batch_processing(self):
         """
-        Initiate batch processing of selected files
+        Initiate multithreaded batch processing of selected files
         """
         # Get selected processing function
         selected_function_name = self.processing_selector.currentText()
@@ -467,48 +735,77 @@ class FileResultsWidget(QWidget):
         # Ensure output folder exists
         os.makedirs(output_folder, exist_ok=True)
 
-        # Track processed files
-        processed_files_info = []
+        # Reset progress tracking
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.processed_files_info = []
 
-        # Process each file
-        for filepath in self.file_list:
-            try:
-                # Load the image
-                image = tifffile.imread(filepath)
+        # Update UI
+        self.batch_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
 
-                # Apply processing with parameters
-                processed_image = processing_func(image, **param_values)
+        # Create and start the worker thread
+        self.worker = ProcessingWorker(
+            self.file_list,
+            processing_func,
+            param_values,
+            output_folder,
+            self.input_suffix,
+            output_suffix,
+        )
 
-                # Generate new filename
-                filename = os.path.basename(filepath)
-                name, ext = os.path.splitext(filename)
-                new_filename = (
-                    name.replace(self.input_suffix, "") + output_suffix + ext
-                )
-                new_filepath = os.path.join(output_folder, new_filename)
+        # Connect signals
+        self.worker.progress_updated.connect(self.update_progress)
+        self.worker.file_processed.connect(self.file_processed)
+        self.worker.processing_finished.connect(self.processing_finished)
+        self.worker.error_occurred.connect(self.processing_error)
 
-                # Save processed image
-                tifffile.imwrite(new_filepath, processed_image)
+        # Start processing
+        self.worker.start()
 
-                # Track processed file
-                processed_files_info.append(
-                    {"original_file": filepath, "processed_file": new_filepath}
-                )
+        # Update status
+        self.viewer.status = f"Processing {len(self.file_list)} files with {selected_function_name} using {self.thread_count.value()} threads"
 
-            except (
-                ValueError,
-                TypeError,
-                OSError,
-                tifffile.TiffFileError,
-            ) as e:
-                self.viewer.status = f"Error processing {filepath}: {e}"
-                print(f"Error processing {filepath}: {e}")
+    def update_progress(self, value):
+        """Update the progress bar"""
+        self.progress_bar.setValue(value)
 
-        # Update table with processed files
-        self.table.update_processed_files(processed_files_info)
+    def file_processed(self, result):
+        """Handle a processed file result"""
+        self.processed_files_info.append(result)
+        # Update table with this single processed file
+        self.table.update_processed_files([result])
 
-        # Update viewer status
-        self.viewer.status = f"Processed {len(processed_files_info)} files with {selected_function_name}"
+    def processing_finished(self):
+        """Handle processing completion"""
+        # Update UI
+        self.progress_bar.setValue(100)
+        self.batch_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+
+        # Clean up worker
+        self.worker = None
+
+        # Update status
+        self.viewer.status = (
+            f"Completed processing {len(self.processed_files_info)} files"
+        )
+
+    def processing_error(self, filepath, error_msg):
+        """Handle processing errors"""
+        print(f"Error processing {filepath}: {error_msg}")
+        self.viewer.status = f"Error processing {filepath}: {error_msg}"
+
+    def cancel_processing(self):
+        """Cancel the current processing operation"""
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()  # Wait for the thread to finish
+
+            # Update UI
+            self.batch_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
+            self.viewer.status = "Processing cancelled"
 
 
 def napari_experimental_provide_dock_widget():

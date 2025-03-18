@@ -24,6 +24,9 @@ contributions:
     - id: napari-tmidas.file_selector
       python_name: napari_tmidas._file_selector:napari_experimental_provide_dock_widget
       title: File selector
+    - id: napari-tmidas._file_conversion
+      python_name: napari_tmidas._file_conversion:napari_experimental_provide_dock_widget
+      title: File converter
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
@@ -44,3 +47,5 @@ contributions:
       display_name: File selector
     - command: napari-tmidas._label_inspection
       display_name: Label inspector
+    - command: napari-tmidas._file_conversion
+      display_name: File converter
