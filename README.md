@@ -37,6 +37,11 @@ You can find the installed plugin here:
 
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
 
+
+### File converter
+
+You might first want to batch convert microscopy image data. Currently, this plugin supports `.nd2, .lif, .ndpi, .czi`. After launching the file converter, you can scan a folder of your choice for microscopy image data. It will also detect series images that you can preview. Start by selecting an original image in the first column of the table. This allows you to preview or convert.
+
 ### File inspector
 
 1. After opening `Plugins > T-MIDAS > File selector`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
@@ -61,6 +66,7 @@ Note that whenever you click on an `Original File` or `Processed File` in the ta
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Label inspector`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
+
 
 
 ## Contributing
