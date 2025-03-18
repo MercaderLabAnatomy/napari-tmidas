@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -490,6 +491,24 @@ class CZILoader(FormatLoader):
             raise  # Re-raise the exception after logging
 
     @staticmethod
+    def get_scales(metadata_xml, dim):
+        pattern = re.compile(
+            r'<Distance[^>]*Id="'
+            + re.escape(dim)
+            + r'"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
+            re.DOTALL,
+        )
+        match = pattern.search(metadata_xml)
+
+        if match:
+            scale = float(match.group(1))
+            # convert to microns
+            scale = scale * 1e6
+            return scale
+        else:
+            return None  # Fixed: return a single None value instead of (None, None, None)
+
+    @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         try:
             with czi.open_czi(filepath) as czi_file:
@@ -502,24 +521,80 @@ class CZILoader(FormatLoader):
                 scene_index = scene_keys[series_index]
                 scene = scenes[scene_index]
 
+                dims = czi_file.total_bounding_box
+
+                # Extract the raw metadata as an XML string
+                metadata_xml = czi_file.raw_metadata
+
+                metadata = {
+                    "scene_index": scene_index,
+                    "scene_rect": (scene[0], scene[1], scene[2], scene[3]),
+                }
+
+                # Add scale information
                 try:
-                    total_bounding_box = czi_file.total_bounding_box
-                    metadata = {
-                        "scene_index": scene_index,
-                        "rect": (scene[0], scene[1], scene[2], scene[3]),
-                        "dimensions": total_bounding_box,
-                        "pixel_type": czi_file.pixel_type,
-                        "axes": czi_file.axes,
-                        "shape": czi_file.shape,
-                    }
-                    return metadata
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Error getting full metadata: {e}")
-                    return {
-                        "scene_index": scene_index,
-                        "rect": (scene[0], scene[1], scene[2], scene[3]),
-                    }
-        except (ValueError, FileNotFoundError) as e:
+                    scale_x = CZILoader.get_scales(metadata_xml, "X")
+                    scale_y = CZILoader.get_scales(metadata_xml, "Y")
+
+                    metadata.update(
+                        {
+                            "scale_x": scale_x,
+                            "scale_y": scale_y,
+                            "scale_unit": "microns",
+                        }
+                    )
+
+                    if dims["Z"] != (0, 1):
+                        scale_z = CZILoader.get_scales(metadata_xml, "Z")
+                        metadata["scale_z"] = scale_z
+                except ValueError as e:
+                    print(f"Error getting scale metadata: {e}")
+
+                # metadata = {
+                #     "scene_index": scene_index,
+                #     "scene_rect": (scene[0], scene[1], scene[2], scene[3]),
+                # }
+
+                # try:
+
+                #     metadata.update(
+                #         {
+                #             "dimensions": czi_file.total_bounding_box,
+                #             # "axes": czi_file.axes,
+                #             # "shape": czi_file.shape,
+                #             #"size": czi_file.size,
+                #             "pixel_types": czi_file.pixel_types,
+                #         }
+                #     )
+                # except (ValueError, FileNotFoundError) as e:
+                #     print(f"Error getting full metadata: {e}")
+
+                # try:
+                #     metadata["channel_count"] = czi_file.get_dims_channels()[0]
+                #     metadata["channel_names"] = czi_file.channel_names
+                # except (ValueError, FileNotFoundError) as e:
+                #     print(f"Error getting channel metadata: {e}")
+                # try:
+                #     metadata.update(
+                #         {
+                #             "scale_x": czi_file.scale_x,
+                #             "scale_y": czi_file.scale_y,
+                #             "scale_z": czi_file.scale_z,
+                #             "scale_unit": czi_file.scale_unit,
+                #         }
+                #     )
+                # except (ValueError, FileNotFoundError) as e:
+                #     print(f"Error getting scale metadata: {e}")
+                # try:
+                #     xml_metadata = czi_file.meta
+                #     if xml_metadata:
+                #         metadata["xml_metadata"] = xml_metadata
+                # except (ValueError, FileNotFoundError) as e:
+                #     print(f"Error getting XML metadata: {e}")
+
+                return metadata
+
+        except (ValueError, FileNotFoundError, RuntimeError) as e:
             print(f"Error getting metadata: {e}")
             return {}
 
@@ -628,8 +703,25 @@ class ConversionWorker(QThread):
                     )
                     continue
 
-                # Load series
-                image_data = loader.load_series(filepath, series_index)
+                # Load series - this is the critical part that must succeed
+                try:
+                    image_data = loader.load_series(filepath, series_index)
+                except (ValueError, FileNotFoundError) as e:
+                    self.file_done.emit(
+                        filepath, False, f"Failed to load image: {str(e)}"
+                    )
+                    continue
+
+                # Try to extract metadata - but don't fail if this doesn't work
+                metadata = None
+                try:
+                    metadata = (
+                        loader.get_metadata(filepath, series_index) or {}
+                    )
+                    print(f"Extracted metadata keys: {list(metadata.keys())}")
+                except (ValueError, FileNotFoundError) as e:
+                    print(f"Warning: Failed to extract metadata: {str(e)}")
+                    metadata = {}
 
                 # Generate output filename
                 base_name = Path(filepath).stem
@@ -642,99 +734,308 @@ class ConversionWorker(QThread):
                     estimated_size_bytes > 4 * 1024 * 1024 * 1024
                 )
 
+                # Set up the output path
                 if use_zarr:
                     output_path = os.path.join(
                         self.output_folder,
                         f"{base_name}_series{series_index}.zarr",
                     )
-                    self._save_zarr(image_data, output_path)
                 else:
                     output_path = os.path.join(
                         self.output_folder,
                         f"{base_name}_series{series_index}.tif",
                     )
-                    self._save_tif(image_data, output_path)
 
-                success_count += 1
-                self.file_done.emit(filepath, True, f"Saved to {output_path}")
+                # The crucial part - save the file with separate try/except for each save method
+                save_success = False
+                error_message = ""
+
+                try:
+                    if use_zarr:
+                        # First try with metadata
+                        try:
+                            if metadata:
+                                self._save_zarr(
+                                    image_data, output_path, metadata
+                                )
+                            else:
+                                self._save_zarr(image_data, output_path)
+                        except (ValueError, FileNotFoundError) as e:
+                            print(
+                                f"Warning: Failed to save with metadata, trying without: {str(e)}"
+                            )
+                            # If that fails, try without metadata
+                            self._save_zarr(image_data, output_path, None)
+                    else:
+                        # First try with metadata
+                        try:
+                            if metadata:
+                                self._save_tif(
+                                    image_data, output_path, metadata
+                                )
+                            else:
+                                self._save_tif(image_data, output_path)
+                        except (ValueError, FileNotFoundError) as e:
+                            print(
+                                f"Warning: Failed to save with metadata, trying without: {str(e)}"
+                            )
+                            # If that fails, try without metadata
+                            self._save_tif(image_data, output_path, None)
+
+                    save_success = True
+                except (ValueError, FileNotFoundError) as e:
+                    error_message = f"Failed to save file: {str(e)}"
+                    print(f"Error in save operation: {error_message}")
+                    save_success = False
+
+                if save_success:
+                    success_count += 1
+                    self.file_done.emit(
+                        filepath, True, f"Saved to {output_path}"
+                    )
+                else:
+                    self.file_done.emit(filepath, False, error_message)
 
             except (ValueError, FileNotFoundError) as e:
-                self.file_done.emit(filepath, False, str(e))
+                print(f"Unexpected error during conversion: {str(e)}")
+                self.file_done.emit(
+                    filepath, False, f"Unexpected error: {str(e)}"
+                )
 
         self.finished.emit(success_count)
 
     def stop(self):
         self.running = False
 
-    def _save_tif(self, image_data: np.ndarray, output_path: str):
-        """Save image data as TIFF"""
-        tifffile.imwrite(output_path, image_data, compression="zstd")
+    def _save_tif(
+        self, image_data: np.ndarray, output_path: str, metadata: dict = None
+    ):
+        """Save image data as TIFF with optional metadata"""
+        try:
+            # For basic save without metadata
+            if metadata is None:
+                tifffile.imwrite(output_path, image_data, compression="zstd")
+                print(f"Saved TIFF file without metadata: {output_path}")
+                return
 
-    def _save_zarr(self, image_data: np.ndarray, output_path: str):
-        """Save image data as OME-Zarr format."""
-        # Determine optimal chunk size (close to 1MB per chunk)
-        target_chunk_size = 1024 * 1024  # 1MB
-        item_size = image_data.itemsize
+            # Convert metadata to TIFF-compatible format
+            tiff_metadata = {}
+            resolution = None
+            resolution_unit = None
 
-        # Calculate chunks
-        chunks = self._calculate_chunks(
-            image_data.shape, target_chunk_size, item_size
-        )
+            try:
+                # Extract resolution information for TIFF tags
+                scale_x = metadata.get("scale_x")
+                scale_y = metadata.get("scale_y")
+                # scale_unit = metadata.get("scale_unit")
 
-        # Determine appropriate axes based on dimensions
-        ndim = len(image_data.shape)
-        default_axes = "TCZYX"
-        axes = (
-            default_axes[-ndim:]
-            if ndim <= 5
-            else "".join([f"D{i}" for i in range(ndim)])
-        )
+                if all([scale_x, scale_y, scale_x > 0, scale_y > 0]):
+                    # For TIFF, resolution is specified as pixels per resolution unit
+                    # So we need to invert the scale (which is microns/pixel)
+                    # Convert from microns/pixel to pixels/cm
+                    x_res = 10000 / scale_x  # 10000 microns = 1 cm
+                    y_res = 10000 / scale_y
+                    resolution = (x_res, y_res)
+                    resolution_unit = "CENTIMETER"
 
-        # Create the zarr store
-        store = zarr.DirectoryStore(output_path)
+                # Include all other metadata
+                for key, value in metadata.items():
+                    if (
+                        isinstance(value, (str, int, float, bool))
+                        or isinstance(value, (list, tuple))
+                        and all(
+                            isinstance(x, (str, int, float, bool))
+                            for x in value
+                        )
+                    ):
+                        tiff_metadata[key] = value
+                    elif isinstance(value, dict):
+                        # For dictionaries, convert to a simple JSON string
+                        try:
+                            import json
 
-        # Write the image data using the OME-Zarr writer
-        write_image(
-            image=image_data,
-            group=store,
-            axes=axes,
-            chunks=chunks,
-            compression="zstd",
-            compression_opts={"level": 3},
-        )
+                            tiff_metadata[key] = json.dumps(value)
+                        except (ValueError, TypeError):
+                            pass
+            except (ValueError, FileNotFoundError) as e:
+                print(f"Warning: Error processing metadata for TIFF: {str(e)}")
 
-        # Add custom metadata
-        root = zarr.group(store)
-        if "omero" not in root:
-            root.create_group("omero")
+            # Save with metadata, resolution, and compression
+            save_args = {"compression": "zstd", "metadata": tiff_metadata}
 
-        omero_metadata = root["omero"]
-        omero_metadata.attrs["version"] = "0.4"
+            # Add resolution parameters if available
+            if resolution is not None:
+                save_args["resolution"] = resolution
 
-        return output_path
+            if resolution_unit is not None:
+                save_args["resolutionunit"] = resolution_unit
+
+            # Add ImageJ-specific metadata for better compatibility
+            if scale_x is not None and scale_y is not None:
+                imagej_metadata = {}
+                save_args["imagej"] = True
+
+                # Add pixel spacing for ImageJ
+                if "scale_z" in metadata and metadata["scale_z"] is not None:
+                    imagej_metadata["spacing"] = metadata["scale_z"]
+
+                tiff_metadata["unit"] = "um"  # Specify microns as the unit
+
+            tifffile.imwrite(output_path, image_data, **save_args)
+            print(f"Saved TIFF file with metadata: {output_path}")
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error in _save_tif: {str(e)}")
+            # Try a last resort, basic save without any options
+            tifffile.imwrite(output_path, image_data)
+            print(f"Saved TIFF file with fallback method: {output_path}")
+
+    def _save_zarr(
+        self, image_data: np.ndarray, output_path: str, metadata: dict = None
+    ):
+        """Save image data as OME-Zarr format with optional metadata."""
+        try:
+            # Determine optimal chunk size
+            target_chunk_size = 1024 * 1024  # 1MB
+            item_size = image_data.itemsize
+            chunks = self._calculate_chunks(
+                image_data.shape, target_chunk_size, item_size
+            )
+
+            # Determine appropriate axes based on dimensions
+            ndim = len(image_data.shape)
+            default_axes = "TCZYX"
+            axes = (
+                default_axes[-ndim:]
+                if ndim <= 5
+                else "".join([f"D{i}" for i in range(ndim)])
+            )
+
+            # Create the zarr store
+            store = zarr.DirectoryStore(output_path)
+
+            # Set up transformations if possible
+            coordinate_transformations = None
+            if metadata:
+                try:
+                    # Extract scale information if present
+                    scales = []
+                    for _i, ax in enumerate(axes):
+                        scale = 1.0  # Default scale
+
+                        # Try to find scale for this axis
+                        scale_key = f"scale_{ax.lower()}"
+                        if scale_key in metadata:
+                            try:
+                                scale_value = float(metadata[scale_key])
+                                if scale_value > 0:  # Only use valid values
+                                    scale = scale_value
+                            except (ValueError, TypeError):
+                                pass
+
+                        scales.append(scale)
+
+                    # Only create transformations if we have non-default scales
+                    if any(s != 1.0 for s in scales):
+                        coordinate_transformations = [
+                            {"type": "scale", "scale": scales}
+                        ]
+                except (ValueError, FileNotFoundError) as e:
+                    print(
+                        f"Warning: Could not process coordinate transformations: {str(e)}"
+                    )
+                    coordinate_transformations = None
+
+            # Write the image data using the OME-Zarr writer
+            write_options = {
+                "image": image_data,
+                "group": store,
+                "axes": axes,
+                "chunks": chunks,
+                "compression": "zstd",
+                "compression_opts": {"level": 3},
+            }
+
+            # Add transformations if available
+            if coordinate_transformations:
+                write_options["coordinate_transformations"] = (
+                    coordinate_transformations
+                )
+
+            write_image(**write_options)
+            print(f"Saved OME-Zarr image data: {output_path}")
+
+            # Try to add metadata
+            if metadata:
+                try:
+                    # Access the root group
+                    root = zarr.group(store)
+
+                    # Add OMERO metadata
+                    if "omero" not in root:
+                        root.create_group("omero")
+                    omero_metadata = root["omero"]
+                    omero_metadata.attrs["version"] = "0.4"
+
+                    # Add original metadata in a separate group
+                    if "original_metadata" not in root:
+                        metadata_group = root.create_group("original_metadata")
+                    else:
+                        metadata_group = root["original_metadata"]
+
+                    # Add metadata as attributes, safely converting types
+                    for key, value in metadata.items():
+                        try:
+                            # Try to store directly if it's a simple type
+                            if isinstance(
+                                value, (str, int, float, bool, type(None))
+                            ):
+                                metadata_group.attrs[key] = value
+                            else:
+                                # Otherwise convert to string
+                                metadata_group.attrs[key] = str(value)
+                        except (ValueError, TypeError) as e:
+                            print(
+                                f"Warning: Could not store metadata key '{key}': {str(e)}"
+                            )
+
+                    print(f"Added metadata to OME-Zarr file: {output_path}")
+                except (ValueError, FileNotFoundError) as e:
+                    print(f"Warning: Could not add metadata to Zarr: {str(e)}")
+
+            return output_path
+        except Exception as e:
+            print(f"Error in _save_zarr: {str(e)}")
+            # For zarr, we don't have a simpler fallback method, so re-raise
+            raise
 
     def _calculate_chunks(self, shape, target_size, item_size):
         """Calculate appropriate chunk sizes for zarr storage"""
-        total_elements = np.prod(shape)
-        elements_per_chunk = target_size // item_size
+        try:
+            total_elements = np.prod(shape)
+            elements_per_chunk = target_size // item_size
 
-        chunk_shape = list(shape)
-        for i in reversed(range(len(chunk_shape))):
-            # Guard against division by zero
-            if total_elements > 0 and chunk_shape[i] > 0:
-                chunk_shape[i] = max(
-                    1,
-                    int(
-                        elements_per_chunk / (total_elements / chunk_shape[i])
-                    ),
-                )
-                break
+            chunk_shape = list(shape)
+            for i in reversed(range(len(chunk_shape))):
+                # Guard against division by zero
+                if total_elements > 0 and chunk_shape[i] > 0:
+                    chunk_shape[i] = max(
+                        1,
+                        int(
+                            elements_per_chunk
+                            / (total_elements / chunk_shape[i])
+                        ),
+                    )
+                    break
 
-        # Ensure chunks aren't larger than dimensions
-        for i in range(len(chunk_shape)):
-            chunk_shape[i] = min(chunk_shape[i], shape[i])
+            # Ensure chunks aren't larger than dimensions
+            for i in range(len(chunk_shape)):
+                chunk_shape[i] = min(chunk_shape[i], shape[i])
 
-        return tuple(chunk_shape)
+            return tuple(chunk_shape)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Warning: Error calculating chunks: {str(e)}")
+            # Return a default chunk size that's safe
+            return tuple(min(512, d) for d in shape)
 
 
 class MicroscopyImageConverterWidget(QWidget):
