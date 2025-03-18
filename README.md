@@ -42,6 +42,10 @@ You can find the installed plugin here:
 
 You might first want to batch convert microscopy image data. Currently, this plugin supports `.nd2, .lif, .ndpi, .czi`. After launching the file converter, you can scan a folder of your choice for microscopy image data. It will also detect series images that you can preview. Start by selecting an original image in the first column of the table. This allows you to preview or convert.
 
+![image](https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b)
+
+
+
 ### File inspector
 
 1. After opening `Plugins > T-MIDAS > File selector`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
