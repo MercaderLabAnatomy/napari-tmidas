@@ -6,8 +6,11 @@
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-tmidas)](https://napari-hub.org/plugins/napari-tmidas)
 <!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
+This Napari plugin allows you to perform batch image processing without a graphics processing unit (GPU). It will still be fast because computations will run in parallel on your central processing unit (CPU).
 
-The Tissue Microscopy Image Data Analysis Suite (short: T-MIDAS), is a collection of pipelines for batch image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful features. This is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
+This plugin provides you with a growing collection of pipelines for batch image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful features. 
+
+`napari-tmidas` is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ## Installation
 
