@@ -829,7 +829,12 @@ class ConversionWorker(QThread):
                 scale_y = metadata.get("scale_y")
                 # scale_unit = metadata.get("scale_unit")
 
-                if all([scale_x, scale_y, scale_x > 0, scale_y > 0]):
+                if (
+                    scale_x is not None
+                    and scale_y is not None
+                    and scale_x > 0
+                    and scale_y > 0
+                ):
                     # For TIFF, resolution is specified as pixels per resolution unit
                     # So we need to invert the scale (which is microns/pixel)
                     # Convert from microns/pixel to pixels/cm
