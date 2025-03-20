@@ -31,7 +31,7 @@ To install the latest development version:
 ### Dependencies
 For the File converter, we need some libraries to read some microscopy formats and to write ome-zarr:
 
-    pip install nd2 readlif tiffslide pylibCZIrw ome-zarr
+    pip install nd2 readlif tiffslide pylibCZIrw ome-zarr tqdm
 
 
 ## Usage
