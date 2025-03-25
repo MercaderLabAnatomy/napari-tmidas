@@ -1460,7 +1460,6 @@ class MicroscopyImageConverterWidget(QWidget):
 @magicgui(
     call_button="Start Microscopy Image Converter",
     layout="vertical",
-    label="Microscopy Image Converter",
 )
 def microscopy_converter(viewer: napari.Viewer):
     """
