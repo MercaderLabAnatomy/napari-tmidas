@@ -20,13 +20,13 @@ contributions:
       title: Load sample data from T-MIDAS
     - id: napari-tmidas._label_inspection # hyphen!
       python_name: napari_tmidas._label_inspection:label_inspector_widget # underscore!
-      title: Label inspector
+      title: Label Inspector
     - id: napari-tmidas.file_selector
       python_name: napari_tmidas._file_selector:napari_experimental_provide_dock_widget
-      title: File selector
+      title: Image Processing Functions
     - id: napari-tmidas._file_conversion
       python_name: napari_tmidas._file_conversion:napari_experimental_provide_dock_widget
-      title: File converter
+      title: Microscopy Image Converter
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
