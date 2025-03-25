@@ -284,6 +284,7 @@ class ParameterWidget(QWidget):
         "value": "",
     },
     input_suffix={"label": "File Suffix (Example: .tif)", "value": ""},
+    label="Batch Image Processing",
 )
 def file_selector(
     viewer: napari.Viewer, input_folder: str, input_suffix: str = ".tif"
