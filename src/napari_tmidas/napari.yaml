@@ -23,7 +23,7 @@ contributions:
       title: Label Inspector
     - id: napari-tmidas.file_selector
       python_name: napari_tmidas._file_selector:napari_experimental_provide_dock_widget
-      title: Image Processing Functions
+      title: Batch Image Processing
     - id: napari-tmidas._file_conversion
       python_name: napari_tmidas._file_conversion:napari_experimental_provide_dock_widget
       title: Microscopy Image Converter
