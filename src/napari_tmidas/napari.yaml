@@ -44,8 +44,8 @@ contributions:
       key: unique_id.1
   widgets:
     - command: napari-tmidas.file_selector
-      display_name: File selector
+      display_name: Batch Image Processing
     - command: napari-tmidas._label_inspection
-      display_name: Label inspector
+      display_name: Batch Label inspection
     - command: napari-tmidas._file_conversion
-      display_name: File converter
+      display_name: Batch Microscopy Image Conversion
