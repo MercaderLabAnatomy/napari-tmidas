@@ -27,6 +27,9 @@ contributions:
     - id: napari-tmidas._file_conversion
       python_name: napari_tmidas._file_conversion:napari_experimental_provide_dock_widget
       title: Microscopy Image Converter
+    - id: napari-tmidas._crop_anything
+      python_name: napari_tmidas._crop_anything:batch_crop_anything_widget
+      title: Batch Crop Anything
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
@@ -49,3 +52,5 @@ contributions:
       display_name: Batch Label inspection
     - command: napari-tmidas._file_conversion
       display_name: Batch Microscopy Image Conversion
+    - command: napari-tmidas._crop_anything
+      display_name: Batch Crop Anything
