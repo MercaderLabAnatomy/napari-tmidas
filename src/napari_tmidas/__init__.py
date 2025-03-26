@@ -16,4 +16,5 @@ __all__ = (
     "make_sample_data",
     "file_selector",
     "label_inspector_widget",
+    "batch_crop_anything_widget",
 )
