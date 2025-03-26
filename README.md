@@ -29,9 +29,14 @@ To install the latest development version:
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
 ### Dependencies
-For the File converter, we need some libraries to read some microscopy formats and to write ome-zarr:
+For the Batch Microscopy Image Conversion pipeline, we need some libraries to read some microscopy formats and to write ome-zarr:
 
     pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari ome-zarr
+
+For the Batch Crop Anything pipeline, we need to install MobileSAM and its dependencies:
+
+    pip install git+https://github.com/ChaoningZhang/MobileSAM.git
+    pip install torch torchvision timm opencv-python
 
 
 ## Usage
@@ -41,7 +46,7 @@ You can find the installed plugin here:
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
 
 
-### File converter
+### Batch Microscopy Image Conversion
 
 You might first want to batch convert microscopy image data. Currently, this plugin supports `.nd2, .lif, .ndpi, .czi` and acquifer data. After launching the file converter, you can scan a folder of your choice for microscopy image data. It will also detect series images that you can preview. Start by selecting an original image in the first column of the table. This allows you to preview or convert.
 
@@ -49,7 +54,7 @@ You might first want to batch convert microscopy image data. Currently, this plu
 
 
 
-### File inspector
+### Batch File Processing
 
 1. After opening `Plugins > T-MIDAS > File selector`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
 
@@ -69,11 +74,15 @@ You might first want to batch convert microscopy image data. Currently, this plu
 
 Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
 
-### Label inspector
+### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Label inspector`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
+### Batch Crop Anything
+This pipeline combines Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping objects from images.
+
+![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)
 
 
 ## Contributing
