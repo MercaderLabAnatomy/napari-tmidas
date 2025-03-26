@@ -131,6 +131,11 @@ class SeriesDetailWidget(QWidget):
         self.series_selector = QComboBox()
         layout.addWidget(self.series_selector)
 
+        # Add "Export All Series" checkbox
+        self.export_all_checkbox = QCheckBox("Export All Series")
+        self.export_all_checkbox.toggled.connect(self.toggle_export_all)
+        layout.addWidget(self.export_all_checkbox)
+
         # Connect series selector
         self.series_selector.currentIndexChanged.connect(self.series_selected)
 
@@ -143,10 +148,29 @@ class SeriesDetailWidget(QWidget):
         self.info_label = QLabel("")
         layout.addWidget(self.info_label)
 
+    def toggle_export_all(self, checked):
+        """Handle toggle of export all checkbox"""
+        if self.current_file and checked:
+            # Disable series selector when exporting all
+            self.series_selector.setEnabled(not checked)
+            # Update parent with export all setting
+            self.parent.set_export_all_series(self.current_file, checked)
+        elif self.current_file:
+            # Re-enable series selector
+            self.series_selector.setEnabled(True)
+            # Update parent with currently selected series only
+            self.series_selected(self.series_selector.currentIndex())
+            # Update parent to not export all
+            self.parent.set_export_all_series(self.current_file, False)
+
     def set_file(self, filepath: str):
         """Set the current file and update series list"""
         self.current_file = filepath
         self.series_selector.clear()
+
+        # Reset export all checkbox
+        self.export_all_checkbox.setChecked(False)
+        self.series_selector.setEnabled(True)
 
         # Try to get series information
         file_loader = self.parent.get_file_loader(filepath)
@@ -311,11 +335,6 @@ class LIFLoader(FormatLoader):
                 f"Warning: {missing_frames} frames were missing and filled with zeros."
             )
 
-        # Squeeze out singleton dimensions but preserve the order of remaining dimensions
-        # This can change dimension ordering if dimensions of size 1 are eliminated
-        # For example, if timepoints=1, the resulting array will have dimensions (z_stacks, channels, y_dim, x_dim)
-        series_data = np.squeeze(series_data)
-
         return series_data
 
     @staticmethod
@@ -323,15 +342,22 @@ class LIFLoader(FormatLoader):
         try:
             lif_file = LifFile(filepath)
             image = lif_file.get_image(series_index)
+            axes = "".join(image.dims._fields).upper()
+            channels = image.channels
+            if channels > 1:
+                # add C to end of string
+                axes += "C"
 
             metadata = {
-                "channels": image.channels,
-                "z_stacks": image.nz,
-                "timepoints": image.nt,
-                "dimensions": image.dims,
-                "name": image.name,  # Access image name directly
-                "scale": image.scale,  # Add scale
+                # "channels": image.channels,
+                # "z_stacks": image.nz,
+                # "timepoints": image.nt,
+                "axes": "TZCYX",
+                "unit": "um",
+                "resolution": image.scale[:2],
             }
+            if image.scale[2] is not None:
+                metadata["spacing"] = image.scale[2]
             return metadata
         except (ValueError, FileNotFoundError):
             return {}
@@ -366,20 +392,23 @@ class ND2Loader(FormatLoader):
 
         with nd2.ND2File(filepath) as nd2_file:
             return {
-                # .sizes         # {'T': 10, 'C': 2, 'Y': 256, 'X': 256}
-                "channels": nd2_file.sizes.get("C", 1),
-                "shape": nd2_file.shape,
-                "pixel_size": nd2_file.voxel_size,
+                "axes": "".join(nd2_file.sizes.keys()),
+                "resolution": (
+                    1 / nd2_file.voxel_size().x,
+                    1 / nd2_file.voxel_size().y,
+                ),
+                "unit": "um",
+                "spacing": 1 / nd2_file.voxel_size().z,
             }
 
 
 class TIFFSlideLoader(FormatLoader):
-    """Loader for whole slide TIFF images (NDPI, SVS, etc.)"""
+    """Loader for whole slide TIFF images (NDPI, etc.)"""
 
     @staticmethod
     def can_load(filepath: str) -> bool:
         ext = filepath.lower()
-        return ext.endswith((".ndpi", ".svs", ".tiff", ".tif"))
+        return ext.endswith(".ndpi")
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
@@ -433,9 +462,12 @@ class TIFFSlideLoader(FormatLoader):
                     return {}
 
                 return {
-                    "dimensions": slide.level_dimensions[series_index],
-                    "downsample": slide.level_downsamples[series_index],
-                    "properties": dict(slide.properties),
+                    "axes": slide.properties["tiffslide.series-axes"],
+                    "resolution": (
+                        slide.properties["tiffslide.mpp-x"],
+                        slide.properties["tiffslide.mpp-y"],
+                    ),
+                    "unit": "um",
                 }
         except (ValueError, FileNotFoundError):
             # Fall back to tifffile
@@ -517,80 +549,36 @@ class CZILoader(FormatLoader):
                 if series_index < 0 or series_index >= len(scenes):
                     return {}
 
-                scene_keys = list(scenes.keys())
-                scene_index = scene_keys[series_index]
-                scene = scenes[scene_index]
+                # scene_keys = list(scenes.keys())
+                # scene_index = scene_keys[series_index]
+                # scene = scenes[scene_index]
 
                 dims = czi_file.total_bounding_box
 
                 # Extract the raw metadata as an XML string
                 metadata_xml = czi_file.raw_metadata
 
-                metadata = {
-                    "scene_index": scene_index,
-                    "scene_rect": (scene[0], scene[1], scene[2], scene[3]),
-                }
-
-                # Add scale information
+                # Initialize metadata with default values
                 try:
-                    scale_x = CZILoader.get_scales(metadata_xml, "X")
-                    scale_y = CZILoader.get_scales(metadata_xml, "Y")
+                    # scales are in meters, convert to microns
+                    scale_x = CZILoader.get_scales(metadata_xml, "X") * 1e6
+                    scale_y = CZILoader.get_scales(metadata_xml, "Y") * 1e6
 
-                    metadata.update(
-                        {
-                            "scale_x": scale_x,
-                            "scale_y": scale_y,
-                            "scale_unit": "microns",
-                        }
-                    )
+                    filtered_dims = {
+                        k: v for k, v in dims.items() if v != (0, 1)
+                    }
+                    axes = "".join(filtered_dims.keys())
+                    metadata = {
+                        "axes": axes,
+                        "resolution": (scale_x, scale_y),
+                        "unit": "um",
+                    }
 
                     if dims["Z"] != (0, 1):
                         scale_z = CZILoader.get_scales(metadata_xml, "Z")
-                        metadata["scale_z"] = scale_z
+                        metadata["spacing"] = scale_z
                 except ValueError as e:
                     print(f"Error getting scale metadata: {e}")
-
-                # metadata = {
-                #     "scene_index": scene_index,
-                #     "scene_rect": (scene[0], scene[1], scene[2], scene[3]),
-                # }
-
-                # try:
-
-                #     metadata.update(
-                #         {
-                #             "dimensions": czi_file.total_bounding_box,
-                #             # "axes": czi_file.axes,
-                #             # "shape": czi_file.shape,
-                #             #"size": czi_file.size,
-                #             "pixel_types": czi_file.pixel_types,
-                #         }
-                #     )
-                # except (ValueError, FileNotFoundError) as e:
-                #     print(f"Error getting full metadata: {e}")
-
-                # try:
-                #     metadata["channel_count"] = czi_file.get_dims_channels()[0]
-                #     metadata["channel_names"] = czi_file.channel_names
-                # except (ValueError, FileNotFoundError) as e:
-                #     print(f"Error getting channel metadata: {e}")
-                # try:
-                #     metadata.update(
-                #         {
-                #             "scale_x": czi_file.scale_x,
-                #             "scale_y": czi_file.scale_y,
-                #             "scale_z": czi_file.scale_z,
-                #             "scale_unit": czi_file.scale_unit,
-                #         }
-                #     )
-                # except (ValueError, FileNotFoundError) as e:
-                #     print(f"Error getting scale metadata: {e}")
-                # try:
-                #     xml_metadata = czi_file.meta
-                #     if xml_metadata:
-                #         metadata["xml_metadata"] = xml_metadata
-                # except (ValueError, FileNotFoundError) as e:
-                #     print(f"Error getting XML metadata: {e}")
 
                 return metadata
 
@@ -625,6 +613,188 @@ class CZILoader(FormatLoader):
             return {}
 
 
+class AcquiferLoader(FormatLoader):
+    """Loader for Acquifer datasets using the acquifer_napari_plugin utility"""
+
+    # Cache for loaded datasets to avoid reloading the same directory multiple times
+    _dataset_cache = {}  # {directory_path: xarray_dataset}
+
+    @staticmethod
+    def can_load(filepath: str) -> bool:
+        """
+        Check if this is a directory that can be loaded as an Acquifer dataset
+        """
+        if not os.path.isdir(filepath):
+            return False
+
+        try:
+
+            # Check if directory contains files
+            image_files = []
+            for root, _, files in os.walk(filepath):
+                for file in files:
+                    if file.lower().endswith(
+                        (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+                    ):
+                        image_files.append(os.path.join(root, file))
+
+            return bool(image_files)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error checking Acquifer dataset: {e}")
+            return False
+
+    @staticmethod
+    def _load_dataset(directory):
+        """Load the dataset using array_from_directory and cache it"""
+        if directory in AcquiferLoader._dataset_cache:
+            return AcquiferLoader._dataset_cache[directory]
+
+        try:
+            from acquifer_napari_plugin.utils import array_from_directory
+
+            # Check if directory contains files before trying to load
+            image_files = []
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    if file.lower().endswith(
+                        (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+                    ):
+                        image_files.append(os.path.join(root, file))
+
+            if not image_files:
+                raise ValueError(
+                    f"No image files found in directory: {directory}"
+                )
+
+            dataset = array_from_directory(directory)
+            AcquiferLoader._dataset_cache[directory] = dataset
+            return dataset
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error loading Acquifer dataset: {e}")
+            raise ValueError(f"Failed to load Acquifer dataset: {e}") from e
+
+    @staticmethod
+    def get_series_count(filepath: str) -> int:
+        """
+        Return the number of wells as series count
+        """
+        try:
+            dataset = AcquiferLoader._load_dataset(filepath)
+
+            # Check for Well dimension
+            if "Well" in dataset.dims:
+                return len(dataset.coords["Well"])
+            else:
+                # Single series for the whole dataset
+                return 1
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error getting series count: {e}")
+            return 0
+
+    @staticmethod
+    def load_series(filepath: str, series_index: int) -> np.ndarray:
+        """
+        Load a specific well as a series
+        """
+        try:
+            dataset = AcquiferLoader._load_dataset(filepath)
+
+            # If the dataset has a Well dimension, select the specific well
+            if "Well" in dataset.dims:
+                if series_index < 0 or series_index >= len(
+                    dataset.coords["Well"]
+                ):
+                    raise ValueError(
+                        f"Series index {series_index} out of range"
+                    )
+
+                # Get the well value at this index
+                well_value = dataset.coords["Well"].values[series_index]
+
+                # Select the data for this well
+                well_data = dataset.sel(Well=well_value)
+                # squeeze out singleton dimensions
+                well_data = well_data.squeeze()
+                # Convert to numpy array and return
+                return well_data.values
+            else:
+                # No Well dimension, return the entire dataset
+                return dataset.values
+
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error loading series: {e}")
+            import traceback
+
+            traceback.print_exc()
+            raise ValueError(f"Failed to load series: {e}") from e
+
+    @staticmethod
+    def get_metadata(filepath: str, series_index: int) -> Dict:
+        """
+        Extract metadata for a specific well
+        """
+        try:
+            dataset = AcquiferLoader._load_dataset(filepath)
+
+            # Initialize with default values
+            axes = ""
+            resolution = (1.0, 1.0)  # Default resolution
+
+            if "Well" in dataset.dims:
+                well_value = dataset.coords["Well"].values[series_index]
+                well_data = dataset.sel(Well=well_value)
+                well_data = well_data.squeeze()  # remove singleton dimensions
+
+                # Get dimensions
+                dims = list(well_data.dims)
+                dims = [
+                    item.replace("Channel", "C").replace("Time", "T")
+                    for item in dims
+                ]
+                axes = "".join(dims)
+
+                # Try to get the first image file in the directory for metadata
+                image_files = []
+                for root, _, files in os.walk(filepath):
+                    for file in files:
+                        if file.lower().endswith((".tif", ".tiff")):
+                            image_files.append(os.path.join(root, file))
+
+                if image_files:
+                    sample_file = image_files[0]
+                    try:
+                        # acquifer_metadata.getPixelSize_um(sample_file) is deprecated, get values after --PX in filename
+                        pattern = re.compile(r"--PX(\d+)")
+                        match = pattern.search(sample_file)
+                        if match:
+                            pixel_size = float(match.group(1)) * 10**-4
+
+                        resolution = (pixel_size, pixel_size)
+                    except (ValueError, FileNotFoundError) as e:
+                        print(f"Warning: Could not get pixel size: {e}")
+            else:
+                # If no Well dimension, use dimensions from the dataset
+                dims = list(dataset.dims)
+                dims = [
+                    item.replace("Channel", "C").replace("Time", "T")
+                    for item in dims
+                ]
+                axes = "".join(dims)
+
+            metadata = {
+                "axes": axes,
+                "resolution": resolution,
+                "unit": "um",
+                "filepath": filepath,
+            }
+            print(f"Extracted metadata: {metadata}")
+            return metadata
+
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error getting metadata: {e}")
+            return {}
+
+
 class ScanFolderWorker(QThread):
     """Worker thread for scanning folders"""
 
@@ -640,22 +810,37 @@ class ScanFolderWorker(QThread):
     def run(self):
         try:
             found_files = []
-            file_count = 0
+            all_items = []
 
-            # First count total files to scan for progress reporting
-            for _root, _, files in os.walk(self.folder):
-                file_count += len(files)
+            # Get both files and potential Acquifer directories
+            include_directories = "acquifer" in [
+                f.lower() for f in self.filters
+            ]
 
-            # Now scan for matching files
-            scanned = 0
-            for root, _, files in os.walk(self.folder):
+            # Count items to scan
+            for root, dirs, files in os.walk(self.folder):
                 for file in files:
-                    scanned += 1
-                    if scanned % 10 == 0:  # Update progress every 10 files
-                        self.progress.emit(scanned, file_count)
+                    if any(
+                        file.lower().endswith(f)
+                        for f in self.filters
+                        if f.lower() != "acquifer"
+                    ):
+                        all_items.append(os.path.join(root, file))
 
-                    if any(file.lower().endswith(f) for f in self.filters):
-                        found_files.append(os.path.join(root, file))
+                # Add potential Acquifer directories
+                if include_directories:
+                    for dir_name in dirs:
+                        dir_path = os.path.join(root, dir_name)
+                        if AcquiferLoader.can_load(dir_path):
+                            all_items.append(dir_path)
+
+            # Scan all items
+            total_items = len(all_items)
+            for i, item_path in enumerate(all_items):
+                if i % 10 == 0:
+                    self.progress.emit(i, total_items)
+
+                found_files.append(item_path)
 
             self.finished.emit(found_files)
         except (ValueError, FileNotFoundError) as e:
@@ -812,87 +997,83 @@ class ConversionWorker(QThread):
     ):
         """Save image data as TIFF with optional metadata"""
         try:
-            # For basic save without metadata
+            # Basic save without metadata
             if metadata is None:
                 tifffile.imwrite(output_path, image_data, compression="zstd")
-                print(f"Saved TIFF file without metadata: {output_path}")
                 return
 
-            # Convert metadata to TIFF-compatible format
-            tiff_metadata = {}
+            # Always preserve resolution if it exists
             resolution = None
-            resolution_unit = None
+            if "resolution" in metadata:
+                resolution = tuple(float(r) for r in metadata["resolution"])
 
-            try:
-                # Extract resolution information for TIFF tags
-                scale_x = metadata.get("scale_x")
-                scale_y = metadata.get("scale_y")
-                # scale_unit = metadata.get("scale_unit")
+            axes = metadata.get("axes", "")
 
-                if (
-                    scale_x is not None
-                    and scale_y is not None
-                    and scale_x > 0
-                    and scale_y > 0
-                ):
-                    # For TIFF, resolution is specified as pixels per resolution unit
-                    # So we need to invert the scale (which is microns/pixel)
-                    # Convert from microns/pixel to pixels/cm
-                    x_res = 10000 / scale_x  # 10000 microns = 1 cm
-                    y_res = 10000 / scale_y
-                    resolution = (x_res, y_res)
-                    resolution_unit = "CENTIMETER"
+            # Handle different dimension cases appropriately
+            if len(image_data.shape) > 2 and any(ax in axes for ax in "ZC"):
+                # Hyperstack case (3D+ with channels or z-slices)
+                imagej_order = "TZCYX"
 
-                # Include all other metadata
-                for key, value in metadata.items():
-                    if (
-                        isinstance(value, (str, int, float, bool))
-                        or isinstance(value, (list, tuple))
-                        and all(
-                            isinstance(x, (str, int, float, bool))
-                            for x in value
+                if axes != imagej_order:
+                    print(
+                        f"Original axes: {axes}, Target order: {imagej_order}"
+                    )
+
+                    # Filter to valid axes
+                    valid_axes = [ax for ax in axes if ax in imagej_order]
+                    if len(valid_axes) < len(axes):
+                        print(f"Dropping axes: {set(axes)-set(imagej_order)}")
+                        source_idx = [
+                            i
+                            for i, ax in enumerate(axes)
+                            if ax in imagej_order
+                        ]
+                        image_data = np.moveaxis(
+                            image_data, source_idx, range(len(valid_axes))
                         )
-                    ):
-                        tiff_metadata[key] = value
-                    elif isinstance(value, dict):
-                        # For dictionaries, convert to a simple JSON string
-                        try:
-                            import json
+                        axes = "".join(valid_axes)
 
-                            tiff_metadata[key] = json.dumps(value)
-                        except (ValueError, TypeError):
-                            pass
-            except (ValueError, FileNotFoundError) as e:
-                print(f"Warning: Error processing metadata for TIFF: {str(e)}")
+                    # Add missing dims
+                    for ax in reversed(imagej_order):
+                        if ax not in axes:
+                            print(f"Adding {ax} dimension")
+                            axes = ax + axes
+                            image_data = np.expand_dims(image_data, axis=0)
 
-            # Save with metadata, resolution, and compression
-            save_args = {"compression": "zstd", "metadata": tiff_metadata}
+                    # Final reordering
+                    source_idx = [axes.index(ax) for ax in imagej_order]
+                    image_data = np.moveaxis(
+                        image_data, source_idx, range(len(imagej_order))
+                    )
+                    metadata["axes"] = imagej_order
 
-            # Add resolution parameters if available
-            if resolution is not None:
-                save_args["resolution"] = resolution
+                tifffile.imwrite(
+                    output_path,
+                    image_data,
+                    metadata=metadata,
+                    resolution=resolution,
+                    imagej=True,
+                    compression="zstd",
+                )
+            else:
+                # 2D case - save without hyperstack metadata but keep resolution
+                save_metadata = (
+                    {"resolution": metadata["resolution"]}
+                    if "resolution" in metadata
+                    else None
+                )
+                tifffile.imwrite(
+                    output_path,
+                    image_data,
+                    metadata=save_metadata,
+                    resolution=resolution,
+                    imagej=False,
+                    compression="zstd",
+                )
 
-            if resolution_unit is not None:
-                save_args["resolutionunit"] = resolution_unit
-
-            # Add ImageJ-specific metadata for better compatibility
-            if scale_x is not None and scale_y is not None:
-                imagej_metadata = {}
-                save_args["imagej"] = True
-
-                # Add pixel spacing for ImageJ
-                if "scale_z" in metadata and metadata["scale_z"] is not None:
-                    imagej_metadata["spacing"] = metadata["scale_z"]
-
-                tiff_metadata["unit"] = "um"  # Specify microns as the unit
-
-            tifffile.imwrite(output_path, image_data, **save_args)
-            print(f"Saved TIFF file with metadata: {output_path}")
         except (ValueError, FileNotFoundError) as e:
-            print(f"Error in _save_tif: {str(e)}")
-            # Try a last resort, basic save without any options
+            print(f"Error: {str(e)}")
             tifffile.imwrite(output_path, image_data)
-            print(f"Saved TIFF file with fallback method: {output_path}")
 
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
@@ -1008,7 +1189,7 @@ class ConversionWorker(QThread):
                     print(f"Warning: Could not add metadata to Zarr: {str(e)}")
 
             return output_path
-        except Exception as e:
+        except (ValueError, FileNotFoundError) as e:
             print(f"Error in _save_zarr: {str(e)}")
             # For zarr, we don't have a simpler fallback method, so re-raise
             raise
@@ -1051,10 +1232,19 @@ class MicroscopyImageConverterWidget(QWidget):
         self.viewer = viewer
 
         # Register format loaders
-        self.loaders = [LIFLoader, ND2Loader, TIFFSlideLoader, CZILoader]
+        self.loaders = [
+            LIFLoader,
+            ND2Loader,
+            TIFFSlideLoader,
+            CZILoader,
+            AcquiferLoader,
+        ]
 
         # Selected series for conversion
         self.selected_series = {}  # {filepath: series_index}
+
+        # Track files that should export all series
+        self.export_all_series = {}  # {filepath: boolean}
 
         # Working threads
         self.scan_worker = None
@@ -1081,9 +1271,9 @@ class MicroscopyImageConverterWidget(QWidget):
         filter_label = QLabel("File Filter:")
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText(
-            ".lif, .nd2, .ndpi, .czi (comma separated)"
+            ".lif, .nd2, .ndpi, .czi, acquifer (comma separated)"
         )
-        self.filter_edit.setText(".lif,.nd2,.ndpi,.czi")
+        self.filter_edit.setText(".lif,.nd2,.ndpi,.czi, acquifer")
         scan_button = QPushButton("Scan Folder")
         scan_button.clicked.connect(self.scan_folder)
 
@@ -1293,7 +1483,9 @@ class MicroscopyImageConverterWidget(QWidget):
         QMessageBox.critical(self, "Error", error_message)
 
     def get_file_type(self, filepath: str) -> str:
-        """Determine the file type based on extension"""
+        """Determine the file type based on extension or directory type"""
+        if os.path.isdir(filepath) and AcquiferLoader.can_load(filepath):
+            return "Acquifer"
         ext = filepath.lower()
         if ext.endswith(".lif"):
             return "LIF"
@@ -1303,8 +1495,6 @@ class MicroscopyImageConverterWidget(QWidget):
             return "Slide"
         elif ext.endswith(".czi"):
             return "CZI"
-        elif ext.endswith((".tif", ".tiff")):
-            return "TIFF"
         return "Unknown"
 
     def get_file_loader(self, filepath: str) -> Optional[FormatLoader]:
@@ -1321,6 +1511,15 @@ class MicroscopyImageConverterWidget(QWidget):
     def set_selected_series(self, filepath: str, series_index: int):
         """Set the selected series for a file"""
         self.selected_series[filepath] = series_index
+
+    def set_export_all_series(self, filepath: str, export_all: bool):
+        """Set whether to export all series for a file"""
+        self.export_all_series[filepath] = export_all
+
+        # If exporting all, we still need a default series in selected_series
+        # for files that are marked for export all
+        if export_all and filepath not in self.selected_series:
+            self.selected_series[filepath] = 0
 
     def load_image(self, filepath: str):
         """Load an image file into the viewer"""
@@ -1386,10 +1585,35 @@ class MicroscopyImageConverterWidget(QWidget):
             return
 
         # Create files to convert list
-        files_to_convert = [
-            (filepath, series_index)
-            for filepath, series_index in self.selected_series.items()
-        ]
+        files_to_convert = []
+
+        for filepath, series_index in self.selected_series.items():
+            # Check if we should export all series for this file
+            if self.export_all_series.get(filepath, False):
+                # Get the number of series for this file
+                loader = self.get_file_loader(filepath)
+                if loader:
+                    try:
+                        series_count = loader.get_series_count(filepath)
+                        # Add all series for this file
+                        for i in range(series_count):
+                            files_to_convert.append((filepath, i))
+                    except (ValueError, FileNotFoundError) as e:
+                        self.status_label.setText(
+                            f"Error getting series count: {str(e)}"
+                        )
+                        QMessageBox.warning(
+                            self,
+                            "Error",
+                            f"Could not get series count for {Path(filepath).name}: {str(e)}",
+                        )
+            else:
+                # Just add the selected series
+                files_to_convert.append((filepath, series_index))
+
+        if not files_to_convert:
+            self.status_label.setText("No valid files to convert")
+            return
 
         # Set up and start the conversion worker thread
         self.conversion_worker = ConversionWorker(
@@ -1413,7 +1637,7 @@ class MicroscopyImageConverterWidget(QWidget):
         self.conversion_progress.setValue(0)
         self.cancel_button.setVisible(True)
         self.status_label.setText(
-            f"Starting conversion of {len(files_to_convert)} files..."
+            f"Starting conversion of {len(files_to_convert)} files/series..."
         )
 
         # Start conversion
