@@ -8,7 +8,7 @@
 <!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
 This Napari plugin allows you to perform batch image processing without a graphics processing unit (GPU). It will still be fast because computations will run in parallel on your central processing unit (CPU).
 
-This plugin provides you with a growing collection of pipelines for batch image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful features. 
+This plugin provides you with a growing collection of pipelines for batch image preprocessing, segmentation, regions-of-interest (ROI) analysis and other useful features.
 
 `napari-tmidas` is a work in progress (WIP) and an evolutionary step away from the [terminal / command-line version of T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
@@ -16,7 +16,7 @@ This plugin provides you with a growing collection of pipelines for batch image 
 
 First install Napari in a virtual environment:
 
-    mamba create -y -n napari-tmidas -c conda-forge python=3.11
+    mamba create -y -n napari-tmidas -c conda-forge python=3.11 tqdm
     mamba activate napari-tmidas
     python -m pip install "napari[all]"
 
@@ -31,7 +31,7 @@ To install the latest development version:
 ### Dependencies
 For the File converter, we need some libraries to read some microscopy formats and to write ome-zarr:
 
-    pip install nd2 readlif tiffslide pylibCZIrw ome-zarr tqdm
+    pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari ome-zarr
 
 
 ## Usage
@@ -43,7 +43,7 @@ You can find the installed plugin here:
 
 ### File converter
 
-You might first want to batch convert microscopy image data. Currently, this plugin supports `.nd2, .lif, .ndpi, .czi`. After launching the file converter, you can scan a folder of your choice for microscopy image data. It will also detect series images that you can preview. Start by selecting an original image in the first column of the table. This allows you to preview or convert.
+You might first want to batch convert microscopy image data. Currently, this plugin supports `.nd2, .lif, .ndpi, .czi` and acquifer data. After launching the file converter, you can scan a folder of your choice for microscopy image data. It will also detect series images that you can preview. Start by selecting an original image in the first column of the table. This allows you to preview or convert.
 
 ![image](https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b)
 
