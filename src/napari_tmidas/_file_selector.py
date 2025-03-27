@@ -8,11 +8,9 @@ custom widget for displaying and processing the selected files.
 New functions can be added to the processing registry by decorating them with
 `@register_batch_processing_function`. Each function should accept an image array
 as the first argument, and any additional keyword arguments for parameters.
-
 """
 
 import concurrent.futures
-import contextlib
 import os
 import sys
 from typing import Any, Dict, List
@@ -71,6 +69,12 @@ class ProcessedFilesTableWidget(QTableWidget):
         self.current_original_image = None
         self.current_processed_image = None
 
+        # For tracking multi-output files
+        self.multi_output_files = {}
+
+        # Connect the cellDoubleClicked signal
+        self.cellDoubleClicked.connect(self._handle_cell_double_click)
+
     def add_initial_files(self, file_list: List[str]):
         """
         Add initial files to the table
@@ -78,6 +82,7 @@ class ProcessedFilesTableWidget(QTableWidget):
         # Clear existing rows
         self.setRowCount(0)
         self.file_pairs.clear()
+        self.multi_output_files.clear()
 
         # Add files
         for filepath in file_list:
@@ -100,65 +105,146 @@ class ProcessedFilesTableWidget(QTableWidget):
                 "row": row,
             }
 
-    def update_processed_files(self, processing_info: dict):
+    def update_processed_files(self, processing_info: List[Dict]):
         """
         Update table with processed files
 
-        processing_info: {
-            'original_file': original filepath,
-            'processed_file': processed filepath
-        }
+        Args:
+            processing_info: List of dictionaries containing:
+                {
+                    'original_file': original filepath,
+                    'processed_file': processed filepath (single output)
+                    - OR -
+                    'processed_files': list of processed filepaths (multi-output)
+                }
         """
         for item in processing_info:
             original_file = item["original_file"]
-            processed_file = item["processed_file"]
 
-            # Find the corresponding row
-            if original_file in self.file_pairs:
-                row = self.file_pairs[original_file]["row"]
+            # Handle single processed file case
+            if "processed_file" in item:
+                processed_file = item["processed_file"]
 
-                # Update processed file column
-                processed_item = QTableWidgetItem(
-                    os.path.basename(processed_file)
-                )
-                processed_item.setData(Qt.UserRole, processed_file)
-                self.setItem(row, 1, processed_item)
+                # Find the corresponding row
+                if original_file in self.file_pairs:
+                    row = self.file_pairs[original_file]["row"]
 
-                # Update file pairs
-                self.file_pairs[original_file]["processed"] = processed_file
+                    # Create a single item with the processed file
+                    file_name = os.path.basename(processed_file)
+                    processed_item = QTableWidgetItem(file_name)
+                    processed_item.setData(Qt.UserRole, processed_file)
+                    processed_item.setToolTip("Double-click to view")
+                    self.setItem(row, 1, processed_item)
+
+                    # Update file pairs
+                    self.file_pairs[original_file][
+                        "processed"
+                    ] = processed_file
+
+            # Handle multi-file output case
+            elif "processed_files" in item and item["processed_files"]:
+                processed_files = item["processed_files"]
+
+                # Store all processed files for this original file
+                self.multi_output_files[original_file] = processed_files
+
+                # Find the corresponding row
+                if original_file in self.file_pairs:
+                    row = self.file_pairs[original_file]["row"]
+
+                    # Create a ComboBox for selecting outputs
+                    combo = QComboBox()
+                    for i, file_path in enumerate(processed_files):
+                        file_name = os.path.basename(file_path)
+                        combo.addItem(f"Channel {i}: {file_name}", file_path)
+
+                    # Connect the combo box to load the selected processed file
+                    combo.currentIndexChanged.connect(
+                        lambda idx, files=processed_files: self._load_processed_image(
+                            files[idx]
+                        )
+                    )
+
+                    # Add the ComboBox directly to the table cell
+                    self.setCellWidget(row, 1, combo)
+
+                    # Update file pairs with first file as default
+                    self.file_pairs[original_file]["processed"] = (
+                        processed_files[0]
+                    )
 
     def mousePressEvent(self, event):
         """
-        Load image when clicked
+        Handle mouse click events on the table
         """
         if event.button() == Qt.LeftButton:
+            # Get the item at the click position
             item = self.itemAt(event.pos())
-            if item:
+            column = self.columnAt(event.pos().x())
+
+            # Load original image when clicking on first column
+            if column == 0 and item:
                 filepath = item.data(Qt.UserRole)
                 if filepath:
-                    # Determine which column was clicked
-                    column = self.columnAt(event.pos().x())
-                    if column == 0:
-                        # Original image clicked
-                        self._load_original_image(filepath)
-                    elif column == 1 and filepath:
-                        # Processed image clicked
-                        self._load_processed_image(filepath)
+                    self._load_original_image(filepath)
+
+            # Second column is handled by the combo box for multi-output
+            # or by double-clicking for single output
 
         super().mousePressEvent(event)
+
+    def _handle_cell_double_click(self, row, column):
+        """
+        Handle double-click events on cells, particularly for single processed files
+        """
+        if column == 1:
+            item = self.item(row, column)
+            if (
+                item
+            ):  # This means it's a single processed file, not a combo box
+                filepath = item.data(Qt.UserRole)
+                if filepath:
+                    self._load_processed_image(filepath)
 
     def _load_original_image(self, filepath: str):
         """
         Load original image into viewer
         """
+        # Ensure filepath is valid
+        if not filepath or not os.path.exists(filepath):
+            print(f"Error: File does not exist: {filepath}")
+            self.viewer.status = f"Error: File not found: {filepath}"
+            return
+
         # Remove existing original layer if it exists
         if self.current_original_image is not None:
-            with contextlib.suppress(KeyError):
-                self.viewer.layers.remove(self.current_original_image)
+            try:
+                # Check if the layer is still in the viewer
+                if self.current_original_image in self.viewer.layers:
+                    self.viewer.layers.remove(self.current_original_image)
+                else:
+                    # If not found by reference, try by name
+                    layer_names = [layer.name for layer in self.viewer.layers]
+                    if self.current_original_image.name in layer_names:
+                        self.viewer.layers.remove(
+                            self.current_original_image.name
+                        )
+            except (KeyError, ValueError) as e:
+                print(
+                    f"Warning: Could not remove previous original layer: {e}"
+                )
+
+            # Reset the current original image reference
+            self.current_original_image = None
 
         # Load new image
         try:
+            # Display status while loading
+            self.viewer.status = f"Loading {os.path.basename(filepath)}..."
+
             image = imread(filepath)
+            # remove singletons
+            image = np.squeeze(image)
             # check if label image by checking file name
             is_label = "labels" in os.path.basename(
                 filepath
@@ -172,6 +258,10 @@ class ProcessedFilesTableWidget(QTableWidget):
                 self.current_original_image = self.viewer.add_image(
                     image, name=f"Original: {os.path.basename(filepath)}"
                 )
+
+            # Update status with success message
+            self.viewer.status = f"Loaded {os.path.basename(filepath)}"
+
         except (ValueError, TypeError, OSError, tifffile.TiffFileError) as e:
             print(f"Error loading original image {filepath}: {e}")
             self.viewer.status = f"Error processing {filepath}: {e}"
@@ -180,14 +270,41 @@ class ProcessedFilesTableWidget(QTableWidget):
         """
         Load processed image into viewer, distinguishing labels by filename pattern
         """
+        # Ensure filepath is valid
+        if not filepath or not os.path.exists(filepath):
+            print(f"Error: File does not exist: {filepath}")
+            self.viewer.status = f"Error: File not found: {filepath}"
+            return
+
         # Remove existing processed layer if it exists
         if self.current_processed_image is not None:
-            with contextlib.suppress(KeyError):
-                self.viewer.layers.remove(self.current_processed_image)
+            try:
+                # Check if the layer is still in the viewer
+                if self.current_processed_image in self.viewer.layers:
+                    self.viewer.layers.remove(self.current_processed_image)
+                else:
+                    # If not found by reference, try by name
+                    layer_names = [layer.name for layer in self.viewer.layers]
+                    if self.current_processed_image.name in layer_names:
+                        self.viewer.layers.remove(
+                            self.current_processed_image.name
+                        )
+            except (KeyError, ValueError) as e:
+                print(
+                    f"Warning: Could not remove previous processed layer: {e}"
+                )
+
+            # Reset the current processed image reference
+            self.current_processed_image = None
 
         # Load new image
         try:
+            # Display status while loading
+            self.viewer.status = f"Loading {os.path.basename(filepath)}..."
+
             image = imread(filepath)
+            # remove singletons
+            image = np.squeeze(image)
             filename = os.path.basename(filepath)
 
             # Check if filename contains label indicators
@@ -207,7 +324,10 @@ class ProcessedFilesTableWidget(QTableWidget):
                     image, name=f"Processed: {filename}"
                 )
 
-        except (ValueError, TypeError) as e:
+            # Update status with success message
+            self.viewer.status = f"Loaded {filename}"
+
+        except (ValueError, TypeError, OSError, tifffile.TiffFileError) as e:
             print(f"Error loading processed image {filepath}: {e}")
             self.viewer.status = f"Error processing {filepath}: {e}"
 
@@ -364,7 +484,6 @@ def _add_browse_button_to_selector(file_selector_widget):
     h_layout.addWidget(browse_button)
 
     # Replace the input field with our container
-    # parent = input_folder_widget.parentWidget()
     layout_index = parent_layout.indexOf(input_folder_widget)
     parent_layout.removeWidget(input_folder_widget)
     parent_layout.insertWidget(layout_index, container_widget)
@@ -417,6 +536,7 @@ class ProcessingWorker(QThread):
         self.input_suffix = input_suffix
         self.output_suffix = output_suffix
         self.stop_requested = False
+        self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
     def run(self):
         """Process files in a separate thread"""
@@ -424,8 +544,10 @@ class ProcessingWorker(QThread):
         processed_files_info = []
         total_files = len(self.file_list)
 
-        # Create a thread pool for concurrent processing
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Create a thread pool for concurrent processing with specified thread count
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.thread_count
+        ) as executor:
             # Submit tasks
             future_to_file = {
                 executor.submit(self.process_file, filepath): filepath
@@ -470,35 +592,83 @@ class ProcessingWorker(QThread):
             # Apply processing with parameters
             processed_image = self.processing_func(image, **self.param_values)
 
-            # Generate new filename
+            # Generate new filename base
             filename = os.path.basename(filepath)
             name, ext = os.path.splitext(filename)
-            new_filename = (
-                name.replace(self.input_suffix, "") + self.output_suffix + ext
+            new_filename_base = (
+                name.replace(self.input_suffix, "") + self.output_suffix
             )
-            new_filepath = os.path.join(self.output_folder, new_filename)
 
-            # Save the processed image
-            if "labels" in new_filename or "semantic" in new_filename:
-                # processed_image = ndi.label(processed_image)[0]
-                tifffile.imwrite(
-                    new_filepath,
-                    processed_image.astype(np.uint32),
-                    compression="zlib",
-                )
+            # Check if the processed image is a stacked array
+            if processed_image.ndim > image.ndim:
+                # Save each channel as a separate image
+                processed_files = []
+                for i in range(processed_image.shape[0]):
+                    channel_filename = f"{new_filename_base}_channel_{i}{ext}"
+                    channel_filepath = os.path.join(
+                        self.output_folder, channel_filename
+                    )
+
+                    if (
+                        "labels" in channel_filename
+                        or "semantic" in channel_filename
+                    ):
+                        tifffile.imwrite(
+                            channel_filepath,
+                            processed_image[i].astype(np.uint32),
+                            compression="zlib",
+                        )
+                    else:
+                        tifffile.imwrite(
+                            channel_filepath,
+                            processed_image[i].astype(image_dtype),
+                            compression="zlib",
+                        )
+                    processed_files.append(channel_filepath)
+
+                # Return processing info
+                return {
+                    "original_file": filepath,
+                    "processed_files": processed_files,
+                }
             else:
-                tifffile.imwrite(
-                    new_filepath,
-                    processed_image.astype(image_dtype),
-                    compression="zlib",
+                # Save as a single image (original behavior)
+                new_filepath = os.path.join(
+                    self.output_folder, new_filename_base + ext
                 )
 
-            # Return processing info
-            return {"original_file": filepath, "processed_file": new_filepath}
+                if (
+                    "labels" in new_filename_base
+                    or "semantic" in new_filename_base
+                ):
+                    tifffile.imwrite(
+                        new_filepath,
+                        processed_image.astype(np.uint32),
+                        compression="zlib",
+                    )
+                else:
+                    tifffile.imwrite(
+                        new_filepath,
+                        processed_image.astype(image_dtype),
+                        compression="zlib",
+                    )
 
-        except Exception:
-            # Re-raise to be caught by the executor
+                # Return processing info
+                return {
+                    "original_file": filepath,
+                    "processed_file": new_filepath,
+                }
+
+        except Exception as e:
+            # Log the error and re-raise to be caught by the executor
+            print(f"Error processing {filepath}: {e}")
             raise
+        finally:
+            # Explicit cleanup to help with memory management
+            if "image" in locals():
+                del image
+            if "processed_image" in locals():
+                del processed_image
 
     def stop(self):
         """Request worker to stop processing"""
@@ -529,14 +699,6 @@ class FileResultsWidget(QWidget):
         # Create main layout
         layout = QVBoxLayout()
         self.setLayout(layout)
-
-        # Input folder widgets
-        self.input_folder_widget = QLineEdit(self.input_folder)
-        layout.addWidget(self.input_folder_widget)
-
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self.browse_folder)
-        layout.addWidget(browse_button)
 
         # Create table of files
         self.table = ProcessedFilesTableWidget(viewer)
@@ -636,40 +798,6 @@ class FileResultsWidget(QWidget):
         # Container for tracking processed files during batch operation
         self.processed_files_info = []
 
-    def browse_folder(self):
-        """
-        Open a file dialog to select a folder
-        """
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Folder", self.input_folder
-        )
-        if folder:
-            self.input_folder = folder
-            self.input_folder_widget.setText(folder)
-            self.validate_selected_folder(folder)
-
-    def validate_selected_folder(self, folder: str):
-        """
-        Validate the selected folder and update the file list
-        """
-        if not os.path.isdir(folder):
-            self.viewer.status = f"Invalid input folder: {folder}"
-            return
-
-        # Find matching files
-        matching_files = [
-            os.path.join(folder, f)
-            for f in os.listdir(folder)
-            if f.endswith(self.input_suffix)
-        ]
-
-        # Update table with new files
-        self.file_list = matching_files
-        self.table.add_initial_files(matching_files)
-
-        # Update viewer status
-        self.viewer.status = f"Found {len(matching_files)} files"
-
     def update_function_info(self, function_name: str):
         """
         Update the function description and parameters when a new function is selected
@@ -766,6 +894,9 @@ class FileResultsWidget(QWidget):
             self.input_suffix,
             output_suffix,
         )
+
+        # Set the thread count from the UI
+        self.worker.thread_count = self.thread_count.value()
 
         # Connect signals
         self.worker.progress_updated.connect(self.update_progress)
