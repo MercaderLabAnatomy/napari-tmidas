@@ -1,3 +1,12 @@
+"""
+Batch Microscopy Image File Conversion
+=======================================
+This module provides a GUI for batch conversion of microscopy image files to a common format.
+The user can select a folder containing microscopy image files, preview the images, and convert them to an open format for image processing.
+The supported input formats include Leica LIF, Nikon ND2, Zeiss CZI, and TIFF-based whole slide images (NDPI, etc.).
+
+"""
+
 import concurrent.futures
 import os
 import re

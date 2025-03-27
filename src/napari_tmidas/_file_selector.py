@@ -1,3 +1,16 @@
+"""
+Batch Image Processing with Napari
+----------------------------------
+This module provides a collection of functions for batch processing of image files.
+It includes a Napari widget for selecting files and processing functions, and a
+custom widget for displaying and processing the selected files.
+
+New functions can be added to the processing registry by decorating them with
+`@register_batch_processing_function`. Each function should accept an image array
+as the first argument, and any additional keyword arguments for parameters.
+
+"""
+
 import concurrent.futures
 import contextlib
 import os
