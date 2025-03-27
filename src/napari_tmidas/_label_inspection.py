@@ -1,3 +1,13 @@
+"""
+Batch Label Inspection for Napari
+---------------------------------
+This module provides a widget for Napari that allows users to inspect image-label pairs in a folder.
+The widget loads image-label pairs from a folder and displays them in the Napari viewer.
+Users can make and save changes to the labels, and proceed to the next pair.
+
+
+"""
+
 import os
 import sys
 
