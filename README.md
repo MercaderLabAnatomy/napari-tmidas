@@ -9,12 +9,23 @@
 The `napari-tmidas` plugin consists of a growing collection of pipelines for fast batch processing of microscopy images.
 
 ## Feature Overview
-* Currently, napari-tmidas includes four pipelines: Batch Image Processing, Batch Label Inspection, Batch Microscopy Image Conversion, Batch Crop Anything.
-* The Batch Image Processing Pipeline allows to inspect a folder of images, apply a function and inspect the results. Currently available functions: Gamma correction (to enhance or suppress dark regions), maximum z projection to convert 3D image stacks to 2D images with brightest pixels, split color channels, Gaussian blur, median filter, Otsu thresholding (semantic or instance), manual thresholding and remove small labels from label images.
-* The Batch Label Inspection pipeline allows you to sequentially go through a folder of label images, any edits will be automatically saved.
-* The Batch Microscopy Image COnversion pipeline allows you to convert .nd2, .lif, .ndpi, .czi and acquifer data to either multidimensional .tif or .zarr formats while keeping essential metadata such as resolution.
-* The Batch Crop Anything pipeline allows you to sequerntially go through a folder of images where you want to select regions of interest to keep while deleting other regions by clicking on them.
-* More features coming up in April 2025.
+
+### Current Pipelines
+1. **Batch Image Processing**  
+   - Process image folders with: Gamma correction, Z-projection, channel splitting, Gaussian/median filters, thresholding (Otsu/manual), and label cleaning
+
+2. **Batch Label Inspection**  
+   - Review and edit label images with auto-save
+
+3. **Batch Microscopy Conversion**  
+   - Convert .nd2/.lif/.ndpi/.czi/acquifer → .tif/.zarr with metadata preservation
+
+4. **Batch Crop Anything**  
+   - Interactive ROI selection via click interface
+
+### Coming Soon
+New features arriving April 2025
+
 
 ## Installation
 
