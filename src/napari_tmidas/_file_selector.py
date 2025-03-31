@@ -175,12 +175,13 @@ class ProcessedFilesTableWidget(QTableWidget):
 
     def mousePressEvent(self, event):
         """
-        Handle mouse click events on the table
+        Handle mouse click events on the table to load appropriate images
         """
         if event.button() == Qt.LeftButton:
             # Get the item at the click position
             item = self.itemAt(event.pos())
             column = self.columnAt(event.pos().x())
+            row = self.rowAt(event.pos().y())
 
             # Load original image when clicking on first column
             if column == 0 and item:
@@ -188,8 +189,15 @@ class ProcessedFilesTableWidget(QTableWidget):
                 if filepath:
                     self._load_original_image(filepath)
 
-            # Second column is handled by the combo box for multi-output
-            # or by double-clicking for single output
+            # Load processed image when clicking on second column (for single output files)
+            elif column == 1:
+                # Check if this cell has a non-combo-box item (single output)
+                cell_item = self.item(row, column)
+                if cell_item and cell_item.data(Qt.UserRole):
+                    filepath = cell_item.data(Qt.UserRole)
+                    if filepath:
+                        self._load_processed_image(filepath)
+                # Combo boxes are handled by their own event handlers
 
         super().mousePressEvent(event)
 
@@ -269,6 +277,7 @@ class ProcessedFilesTableWidget(QTableWidget):
     def _load_processed_image(self, filepath: str):
         """
         Load processed image into viewer, distinguishing labels by filename pattern
+        and ensure it's always shown on top
         """
         # Ensure filepath is valid
         if not filepath or not os.path.exists(filepath):
@@ -324,8 +333,19 @@ class ProcessedFilesTableWidget(QTableWidget):
                     image, name=f"Processed: {filename}"
                 )
 
+            # Move the processed layer to the top of the stack
+            # Get the index of the current processed layer
+            layer_index = self.viewer.layers.index(
+                self.current_processed_image
+            )
+            # Move it to the top (last position in the list)
+            if layer_index < len(self.viewer.layers) - 1:
+                self.viewer.layers.move(
+                    layer_index, len(self.viewer.layers) - 1
+                )
+
             # Update status with success message
-            self.viewer.status = f"Loaded {filename}"
+            self.viewer.status = f"Loaded {filename} (moved to top layer)"
 
         except (ValueError, TypeError, OSError, tifffile.TiffFileError) as e:
             print(f"Error loading processed image {filepath}: {e}")
