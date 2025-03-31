@@ -639,9 +639,11 @@ class ProcessingWorker(QThread):
                             compression="zlib",
                         )
                     else:
+                        # First remove singletons
+                        channel_image = np.squeeze(processed_image[i])
                         tifffile.imwrite(
                             channel_filepath,
-                            processed_image[i].astype(image_dtype),
+                            channel_image.astype(image_dtype),
                             compression="zlib",
                         )
                     processed_files.append(channel_filepath)
