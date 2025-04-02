@@ -11,16 +11,16 @@ The `napari-tmidas` plugin consists of a growing collection of pipelines for fas
 ## Feature Overview
 
 ### Current Pipelines
-1. **Batch Image Processing**  
+1. **Batch Image Processing**
    - Process image folders with: Gamma correction, Z-projection, channel splitting, Gaussian/median filters, thresholding (Otsu/manual), and label cleaning
 
-2. **Batch Label Inspection**  
+2. **Batch Label Inspection**
    - Review and edit label images with auto-save
 
-3. **Batch Microscopy Conversion**  
+3. **Batch Microscopy Conversion**
    - Convert .nd2/.lif/.ndpi/.czi/acquifer → .tif/.zarr with metadata preservation
 
-4. **Batch Crop Anything**  
+4. **Batch Crop Anything**
    - Interactive ROI selection via click interface
 
 ### Coming Soon
@@ -46,7 +46,7 @@ To install the latest development version:
 ### Dependencies
 To use the Batch Microscopy Image Conversion pipeline, we need some libraries to read microscopy formats and to write ome-zarr:
 
-    pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari ome-zarr
+    pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari ome-zarr napari-ome-zarr
 
 For the Batch Crop Anything pipeline, we need to install MobileSAM and its dependencies:
 
