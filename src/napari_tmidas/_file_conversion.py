@@ -10,16 +10,20 @@ The supported input formats include Leica LIF, Nikon ND2, Zeiss CZI, and TIFF-ba
 import concurrent.futures
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import dask.array as da
 import napari
 import nd2  # https://github.com/tlambert03/nd2
 import numpy as np
 import tifffile
 import zarr
+from dask.diagnostics import ProgressBar
 from magicgui import magicgui
-from ome_zarr.writer import write_image  # https://github.com/ome/ome-zarr-py
+from ome_zarr.io import parse_url
+from ome_zarr.writer import write_image
 from pylibCZIrw import czi  # https://github.com/ZEISS/pylibczirw
 from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
@@ -192,17 +196,30 @@ class SeriesDetailWidget(QWidget):
 
                 # Set info text
                 if series_count > 0:
-                    metadata = file_loader.get_metadata(filepath, 0)
-                    if metadata:
-                        self.info_label.setText(
-                            f"File contains {series_count} series."
-                        )
-                    else:
-                        self.info_label.setText(
-                            f"File contains {series_count} series. No additional metadata available."
-                        )
-                else:
-                    self.info_label.setText("No series found in this file.")
+                    # metadata = file_loader.get_metadata(filepath, 0)
+
+                    # Estimate file size and set appropriate format radio button
+                    file_type = self.parent.get_file_type(filepath)
+                    if file_type == "ND2":
+                        try:
+                            with nd2.ND2File(filepath) as nd2_file:
+                                dims = dict(nd2_file.sizes)
+                                pixel_size = nd2_file.dtype.itemsize
+                                total_elements = np.prod(
+                                    [dims[dim] for dim in dims]
+                                )
+                                size_GB = (total_elements * pixel_size) / (
+                                    1024**3
+                                )
+
+                                self.info_label.setText(
+                                    f"File contains {series_count} series (size: {size_GB:.2f}GB)"
+                                )
+
+                                # Update format buttons
+                                self.parent.update_format_buttons(size_GB > 4)
+                        except (ValueError, FileNotFoundError) as e:
+                            print(f"Error estimating file size: {e}")
             except FileNotFoundError:
                 self.info_label.setText("File not found.")
             except PermissionError:
@@ -229,7 +246,29 @@ class SeriesDetailWidget(QWidget):
             # Update parent with selected series
             self.parent.set_selected_series(self.current_file, series_index)
 
-        # Replace the existing preview_series method with this:
+            # Automatically set the appropriate format radio button based on file size
+            file_loader = self.parent.get_file_loader(self.current_file)
+            if file_loader:
+                try:
+                    # Estimate file size based on metadata
+                    # metadata = file_loader.get_metadata(
+                    #    self.current_file, series_index
+                    # )
+
+                    # For ND2 files, we can directly check the size
+                    if self.parent.get_file_type(self.current_file) == "ND2":
+                        with nd2.ND2File(self.current_file) as nd2_file:
+                            dims = dict(nd2_file.sizes)
+                            pixel_size = nd2_file.dtype.itemsize
+                            total_elements = np.prod(
+                                [dims[dim] for dim in dims]
+                            )
+                            size_GB = (total_elements * pixel_size) / (1024**3)
+
+                            # Automatically set the appropriate radio button based on size
+                            self.parent.update_format_buttons(size_GB > 4)
+                except (ValueError, FileNotFoundError) as e:
+                    print(f"Error estimating file size: {e}")
 
     def preview_series(self):
         """Preview the selected series in Napari"""
@@ -1064,10 +1103,21 @@ class ConversionWorker(QThread):
                 estimated_size_bytes = (
                     np.prod(image_data.shape) * image_data.itemsize
                 )
-                use_zarr = self.use_zarr or (
-                    estimated_size_bytes > 4 * 1024 * 1024 * 1024
-                )
+                file_size_GB = estimated_size_bytes / (1024**3)
 
+                # If file is very large (>4GB), force zarr format regardless of setting
+                use_zarr = self.use_zarr
+                if file_size_GB > 4:
+                    use_zarr = True
+                    if not self.use_zarr:
+                        print(
+                            f"File size ({file_size_GB:.2f}GB) exceeds 4GB limit for TIF, automatically using ZARR format"
+                        )
+                        self.file_done.emit(
+                            filepath,
+                            True,
+                            f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using ZARR format",
+                        )
                 # Set up the output path
                 if use_zarr:
                     output_path = os.path.join(
@@ -1207,7 +1257,7 @@ class ConversionWorker(QThread):
                     image_data = np.moveaxis(
                         image_data, source_idx, target_idx
                     )
-                except (ValueError, np.AxisError) as e:
+                except (ValueError, IndexError) as e:
                     print(f"Error reordering dimensions: {e}")
                     # Fall back to simple save without reordering
                     tifffile.imwrite(
@@ -1268,224 +1318,109 @@ class ConversionWorker(QThread):
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Enhanced ZARR saving with proper dimension and metadata handling"""
-
+        """Enhanced ZARR saving with proper metadata storage and specific exceptions"""
         print(f"Saving ZARR file: {output_path}")
         print(f"Image data shape: {image_data.shape}")
 
-        if metadata:
-            print(f"Metadata keys: {list(metadata.keys())}")
+        metadata = metadata or {}
+        print(
+            f"Metadata keys: {list(metadata.keys()) if metadata else 'No metadata'}"
+        )
 
-        # Create store
-        store = zarr.DirectoryStore(output_path)
+        # Handle overwriting by deleting the directory if it exists
+        if os.path.exists(output_path):
+            print(f"Deleting existing Zarr directory: {output_path}")
+            shutil.rmtree(output_path)
 
-        # Determine axes based on dimensions and metadata
+        # Explicitly create a DirectoryStore
+        store = parse_url(output_path, mode="w").store
+
         ndim = len(image_data.shape)
 
-        # If metadata contains axes information, use it
-        axes = None
-        if metadata and "axes" in metadata:
-            axes = metadata["axes"]
-            if len(axes) != ndim:
-                print(
-                    f"Warning: Axes length ({len(axes)}) doesn't match dimensions ({ndim})"
-                )
-                # For specific case with shape (45, 101, 4, 1024, 1024)
-                if (
-                    ndim == 5
-                    and image_data.shape[2] <= 10
-                    and image_data.shape[3] > 100
-                    and image_data.shape[4] > 100
-                ):
-                    print("Inferring TZCYX from shape")
-                    axes = "TZCYX"
+        axes = metadata.get("axes").lower() if metadata else None
 
-        # If no axes information, use default
-        if not axes:
-            default_axes = "TZCYX"
-            axes = (
-                default_axes[-ndim:]
-                if ndim <= 5
-                else "".join([f"D{i}" for i in range(ndim)])
-            )
-            print(f"Using default axes: {axes}")
-
-        # Calculate optimal chunk size
-        target_chunk_size = 1024 * 1024  # 1MB target chunk size
-
-        # For dask arrays, try to use existing chunks
-        if hasattr(image_data, "chunks"):
-            chunks = image_data.chunks
-            print(f"Using dask chunks: {chunks}")
-        else:
-            # Calculate chunks for numpy arrays
-            chunks = self._calculate_chunks(
-                image_data.shape, target_chunk_size, image_data.itemsize
-            )
-            print(f"Calculated chunks: {chunks}")
-
-        # Set up coordinate transformations
-        coordinate_transformations = None
-        if metadata:
-            # Try to extract scale information
+        # Standardize axes order to 'ctzyx' if possible, regardless of Z presence
+        target_axes = "tczyx"
+        if axes != target_axes[:ndim]:
+            print(f"Reordering axes from {axes} to {target_axes[:ndim]}")
             try:
-                if "scales" in metadata:
-                    # Use pre-calculated scales if available
-                    scales = metadata["scales"]
-                    print(f"Using scales from metadata: {scales}")
-                else:
-                    # Otherwise build scales from resolution and spacing
-                    scales = []
-
-                    for ax in axes:
-                        scale = 1.0  # Default scale
-
-                        if ax == "X" or ax == "Y":
-                            # Get resolution from metadata
-
-                            res_x, res_y = metadata["resolution"]
-                            scale = res_x if ax == "X" else res_y
-                        elif ax == "Z":
-                            # Get Z spacing
-                            scale = metadata["spacing"]
-
-                        scales.append(scale)
-
-                    print(f"Built scales from metadata: {scales}")
-
-                # Create transformation if we have any non-default scales
-                if any(s != 1.0 for s in scales):
-                    coordinate_transformations = [
-                        {"type": "scale", "scale": scales}
-                    ]
-                    print(
-                        f"Created coordinate transformations: {coordinate_transformations}"
-                    )
-            except (ValueError, TypeError) as e:
-                print(f"Error creating coordinate transformations: {e}")
-
-        # Write image
-        write_options = {
-            "image": image_data,
-            "group": store,
-            "axes": axes,
-            "chunks": chunks,
-            "compression": "zstd",
-            "compression_opts": {"level": 3},
-        }
-
-        # Add transformations if available
-        if coordinate_transformations:
-            write_options["coordinate_transformations"] = (
-                coordinate_transformations
-            )
-
-        try:
-            write_image(**write_options)
-            print(f"Successfully wrote image data to: {output_path}")
-
-            # Add additional metadata
-            if metadata:
-                try:
-                    # Access the root group
-                    root = zarr.group(store)
-
-                    # Create metadata group if needed
-                    if "metadata" not in root:
-                        metadata_group = root.create_group("metadata")
+                # Create a mapping from original axes to target axes
+                axes_map = {ax: i for i, ax in enumerate(axes)}
+                reorder_list = []
+                for _i, target_ax in enumerate(target_axes[:ndim]):
+                    if target_ax in axes_map:
+                        reorder_list.append(axes_map[target_ax])
                     else:
-                        metadata_group = root["metadata"]
+                        print(f"Axis {target_ax} not found in original axes")
+                        reorder_list.append(None)
 
-                    # Store each metadata key that we can
-                    for key, value in metadata.items():
-                        try:
-                            if isinstance(
-                                value,
-                                (
-                                    str,
-                                    int,
-                                    float,
-                                    bool,
-                                    list,
-                                    dict,
-                                    type(None),
-                                ),
-                            ):
-                                metadata_group.attrs[key] = value
-                            else:
-                                # Convert to string if not a basic type
-                                metadata_group.attrs[key] = str(value)
-                        except (ValueError, TypeError) as e:
-                            print(f"Error storing metadata key '{key}': {e}")
+                # Filter out None values (missing axes)
+                reorder_list = [i for i in reorder_list if i is not None]
 
-                    print("Added metadata to zarr file")
-                except (ValueError, TypeError) as e:
-                    print(f"Error adding metadata: {e}")
-
-            return True
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error writing zarr image: {e}")
-            return False
-
-    def _calculate_chunks(self, shape, target_size, item_size):
-        """Calculate appropriate chunk sizes for zarr storage"""
-        try:
-            # For 5D TZCYX data, use optimized chunking strategy
-            if len(shape) == 5:
-                # For TZCYX shape, optimize for common access patterns
-                # Typically want full timepoints, channels, and reasonable XY tiles
-                t_size, z_size, c_size, y_size, x_size = shape
-
-                # Start with full C dimension, reasonable Z, and small T
-                t_chunk = min(1, t_size)
-                z_chunk = min(10, z_size)
-                c_chunk = c_size  # Usually take full channels
-
-                # Calculate remaining space for Y and X (aim for square tiles)
-                remaining_elements = (
-                    target_size // item_size // (t_chunk * z_chunk * c_chunk)
+                if len(reorder_list) != len(axes):
+                    raise ValueError(
+                        "Reordering failed: Mismatch between original and reordered dimensions."
+                    )
+                image_data = np.moveaxis(
+                    image_data, range(len(axes)), reorder_list
                 )
-                xy_size = int(np.sqrt(remaining_elements))
+                axes = "".join(
+                    [axes[i] for i in reorder_list]
+                )  # Update axes to reflect new order
+                print(f"New axes order after reordering: {axes}")
+            except (ValueError, IndexError) as e:
+                print(f"Error during reordering: {e}")
+                raise
 
-                # Ensure minimum size and cap at image dimensions
-                xy_size = max(64, min(xy_size, min(y_size, x_size)))
+        # Convert to Dask array
+        if not hasattr(image_data, "dask"):
+            print("Converting to dask array with auto chunks...")
+            image_data = da.from_array(image_data, chunks="auto")
+        else:
+            print("Using existing dask array")
 
-                return (t_chunk, z_chunk, c_chunk, xy_size, xy_size)
+        # Write the image data as OME-Zarr
+        try:
+            print("Writing image data using ome_zarr.writer.write_image...")
+            with ProgressBar():
+                root = zarr.group(store=store)
+                write_image(
+                    image_data,
+                    group=root,
+                    axes=axes,
+                    scaler=None,
+                    storage_options={"compression": "zstd"},
+                )
 
-            # Generic calculation for other dimension counts
-            ndim = len(shape)
-            elements_per_chunk = target_size // item_size
+            # Add basic OME-Zarr metadata
+            root = zarr.open(store)
+            root.attrs["multiscales"] = [
+                {
+                    "version": "0.4",
+                    "datasets": [{"path": "0"}],
+                    "axes": [
+                        {
+                            "name": ax,
+                            "type": (
+                                "space"
+                                if ax in "xyz"
+                                else "time" if ax == "t" else "channel"
+                            ),
+                        }
+                        for ax in axes
+                    ],
+                }
+            ]
 
-            # Balanced chunking approach
-            chunks = []
+            print("OME-Zarr file saved successfully.")
+            return True
 
-            # For higher dimensions (time, etc.), use smaller chunks
-            for i in range(ndim - 2):
-                dim_size = shape[i]
-                # Use smaller chunks for outer dimensions
-                chunk_size = min(max(1, dim_size // 4), 16)
-                chunks.append(chunk_size)
-                elements_per_chunk //= chunk_size
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error during Zarr writing: {e}")
+            import traceback
 
-            # For spatial dimensions (last 2), aim for square tiles
-            if ndim >= 2:
-                # Get spatial dimensions
-                y_size, x_size = shape[-2], shape[-1]
-
-                # Calculate tile size to fit in remaining elements
-                tile_size = int(np.sqrt(elements_per_chunk))
-
-                # Ensure minimum size and cap at image dimensions
-                tile_size = max(64, min(tile_size, min(y_size, x_size)))
-
-                chunks.append(tile_size)  # Y dimension
-                chunks.append(tile_size)  # X dimension
-
-            return tuple(chunks)
-        except (ValueError, TypeError) as e:
-            print(f"Error calculating chunks: {e}")
-            # Return safe default
-            return tuple(min(128, d) for d in shape)
+            traceback.print_exc()
+            return False
 
 
 class MicroscopyImageConverterWidget(QWidget):
@@ -1513,6 +1448,9 @@ class MicroscopyImageConverterWidget(QWidget):
         # Working threads
         self.scan_worker = None
         self.conversion_worker = None
+
+        # Flag to prevent recursive radio button updates
+        self.updating_format_buttons = False
 
         # Create layout
         main_layout = QVBoxLayout()
@@ -1575,16 +1513,8 @@ class MicroscopyImageConverterWidget(QWidget):
         self.zarr_radio = QCheckBox("ZARR (> 4GB)")
 
         # Make checkboxes mutually exclusive like radio buttons
-        self.tif_radio.toggled.connect(
-            lambda checked: (
-                self.zarr_radio.setChecked(not checked) if checked else None
-            )
-        )
-        self.zarr_radio.toggled.connect(
-            lambda checked: (
-                self.tif_radio.setChecked(not checked) if checked else None
-            )
-        )
+        self.tif_radio.toggled.connect(self.handle_format_toggle)
+        self.zarr_radio.toggled.connect(self.handle_format_toggle)
 
         format_layout.addWidget(format_label)
         format_layout.addWidget(self.tif_radio)
@@ -1942,6 +1872,44 @@ class MicroscopyImageConverterWidget(QWidget):
             )
         else:
             self.status_label.setText("No files were converted")
+
+    def update_format_buttons(self, use_zarr=False):
+        """Update format radio buttons based on file size
+
+        Args:
+            use_zarr: True if file size > 4GB, otherwise False
+        """
+        if self.updating_format_buttons:
+            return
+
+        self.updating_format_buttons = True
+        try:
+            if use_zarr:
+                self.zarr_radio.setChecked(True)
+                self.tif_radio.setChecked(False)
+                print("Auto-selected ZARR format for large file (>4GB)")
+            else:
+                self.tif_radio.setChecked(True)
+                self.zarr_radio.setChecked(False)
+                print("Auto-selected TIF format for smaller file (<4GB)")
+        finally:
+            self.updating_format_buttons = False
+
+    def handle_format_toggle(self, checked):
+        """Handle format radio button toggle"""
+        if self.updating_format_buttons:
+            return
+
+        self.updating_format_buttons = True
+        try:
+            # Make checkboxes mutually exclusive like radio buttons
+            sender = self.sender()
+            if sender == self.tif_radio and checked:
+                self.zarr_radio.setChecked(False)
+            elif sender == self.zarr_radio and checked:
+                self.tif_radio.setChecked(False)
+        finally:
+            self.updating_format_buttons = False
 
 
 # Create a MagicGUI widget that creates and returns the converter widget
