@@ -389,10 +389,13 @@ class ND2Loader(FormatLoader):
     def load_series(filepath: str, series_index: int) -> np.ndarray:
         if series_index != 0:
             raise ValueError("ND2 files only support series index 0")
+        nd2_file = nd2.imread(filepath, dask=True)
+        size_GB = nd2_file.size * nd2_file.itemsize / (1024**3)
 
-        with nd2.ND2File(filepath) as nd2_file:
-            # Convert to numpy array
-            return nd2_file.asarray()
+        if size_GB > 4:
+            return nd2_file
+        else:
+            return nd2.imread(filepath)
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
