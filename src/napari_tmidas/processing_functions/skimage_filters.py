@@ -20,38 +20,20 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
-    # @BatchProcessingRegistry.register(
-    #     name="Adaptive Histogram Equalization",
-    #     suffix="_clahe",
-    #     description="Enhance contrast using Contrast Limited Adaptive Histogram Equalization",
-    #     parameters={
-    #         "kernel_size": {
-    #             "type": int,
-    #             "default": 8,
-    #             "min": 4,
-    #             "max": 64,
-    #             "description": "Size of local region for histogram equalization",
-    #         },
-    #         "clip_limit": {
-    #             "type": float,
-    #             "default": 0.01,
-    #             "min": 0.001,
-    #             "max": 0.1,
-    #             "description": "Clipping limit for contrast enhancement",
-    #         },
-    #     },
-    # )
-    # def adaptive_hist_eq(
-    #     image: np.ndarray, kernel_size: int = 8, clip_limit: float = 0.01
-    # ) -> np.ndarray:
-    #     """
-    #     Apply Contrast Limited Adaptive Histogram Equalization
-    #     """
-    #     # CLAHE expects image in [0, 1] range
-    #     img_norm = skimage.exposure.rescale_intensity(image, out_range=(0, 1))
-    #     return skimage.exposure.equalize_adapthist(
-    #         img_norm, kernel_size=kernel_size, clip_limit=clip_limit
-    #     )
+    # Equalize histogram
+    @BatchProcessingRegistry.register(
+        name="Equalize Histogram",
+        suffix="_equalized",
+        description="Equalize histogram of image",
+    )
+    def equalize_histogram(
+        image: np.ndarray, clip_limit: float = 0.01
+    ) -> np.ndarray:
+        """
+        Equalize histogram of image
+        """
+
+        return skimage.exposure.equalize_hist(image)
 
     # simple otsu thresholding
     @BatchProcessingRegistry.register(
@@ -63,6 +45,8 @@ if SKIMAGE_AVAILABLE:
         """
         Threshold image using Otsu's method
         """
+
+        image = skimage.img_as_ubyte(image)  # convert to 8-bit
         thresh = skimage.filters.threshold_otsu(image)
         return (image > thresh).astype(np.uint32)
 
@@ -76,6 +60,7 @@ if SKIMAGE_AVAILABLE:
         """
         Threshold image using Otsu's method
         """
+        image = skimage.img_as_ubyte(image)  # convert to 8-bit
         thresh = skimage.filters.threshold_otsu(image)
         return skimage.measure.label(image > thresh).astype(np.uint32)
 
