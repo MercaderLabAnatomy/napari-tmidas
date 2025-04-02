@@ -229,6 +229,8 @@ class SeriesDetailWidget(QWidget):
             # Update parent with selected series
             self.parent.set_selected_series(self.current_file, series_index)
 
+        # Replace the existing preview_series method with this:
+
     def preview_series(self):
         """Preview the selected series in Napari"""
         if self.current_file and self.series_selector.currentIndex() >= 0:
@@ -246,10 +248,24 @@ class SeriesDetailWidget(QWidget):
             file_loader = self.parent.get_file_loader(self.current_file)
 
             try:
+                # First get metadata to understand dimensions
+                metadata = file_loader.get_metadata(
+                    self.current_file, series_index
+                )
+
                 # Load the series
                 image_data = file_loader.load_series(
                     self.current_file, series_index
                 )
+
+                # Reorder dimensions for Napari based on metadata
+                if metadata and "axes" in metadata:
+                    print(f"File has dimension order: {metadata['axes']}")
+                    # Target dimension order for Napari
+                    napari_order = "CTZYX"[: len(image_data.shape)]
+                    image_data = self._reorder_dimensions(
+                        image_data, metadata, napari_order
+                    )
 
                 # Clear existing layers and display the image
                 self.viewer.layers.clear()
@@ -265,6 +281,67 @@ class SeriesDetailWidget(QWidget):
                 QMessageBox.warning(
                     self, "Error", f"Could not load series: {str(e)}"
                 )
+
+    def _reorder_dimensions(self, image_data, metadata, target_order="YXZTC"):
+        """Reorder dimensions based on metadata axes information
+
+        Args:
+            image_data: The numpy or dask array to reorder
+            metadata: Metadata dictionary containing axes information
+            target_order: Target dimension order (e.g., "YXZTC")
+
+        Returns:
+            Reordered array
+        """
+        # Early exit if no metadata or no axes information
+        if not metadata or "axes" not in metadata:
+            print("No axes information in metadata - returning original")
+            return image_data
+
+        # Get source order from metadata
+        source_order = metadata["axes"]
+
+        # Ensure dimensions match
+        ndim = len(image_data.shape)
+        if len(source_order) != ndim:
+            print(
+                f"Dimension mismatch - array has {ndim} dims but axes metadata indicates {len(source_order)}"
+            )
+            return image_data
+
+        # Ensure target order has the same number of dimensions
+        if len(target_order) != ndim:
+            print(
+                f"Target order {target_order} doesn't match array dimensions {ndim}"
+            )
+            return image_data
+
+        # Create reordering index list
+        reorder_indices = []
+        for axis in target_order:
+            if axis in source_order:
+                reorder_indices.append(source_order.index(axis))
+            else:
+                print(f"Axis {axis} not found in source order {source_order}")
+                return image_data
+
+        # Reorder the array using appropriate method
+        try:
+            print(f"Reordering from {source_order} to {target_order}")
+
+            # Check if using Dask array
+            if hasattr(image_data, "dask"):
+                # Use Dask's transpose to preserve lazy computation
+                reordered = image_data.transpose(reorder_indices)
+            else:
+                # Use numpy transpose
+                reordered = np.transpose(image_data, reorder_indices)
+
+            print(f"Reordered shape: {reordered.shape}")
+            return reordered
+        except (ValueError, IndexError) as e:
+            print(f"Error reordering dimensions: {e}")
+            return image_data
 
 
 class FormatLoader:
@@ -381,7 +458,6 @@ class ND2Loader(FormatLoader):
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
-
         # ND2 files typically have a single series with multiple channels/dimensions
         return 1
 
@@ -389,13 +465,30 @@ class ND2Loader(FormatLoader):
     def load_series(filepath: str, series_index: int) -> np.ndarray:
         if series_index != 0:
             raise ValueError("ND2 files only support series index 0")
-        nd2_file = nd2.imread(filepath, dask=True)
-        size_GB = nd2_file.size * nd2_file.itemsize / (1024**3)
+
+        # First open the file to check metadata
+        with nd2.ND2File(filepath) as nd2_file:
+            # Calculate size in GB
+            total_size = np.prod(
+                [nd2_file.sizes[dim] for dim in nd2_file.sizes]
+            )
+            pixel_size = nd2_file.dtype.itemsize
+            size_GB = (total_size * pixel_size) / (1024**3)
+
+            print(f"ND2 file dimensions: {nd2_file.sizes}")
+            print(f"Pixel type: {nd2_file.dtype}, size: {pixel_size} bytes")
+            print(f"Estimated file size: {size_GB:.2f} GB")
 
         if size_GB > 4:
-            return nd2_file
+            print("Using Dask for large file")
+            # Load as Dask array for large files
+            data = nd2.imread(filepath, dask=True)
+            return data
         else:
-            return nd2.imread(filepath)
+            print("Using direct loading for smaller file")
+            # Load directly into memory for smaller files
+            data = nd2.imread(filepath)
+            return data
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
@@ -403,15 +496,59 @@ class ND2Loader(FormatLoader):
             return {}
 
         with nd2.ND2File(filepath) as nd2_file:
-            return {
-                "axes": "".join(nd2_file.sizes.keys()),
-                "resolution": (
-                    1 / nd2_file.voxel_size().x,
-                    1 / nd2_file.voxel_size().y,
-                ),
+            # Get all dimensions and their sizes
+            dims = dict(nd2_file.sizes)
+
+            # Create a more detailed axes representation
+            axes = "".join(dims.keys())
+
+            print(f"ND2 metadata - dims: {dims}")
+            print(f"ND2 metadata - axes: {axes}")
+
+            # Get spatial dimensions and convert to resolution
+            try:
+                voxel = nd2_file.voxel_size()
+                x_res = 1 / voxel.x if voxel.x > 0 else 1.0
+                y_res = 1 / voxel.y if voxel.y > 0 else 1.0
+                z_spacing = 1 / voxel.z if voxel.z > 0 else 1.0
+
+                print(f"Voxel size: x={voxel.x}, y={voxel.y}, z={voxel.z}")
+            except (ValueError, AttributeError) as e:
+                print(f"Error getting voxel size: {e}")
+                x_res, y_res, z_spacing = 1.0, 1.0, 1.0
+
+            # Create scale information for all dimensions
+            scales = {}
+            if "T" in dims:
+                scales["scale_t"] = 1.0
+            if "Z" in dims:
+                scales["scale_z"] = z_spacing
+            if "C" in dims:
+                scales["scale_c"] = 1.0
+            if "Y" in dims:
+                scales["scale_y"] = y_res
+            if "X" in dims:
+                scales["scale_x"] = x_res
+
+            # Build comprehensive metadata
+            metadata = {
+                "axes": axes,
+                "dimensions": dims,
+                "resolution": (x_res, y_res),
                 "unit": "um",
-                "spacing": 1 / nd2_file.voxel_size().z,
+                "spacing": z_spacing,
+                **scales,  # Add all scale information
             }
+
+            # Add extra metadata for zarr transformations
+            ordered_scales = []
+            for ax in axes:
+                scale_key = f"scale_{ax.lower()}"
+                ordered_scales.append(scales.get(scale_key, 1.0))
+
+            metadata["scales"] = ordered_scales
+
+            return metadata
 
 
 class TIFFSlideLoader(FormatLoader):
@@ -949,48 +1086,25 @@ class ConversionWorker(QThread):
 
                 try:
                     if use_zarr:
-                        # First try with metadata
-                        try:
-                            if metadata:
-                                self._save_zarr(
-                                    image_data, output_path, metadata
-                                )
-                            else:
-                                self._save_zarr(image_data, output_path)
-                        except (ValueError, FileNotFoundError) as e:
-                            print(
-                                f"Warning: Failed to save with metadata, trying without: {str(e)}"
-                            )
-                            # If that fails, try without metadata
-                            self._save_zarr(image_data, output_path, None)
+                        save_success = self._save_zarr(
+                            image_data, output_path, metadata
+                        )
                     else:
-                        # First try with metadata
-                        try:
-                            if metadata:
-                                self._save_tif(
-                                    image_data, output_path, metadata
-                                )
-                            else:
-                                self._save_tif(image_data, output_path)
-                        except (ValueError, FileNotFoundError) as e:
-                            print(
-                                f"Warning: Failed to save with metadata, trying without: {str(e)}"
-                            )
-                            # If that fails, try without metadata
-                            self._save_tif(image_data, output_path, None)
+                        self._save_tif(image_data, output_path, metadata)
+                        save_success = os.path.exists(output_path)
 
-                    save_success = True
+                    if save_success:
+                        success_count += 1
+                        self.file_done.emit(
+                            filepath, True, f"Saved to {output_path}"
+                        )
+                    else:
+                        error_message = "Failed to save file - unknown error"
+                        self.file_done.emit(filepath, False, error_message)
+
                 except (ValueError, FileNotFoundError) as e:
                     error_message = f"Failed to save file: {str(e)}"
                     print(f"Error in save operation: {error_message}")
-                    save_success = False
-
-                if save_success:
-                    success_count += 1
-                    self.file_done.emit(
-                        filepath, True, f"Saved to {output_path}"
-                    )
-                else:
                     self.file_done.emit(filepath, False, error_message)
 
             except (ValueError, FileNotFoundError) as e:
@@ -1007,233 +1121,371 @@ class ConversionWorker(QThread):
     def _save_tif(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Save image data as TIFF with optional metadata"""
-        try:
-            # Basic save without metadata
-            if metadata is None:
-                tifffile.imwrite(output_path, image_data, compression="zstd")
-                return
+        """Enhanced TIF saving with proper dimension handling"""
+        import tifffile
 
-            # Always preserve resolution if it exists
-            resolution = None
-            if "resolution" in metadata:
-                resolution = tuple(float(r) for r in metadata["resolution"])
+        print(f"Saving TIF file: {output_path}")
+        print(f"Image data shape: {image_data.shape}")
 
-            axes = metadata.get("axes", "")
+        if metadata:
+            print(f"Metadata keys: {list(metadata.keys())}")
+            if "axes" in metadata:
+                print(f"Original axes: {metadata['axes']}")
 
-            # Handle different dimension cases appropriately
-            if len(image_data.shape) > 2 and any(ax in axes for ax in "ZC"):
-                # Hyperstack case (3D+ with channels or z-slices)
-                imagej_order = "TZCYX"
+        # Handle Dask arrays
+        if hasattr(image_data, "compute"):
+            print("Computing Dask array before saving")
+            # For large arrays, compute block by block
+            try:
+                # Convert to numpy array in memory
+                image_data = image_data.compute()
+            except (MemoryError, ValueError) as e:
+                print(f"Error computing dask array: {e}")
+                # Alternative: write block by block
+                # This would require custom implementation
+                raise
 
-                if axes != imagej_order:
-                    print(
-                        f"Original axes: {axes}, Target order: {imagej_order}"
-                    )
+        # Basic save if no metadata
+        if metadata is None:
+            print("No metadata provided, using basic save")
+            tifffile.imwrite(output_path, image_data, compression="zstd")
+            return
 
-                    # Filter to valid axes
-                    valid_axes = [ax for ax in axes if ax in imagej_order]
-                    if len(valid_axes) < len(axes):
-                        print(f"Dropping axes: {set(axes)-set(imagej_order)}")
-                        source_idx = [
-                            i
-                            for i, ax in enumerate(axes)
-                            if ax in imagej_order
-                        ]
-                        image_data = np.moveaxis(
-                            image_data, source_idx, range(len(valid_axes))
-                        )
-                        axes = "".join(valid_axes)
+        # Get image dimensions and axis order
+        ndim = len(image_data.shape)
+        axes = metadata.get("axes", "")
 
-                    # Add missing dims
-                    for ax in reversed(imagej_order):
-                        if ax not in axes:
-                            print(f"Adding {ax} dimension")
-                            axes = ax + axes
-                            image_data = np.expand_dims(image_data, axis=0)
+        print(f"Number of dimensions: {ndim}")
+        if axes:
+            print(f"Axes from metadata: {axes}")
 
-                    # Final reordering
-                    source_idx = [axes.index(ax) for ax in imagej_order]
+        # Handle ImageJ compatibility for dimensions
+        if ndim > 2:
+            # Get target order for ImageJ
+            imagej_order = "TZCYX"
+
+            # If axes information is incomplete, try to infer from shape
+            if len(axes) != ndim:
+                print(
+                    f"Warning: Axes length ({len(axes)}) doesn't match dimensions ({ndim})"
+                )
+                # For your specific case with shape (45, 101, 4, 1024, 1024)
+                # Infer TZCYX if shape matches
+                if (
+                    ndim == 5
+                    and image_data.shape[2] <= 10
+                    and image_data.shape[3] > 100
+                    and image_data.shape[4] > 100
+                ):
+                    print("Inferring TZCYX from shape")
+                    axes = "TZCYX"
+
+            if axes and axes != imagej_order:
+                print(f"Reordering: {axes} -> {imagej_order}")
+
+                # Map dimensions from original to target order
+                dim_map = {}
+                for i, ax in enumerate(axes):
+                    if ax in imagej_order:
+                        dim_map[ax] = i
+
+                # Handle missing dimensions
+                for ax in imagej_order:
+                    if ax not in dim_map:
+                        print(f"Adding missing dimension: {ax}")
+                        image_data = np.expand_dims(image_data, axis=0)
+                        dim_map[ax] = image_data.shape[0] - 1
+
+                # Create reordering indices
+                source_idx = [dim_map[ax] for ax in imagej_order]
+                target_idx = list(range(len(imagej_order)))
+
+                print(f"Reordering dimensions: {source_idx} -> {target_idx}")
+
+                # Reorder dimensions
+                try:
                     image_data = np.moveaxis(
-                        image_data, source_idx, range(len(imagej_order))
+                        image_data, source_idx, target_idx
                     )
-                    metadata["axes"] = imagej_order
+                except (ValueError, np.AxisError) as e:
+                    print(f"Error reordering dimensions: {e}")
+                    # Fall back to simple save without reordering
+                    tifffile.imwrite(
+                        output_path, image_data, compression="zstd"
+                    )
+                    return
 
+                # Update axes information
+                metadata["axes"] = imagej_order
+
+        # Extract resolution information for ImageJ
+        resolution = None
+        if "resolution" in metadata:
+            try:
+                res_x, res_y = metadata["resolution"]
+                resolution = (float(res_x), float(res_y))
+                print(f"Using resolution: {resolution}")
+            except (ValueError, TypeError) as e:
+                print(f"Error processing resolution: {e}")
+
+        # Handle saving with metadata
+        try:
+            if ndim <= 2:
+                # 2D case - simpler saving
+                print("Saving as 2D image")
                 tifffile.imwrite(
                     output_path,
                     image_data,
-                    metadata=metadata,
                     resolution=resolution,
-                    imagej=True,
                     compression="zstd",
                 )
             else:
-                # 2D case - save without hyperstack metadata but keep resolution
-                save_metadata = (
-                    {"resolution": metadata["resolution"]}
-                    if "resolution" in metadata
-                    else None
-                )
+                # Hyperstack case
+                print("Saving as hyperstack with ImageJ metadata")
+
+                # Create clean metadata dict with only needed keys
+                imagej_metadata = {}
+                if "unit" in metadata:
+                    imagej_metadata["unit"] = metadata["unit"]
+                if "spacing" in metadata:
+                    imagej_metadata["spacing"] = float(metadata["spacing"])
+
                 tifffile.imwrite(
                     output_path,
                     image_data,
-                    metadata=save_metadata,
+                    imagej=True,
                     resolution=resolution,
-                    imagej=False,
+                    metadata=imagej_metadata,
                     compression="zstd",
                 )
 
+            print(f"Successfully saved TIF file: {output_path}")
         except (ValueError, FileNotFoundError) as e:
-            print(f"Error: {str(e)}")
+            print(f"Error saving TIF file: {e}")
+            # Try simple save as fallback
             tifffile.imwrite(output_path, image_data)
 
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Save image data as OME-Zarr format with optional metadata."""
-        try:
-            # Determine optimal chunk size
-            target_chunk_size = 1024 * 1024  # 1MB
-            item_size = image_data.itemsize
-            chunks = self._calculate_chunks(
-                image_data.shape, target_chunk_size, item_size
-            )
+        """Enhanced ZARR saving with proper dimension and metadata handling"""
 
-            # Determine appropriate axes based on dimensions
-            ndim = len(image_data.shape)
-            default_axes = "TCZYX"
+        print(f"Saving ZARR file: {output_path}")
+        print(f"Image data shape: {image_data.shape}")
+
+        if metadata:
+            print(f"Metadata keys: {list(metadata.keys())}")
+
+        # Create store
+        store = zarr.DirectoryStore(output_path)
+
+        # Determine axes based on dimensions and metadata
+        ndim = len(image_data.shape)
+
+        # If metadata contains axes information, use it
+        axes = None
+        if metadata and "axes" in metadata:
+            axes = metadata["axes"]
+            if len(axes) != ndim:
+                print(
+                    f"Warning: Axes length ({len(axes)}) doesn't match dimensions ({ndim})"
+                )
+                # For specific case with shape (45, 101, 4, 1024, 1024)
+                if (
+                    ndim == 5
+                    and image_data.shape[2] <= 10
+                    and image_data.shape[3] > 100
+                    and image_data.shape[4] > 100
+                ):
+                    print("Inferring TZCYX from shape")
+                    axes = "TZCYX"
+
+        # If no axes information, use default
+        if not axes:
+            default_axes = "TZCYX"
             axes = (
                 default_axes[-ndim:]
                 if ndim <= 5
                 else "".join([f"D{i}" for i in range(ndim)])
             )
+            print(f"Using default axes: {axes}")
 
-            # Create the zarr store
-            store = zarr.DirectoryStore(output_path)
+        # Calculate optimal chunk size
+        target_chunk_size = 1024 * 1024  # 1MB target chunk size
 
-            # Set up transformations if possible
-            coordinate_transformations = None
-            if metadata:
-                try:
-                    # Extract scale information if present
+        # For dask arrays, try to use existing chunks
+        if hasattr(image_data, "chunks"):
+            chunks = image_data.chunks
+            print(f"Using dask chunks: {chunks}")
+        else:
+            # Calculate chunks for numpy arrays
+            chunks = self._calculate_chunks(
+                image_data.shape, target_chunk_size, image_data.itemsize
+            )
+            print(f"Calculated chunks: {chunks}")
+
+        # Set up coordinate transformations
+        coordinate_transformations = None
+        if metadata:
+            # Try to extract scale information
+            try:
+                if "scales" in metadata:
+                    # Use pre-calculated scales if available
+                    scales = metadata["scales"]
+                    print(f"Using scales from metadata: {scales}")
+                else:
+                    # Otherwise build scales from resolution and spacing
                     scales = []
-                    for _i, ax in enumerate(axes):
+
+                    for ax in axes:
                         scale = 1.0  # Default scale
 
-                        # Try to find scale for this axis
-                        scale_key = f"scale_{ax.lower()}"
-                        if scale_key in metadata:
-                            try:
-                                scale_value = float(metadata[scale_key])
-                                if scale_value > 0:  # Only use valid values
-                                    scale = scale_value
-                            except (ValueError, TypeError):
-                                pass
+                        if ax == "X" or ax == "Y":
+                            # Get resolution from metadata
+
+                            res_x, res_y = metadata["resolution"]
+                            scale = res_x if ax == "X" else res_y
+                        elif ax == "Z":
+                            # Get Z spacing
+                            scale = metadata["spacing"]
 
                         scales.append(scale)
 
-                    # Only create transformations if we have non-default scales
-                    if any(s != 1.0 for s in scales):
-                        coordinate_transformations = [
-                            {"type": "scale", "scale": scales}
-                        ]
-                except (ValueError, FileNotFoundError) as e:
+                    print(f"Built scales from metadata: {scales}")
+
+                # Create transformation if we have any non-default scales
+                if any(s != 1.0 for s in scales):
+                    coordinate_transformations = [
+                        {"type": "scale", "scale": scales}
+                    ]
                     print(
-                        f"Warning: Could not process coordinate transformations: {str(e)}"
+                        f"Created coordinate transformations: {coordinate_transformations}"
                     )
-                    coordinate_transformations = None
+            except (ValueError, TypeError) as e:
+                print(f"Error creating coordinate transformations: {e}")
 
-            # Write the image data using the OME-Zarr writer
-            write_options = {
-                "image": image_data,
-                "group": store,
-                "axes": axes,
-                "chunks": chunks,
-                "compression": "zstd",
-                "compression_opts": {"level": 3},
-            }
+        # Write image
+        write_options = {
+            "image": image_data,
+            "group": store,
+            "axes": axes,
+            "chunks": chunks,
+            "compression": "zstd",
+            "compression_opts": {"level": 3},
+        }
 
-            # Add transformations if available
-            if coordinate_transformations:
-                write_options["coordinate_transformations"] = (
-                    coordinate_transformations
-                )
+        # Add transformations if available
+        if coordinate_transformations:
+            write_options["coordinate_transformations"] = (
+                coordinate_transformations
+            )
 
+        try:
             write_image(**write_options)
-            print(f"Saved OME-Zarr image data: {output_path}")
+            print(f"Successfully wrote image data to: {output_path}")
 
-            # Try to add metadata
+            # Add additional metadata
             if metadata:
                 try:
                     # Access the root group
                     root = zarr.group(store)
 
-                    # Add OMERO metadata
-                    if "omero" not in root:
-                        root.create_group("omero")
-                    omero_metadata = root["omero"]
-                    omero_metadata.attrs["version"] = "0.4"
-
-                    # Add original metadata in a separate group
-                    if "original_metadata" not in root:
-                        metadata_group = root.create_group("original_metadata")
+                    # Create metadata group if needed
+                    if "metadata" not in root:
+                        metadata_group = root.create_group("metadata")
                     else:
-                        metadata_group = root["original_metadata"]
+                        metadata_group = root["metadata"]
 
-                    # Add metadata as attributes, safely converting types
+                    # Store each metadata key that we can
                     for key, value in metadata.items():
                         try:
-                            # Try to store directly if it's a simple type
                             if isinstance(
-                                value, (str, int, float, bool, type(None))
+                                value,
+                                (
+                                    str,
+                                    int,
+                                    float,
+                                    bool,
+                                    list,
+                                    dict,
+                                    type(None),
+                                ),
                             ):
                                 metadata_group.attrs[key] = value
                             else:
-                                # Otherwise convert to string
+                                # Convert to string if not a basic type
                                 metadata_group.attrs[key] = str(value)
                         except (ValueError, TypeError) as e:
-                            print(
-                                f"Warning: Could not store metadata key '{key}': {str(e)}"
-                            )
+                            print(f"Error storing metadata key '{key}': {e}")
 
-                    print(f"Added metadata to OME-Zarr file: {output_path}")
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Warning: Could not add metadata to Zarr: {str(e)}")
+                    print("Added metadata to zarr file")
+                except (ValueError, TypeError) as e:
+                    print(f"Error adding metadata: {e}")
 
-            return output_path
+            return True
         except (ValueError, FileNotFoundError) as e:
-            print(f"Error in _save_zarr: {str(e)}")
-            # For zarr, we don't have a simpler fallback method, so re-raise
-            raise
+            print(f"Error writing zarr image: {e}")
+            return False
 
     def _calculate_chunks(self, shape, target_size, item_size):
         """Calculate appropriate chunk sizes for zarr storage"""
         try:
-            total_elements = np.prod(shape)
+            # For 5D TZCYX data, use optimized chunking strategy
+            if len(shape) == 5:
+                # For TZCYX shape, optimize for common access patterns
+                # Typically want full timepoints, channels, and reasonable XY tiles
+                t_size, z_size, c_size, y_size, x_size = shape
+
+                # Start with full C dimension, reasonable Z, and small T
+                t_chunk = min(1, t_size)
+                z_chunk = min(10, z_size)
+                c_chunk = c_size  # Usually take full channels
+
+                # Calculate remaining space for Y and X (aim for square tiles)
+                remaining_elements = (
+                    target_size // item_size // (t_chunk * z_chunk * c_chunk)
+                )
+                xy_size = int(np.sqrt(remaining_elements))
+
+                # Ensure minimum size and cap at image dimensions
+                xy_size = max(64, min(xy_size, min(y_size, x_size)))
+
+                return (t_chunk, z_chunk, c_chunk, xy_size, xy_size)
+
+            # Generic calculation for other dimension counts
+            ndim = len(shape)
             elements_per_chunk = target_size // item_size
 
-            chunk_shape = list(shape)
-            for i in reversed(range(len(chunk_shape))):
-                # Guard against division by zero
-                if total_elements > 0 and chunk_shape[i] > 0:
-                    chunk_shape[i] = max(
-                        1,
-                        int(
-                            elements_per_chunk
-                            / (total_elements / chunk_shape[i])
-                        ),
-                    )
-                    break
+            # Balanced chunking approach
+            chunks = []
 
-            # Ensure chunks aren't larger than dimensions
-            for i in range(len(chunk_shape)):
-                chunk_shape[i] = min(chunk_shape[i], shape[i])
+            # For higher dimensions (time, etc.), use smaller chunks
+            for i in range(ndim - 2):
+                dim_size = shape[i]
+                # Use smaller chunks for outer dimensions
+                chunk_size = min(max(1, dim_size // 4), 16)
+                chunks.append(chunk_size)
+                elements_per_chunk //= chunk_size
 
-            return tuple(chunk_shape)
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Warning: Error calculating chunks: {str(e)}")
-            # Return a default chunk size that's safe
-            return tuple(min(512, d) for d in shape)
+            # For spatial dimensions (last 2), aim for square tiles
+            if ndim >= 2:
+                # Get spatial dimensions
+                y_size, x_size = shape[-2], shape[-1]
+
+                # Calculate tile size to fit in remaining elements
+                tile_size = int(np.sqrt(elements_per_chunk))
+
+                # Ensure minimum size and cap at image dimensions
+                tile_size = max(64, min(tile_size, min(y_size, x_size)))
+
+                chunks.append(tile_size)  # Y dimension
+                chunks.append(tile_size)  # X dimension
+
+            return tuple(chunks)
+        except (ValueError, TypeError) as e:
+            print(f"Error calculating chunks: {e}")
+            # Return safe default
+            return tuple(min(128, d) for d in shape)
 
 
 class MicroscopyImageConverterWidget(QWidget):
