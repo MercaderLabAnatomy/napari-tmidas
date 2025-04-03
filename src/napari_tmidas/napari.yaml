@@ -30,6 +30,9 @@ contributions:
     - id: napari-tmidas._crop_anything
       python_name: napari_tmidas._crop_anything:batch_crop_anything_widget
       title: Batch Crop Anything
+    - id: napari-tmidas._roi_colocalization
+      python_name: napari_tmidas._roi_colocalization:roi_colocalization_analyzer
+      title: Batch ROI Colocalization Analysis
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
@@ -54,3 +57,5 @@ contributions:
       display_name: Batch Microscopy Image Conversion
     - command: napari-tmidas._crop_anything
       display_name: Batch Crop Anything
+    - command: napari-tmidas._roi_colocalization
+      display_name: Batch ROI Colocalization Analysis
