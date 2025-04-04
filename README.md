@@ -6,7 +6,7 @@
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-tmidas)](https://napari-hub.org/plugins/napari-tmidas)
 <!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
-The `napari-tmidas` plugin consists of a growing collection of pipelines for fast batch processing of microscopy images.
+The `napari-tmidas` plugin consists of a growing collection of pipelines for fast batch processing of microscopy images. This is a WIP and based on the CLI version of [T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ## Feature Overview
 
@@ -17,11 +17,16 @@ The `napari-tmidas` plugin consists of a growing collection of pipelines for fas
 2. **Batch Label Inspection**
    - Review and edit label images with auto-save
 
-3. **Batch Microscopy Conversion**
+3. **Batch Microscopy Image Conversion**
    - Convert .nd2/.lif/.ndpi/.czi/acquifer → .tif/.zarr with metadata preservation
 
 4. **Batch Crop Anything**
    - Interactive ROI selection via click interface
+
+5. Batch ROI Colocalization
+   - Count colocalized labels across multiple channels
+
+
 
 ### Coming Soon
 New features arriving April 2025
