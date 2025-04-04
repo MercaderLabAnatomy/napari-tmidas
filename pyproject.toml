@@ -43,7 +43,6 @@ dependencies = [
     "torchvision",
     "timm",
     "opencv-python",
-    "mobilesam @ git+https://github.com/ChaoningZhang/MobileSAM.git"
 ]
 
 [project.optional-dependencies]
