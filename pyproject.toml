@@ -32,6 +32,17 @@ dependencies = [
     "pyqt5",
     "tqdm",
     "scikit-image",
+    "nd2",
+    "readlif",
+    "tiffslide",
+    "pylibCZIrw",
+    "acquifer-napari",
+    "ome-zarr",
+    "napari-ome-zarr",
+    "torch",
+    "torchvision",
+    "timm",
+    "opencv-python",
 ]
 
 [project.optional-dependencies]

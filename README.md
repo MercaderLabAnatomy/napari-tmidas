@@ -56,21 +56,17 @@ To install the latest development version:
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
 ### Dependencies
-To use the Batch Microscopy Image Conversion pipeline, we need some libraries to read microscopy formats and to write ome-zarr:
-
-    pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari ome-zarr napari-ome-zarr
 
 For the Batch Crop Anything pipeline, we need to install MobileSAM and its dependencies:
 
     pip install git+https://github.com/ChaoningZhang/MobileSAM.git
-    pip install torch torchvision timm opencv-python
 
-If you want to batch compress images:
 
-    # For file compression (requires pzstd command-line tool)
-    # sudo apt-get install zstd    # for Linux
-    # brew install zstd            # for macOS
-    # choco install zstandard      # for Windows
+If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
+
+    sudo apt-get install zstd    # for Linux
+    brew install zstd            # for macOS
+    choco install zstandard      # for Windows
 
 
 ## Usage
