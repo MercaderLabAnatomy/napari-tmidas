@@ -67,7 +67,7 @@ For the Batch Crop Anything pipeline, we need to install MobileSAM and its depen
 
 If you want to batch compress images:
 
-    # For file compression/decompression (requires pzstd command-line tool)
+    # For file compression (requires pzstd command-line tool)
     # sudo apt-get install zstd    # for Linux
     # brew install zstd            # for macOS
     # choco install zstandard      # for Windows
