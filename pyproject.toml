@@ -30,6 +30,8 @@ dependencies = [
     "qtpy",
     "scikit-image",
     "pyqt5",
+    "tqdm",
+    "scikit-image",
 ]
 
 [project.optional-dependencies]

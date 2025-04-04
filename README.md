@@ -11,7 +11,15 @@ The `napari-tmidas` plugin consists of a growing collection of pipelines for fas
 ## Feature Overview
 
 1. **Image Processing**
-   - Process image folders with: Gamma correction, Z-projection, channel splitting, Gaussian/median filters, thresholding (Otsu/manual), and label cleaning
+   - Process image folders with:
+     - Gamma correction & histogram equalization
+     - Z-projection and channel splitting
+     - Gaussian & median filters
+     - Thresholding (Otsu/manual)
+     - Label cleaning & binary conversion
+     - RGB to labels conversion
+     - Cellpose 3.0 automated segmentation
+     - File compression (Zstandard)
 
 2. **Label Inspection**
    - Review and edit label images with auto-save
@@ -56,6 +64,14 @@ For the Batch Crop Anything pipeline, we need to install MobileSAM and its depen
 
     pip install git+https://github.com/ChaoningZhang/MobileSAM.git
     pip install torch torchvision timm opencv-python
+
+If you want to batch compress images:
+
+    # For file compression/decompression (requires pzstd command-line tool)
+    # sudo apt-get install zstd    # for Linux
+    # brew install zstd            # for macOS
+    # choco install zstandard      # for Windows
+
 
 ## Usage
 
