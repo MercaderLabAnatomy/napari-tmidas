@@ -1139,9 +1139,9 @@ def roi_colocalization_analyzer(viewer: Viewer):
     analysis_widget = ColocalizationAnalysisWidget(viewer)
 
     # Add to viewer
-    # dock_widget = viewer.window.add_dock_widget(
-    #     analysis_widget, name="ROI Colocalization Analysis", area="right"
-    # )
+    viewer.window.add_dock_widget(
+        analysis_widget, name="ROI Colocalization Analysis", area="right"
+    )
 
     # Instead of using destroyed signal which doesn't exist,
     # we can use the removed event from napari's dock widget
