@@ -51,15 +51,13 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-To install the latest development version:
+It is recommended to install the latest development version:
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
 ### Dependencies
 
-For the Batch Crop Anything pipeline, we need to install MobileSAM and its dependencies:
-
-    pip install git+https://github.com/ChaoningZhang/MobileSAM.git
+All Python dependencies are included in the pyproject.toml.
 
 If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
