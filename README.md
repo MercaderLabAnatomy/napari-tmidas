@@ -10,20 +10,19 @@ The `napari-tmidas` plugin consists of a growing collection of pipelines for fas
 
 ## Feature Overview
 
-### Current Pipelines
-1. **Batch Image Processing**
+1. **Image Processing**
    - Process image folders with: Gamma correction, Z-projection, channel splitting, Gaussian/median filters, thresholding (Otsu/manual), and label cleaning
 
-2. **Batch Label Inspection**
+2. **Label Inspection**
    - Review and edit label images with auto-save
 
-3. **Batch Microscopy Image Conversion**
+3. **Microscopy Image Conversion**
    - Convert .nd2/.lif/.ndpi/.czi/acquifer → .tif/.zarr with metadata preservation
 
-4. **Batch Crop Anything**
+4. **Crop Anything**
    - Interactive ROI selection via click interface
 
-5. Batch ROI Colocalization
+5. **ROI Colocalization**
    - Count colocalized labels across multiple channels
 
 
@@ -69,13 +68,13 @@ You can find the installed plugin here:
 ![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
 
 
-### Batch Microscopy Image Conversion
+### Microscopy Image Conversion
 
 You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conversion`. Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` and acquifer data. After scanning a folder of your choice for microscopy image data, select a file in the first column of the table and preview and export any image data it contains.
 
 ![image](https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b)
 
-### Batch File Processing
+### Image Processing
 
 1. After opening `Plugins > T-MIDAS > Batch Image Processing`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
 
@@ -100,10 +99,15 @@ If you have already segmented a folder full of images and now you want to maybe 
 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
-### Batch Crop Anything
+### Crop Anything
 This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`
 
 ![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)
+
+### ROI Colocalization
+This pipeline allows to analyze colocalization between ROIs in multiple channel label images. Results are saved as tabular data, containing colocalization counts between labels in a reference channel and one or two other channels. Optionally, both the size of labels in the reference channel as well as the median size or total size of the labels in the other channels that colocalize can be included in the results.
+
+![napari-tmidas_coloc_pipeline](https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7)
 
 
 ## Contributing
