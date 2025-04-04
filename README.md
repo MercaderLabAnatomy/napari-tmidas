@@ -65,12 +65,11 @@ For the Batch Crop Anything pipeline, we need to install MobileSAM and its depen
     pip install git+https://github.com/ChaoningZhang/MobileSAM.git
     pip install torch torchvision timm opencv-python
 
-If you want to batch compress images:
+If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
-    # For file compression (requires pzstd command-line tool)
-    # sudo apt-get install zstd    # for Linux
-    # brew install zstd            # for macOS
-    # choco install zstandard      # for Windows
+    sudo apt-get install zstd    # for Linux
+    brew install zstd            # for macOS
+    choco install zstandard      # for Windows
 
 
 ## Usage
