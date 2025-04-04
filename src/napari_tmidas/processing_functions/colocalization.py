@@ -11,8 +11,6 @@ returns statistics about their colocalization.
 import numpy as np
 from skimage import measure
 
-from napari_tmidas._registry import BatchProcessingRegistry
-
 
 def get_nonzero_labels(image):
     """Get unique, non-zero labels from an image."""
@@ -133,23 +131,23 @@ def process_single_roi(
     return result
 
 
-@BatchProcessingRegistry.register(
-    name="ROI Colocalization",
-    suffix="_coloc",
-    description="Analyze colocalization between ROIs in multiple channel label images",
-    parameters={
-        "get_sizes": {
-            "type": bool,
-            "default": False,
-            "description": "Calculate size statistics",
-        },
-        "size_method": {
-            "type": str,
-            "default": "median",
-            "description": "Method for size calculation (median or sum)",
-        },
-    },
-)
+# @BatchProcessingRegistry.register(
+#     name="ROI Colocalization",
+#     suffix="_coloc",
+#     description="Analyze colocalization between ROIs in multiple channel label images",
+#     parameters={
+#         "get_sizes": {
+#             "type": bool,
+#             "default": False,
+#             "description": "Calculate size statistics",
+#         },
+#         "size_method": {
+#             "type": str,
+#             "default": "median",
+#             "description": "Method for size calculation (median or sum)",
+#         },
+#     },
+# )
 def roi_colocalization(image, get_sizes=False, size_method="median"):
     """
     Calculate colocalization between channels for a multi-channel label image.

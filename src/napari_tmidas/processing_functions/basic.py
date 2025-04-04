@@ -8,6 +8,37 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 
 @BatchProcessingRegistry.register(
+    name="Labels to Binary",
+    suffix="_binary",
+    description="Convert multi-label images to binary masks (all non-zero labels become 1)",
+)
+def labels_to_binary(image: np.ndarray) -> np.ndarray:
+    """
+    Convert multi-label images to binary masks.
+
+    This function takes a label image (where different regions have different label values)
+    and converts it to a binary mask (where all labeled regions have a value of 1 and
+    background has a value of 0).
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input label image array
+
+    Returns:
+    --------
+    numpy.ndarray
+        Binary mask with 1 for all non-zero labels and 0 for background
+    """
+    # Make a copy of the input image to avoid modifying the original
+    binary_mask = image.copy()
+
+    binary_mask = (binary_mask > 0).astype(np.uint32)
+
+    return binary_mask
+
+
+@BatchProcessingRegistry.register(
     name="Gamma Correction",
     suffix="_gamma",
     description="Apply gamma correction to the image (>1: enhance bright regions, <1: enhance dark regions)",
@@ -123,3 +154,76 @@ def split_channels(image: np.ndarray, num_channels: int = 3) -> np.ndarray:
     # channels = [np.squeeze(ch, axis=channel_axis) for ch in channels]
 
     return np.stack(channels, axis=0)
+
+
+@BatchProcessingRegistry.register(
+    name="RGB to Labels",
+    suffix="_labels",
+    description="Convert RGB images to label images using a color map",
+    parameters={
+        "blue_label": {
+            "type": int,
+            "default": 1,
+            "min": 0,
+            "max": 255,
+            "description": "Label value for blue objects",
+        },
+        "green_label": {
+            "type": int,
+            "default": 2,
+            "min": 0,
+            "max": 255,
+            "description": "Label value for green objects",
+        },
+        "red_label": {
+            "type": int,
+            "default": 3,
+            "min": 0,
+            "max": 255,
+            "description": "Label value for red objects",
+        },
+    },
+)
+def rgb_to_labels(
+    image: np.ndarray,
+    blue_label: int = 1,
+    green_label: int = 2,
+    red_label: int = 3,
+) -> np.ndarray:
+    """
+    Convert RGB images to label images where each color is mapped to a specific label value.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input RGB image array
+    blue_label : int
+        Label value for blue objects (default: 1)
+    green_label : int
+        Label value for green objects (default: 2)
+    red_label : int
+        Label value for red objects (default: 3)
+
+    Returns:
+    --------
+    numpy.ndarray
+        Label image where each color is mapped to the specified label value
+    """
+    # Ensure the image is a proper RGB image
+    if image.ndim < 3 or image.shape[-1] != 3:
+        raise ValueError("Input must be an RGB image with 3 channels")
+
+    # Define the color mapping
+    color_mapping = {
+        (0, 0, 255): blue_label,  # Blue
+        (0, 255, 0): green_label,  # Green
+        (255, 0, 0): red_label,  # Red
+    }
+    # Create an empty label image
+    label_image = np.zeros(image.shape[:-1], dtype=np.uint32)
+    # Iterate through the color mapping and assign labels
+    for color, label in color_mapping.items():
+        mask = np.all(image == color, axis=-1)
+        label_image[mask] = label
+    # Return the label image
+    return label_image

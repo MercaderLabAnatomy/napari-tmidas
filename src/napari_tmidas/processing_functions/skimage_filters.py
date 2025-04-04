@@ -39,7 +39,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (semantic)",
         suffix="_otsu_semantic",
-        description="Threshold image using Otsu's method",
+        description="Threshold image using Otsu's method to obtain a binary image",
     )
     def otsu_thresholding(image: np.ndarray) -> np.ndarray:
         """
@@ -54,7 +54,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (instance)",
         suffix="_otsu_labels",
-        description="Threshold image using Otsu's method",
+        description="Threshold image using Otsu's method to obtain a multi-label image",
     )
     def otsu_thresholding_instance(image: np.ndarray) -> np.ndarray:
         """
@@ -68,7 +68,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Manual Thresholding (8-bit)",
         suffix="_thresh",
-        description="Threshold image using a fixed threshold",
+        description="Threshold image using a fixed threshold to obtain a binary image",
         parameters={
             "threshold": {
                 "type": int,
@@ -91,9 +91,9 @@ if SKIMAGE_AVAILABLE:
 
     # remove small objects
     @BatchProcessingRegistry.register(
-        name="Remove Small Objects",
+        name="Remove Small Labels",
         suffix="_rm_small",
-        description="Remove small objects from the binary image",
+        description="Remove small labels from label images",
         parameters={
             "min_size": {
                 "type": int,
@@ -108,8 +108,27 @@ if SKIMAGE_AVAILABLE:
         image: np.ndarray, min_size: int = 100
     ) -> np.ndarray:
         """
-        Remove small objects from the binary image
+        Remove small labels from label images
         """
         return skimage.morphology.remove_small_objects(
             image, min_size=min_size
         )
+
+
+# binary to labels
+@BatchProcessingRegistry.register(
+    name="Binary to Labels",
+    suffix="_labels",
+    description="Convert binary images to label images (connected components)",
+)
+def binary_to_labels(image: np.ndarray) -> np.ndarray:
+    """
+    Convert binary images to label images (connected components)
+    """
+    # Make a copy of the input image to avoid modifying the original
+    label_image = image.copy()
+
+    # Convert binary image to label image using connected components
+    label_image = skimage.measure.label(label_image, connectivity=2)
+
+    return label_image
