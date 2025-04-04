@@ -105,7 +105,7 @@ This pipeline combines the Segment Anything Model (SAM) for automatic object det
 ![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)
 
 ### ROI Colocalization
-This pipeline allows to analyze colocalization between ROIs in multiple channel label images. Results are saved as tabular data, containing colocalization counts between labels in a reference channel and one or two other channels. Optionally, both the size of labels in the reference channel as well as the median size or total size of the labels in the other channels that colocalize can be included in the results.
+This pipeline quantifies colocalization between labeled regions of interest (ROIs) across multiple image channels. It determines the extent of overlap between ROIs in a reference channel and those in one or two other channels. The output is a table of colocalization counts. Optionally, the size of reference channel ROIs, as well as the total or median size of colocalizing ROIs in the other channels, can be included. Colocalization is determined using Boolean masking. The number of colocalizing instances is determined by counting unique label IDs within the overlapping regions. Typically, the reference channel contains larger structures, while other channels contain smaller, potentially nested, structures. For example, the reference channel might contain cell bodies, with the second and third channels containing nuclei and sub-nuclear objects, respectively.
 
 ![napari-tmidas_coloc_pipeline](https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7)
 
