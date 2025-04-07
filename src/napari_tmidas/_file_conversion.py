@@ -1105,19 +1105,21 @@ class ConversionWorker(QThread):
                 )
                 file_size_GB = estimated_size_bytes / (1024**3)
 
-                # If file is very large (>4GB), force zarr format regardless of setting
+                # Determine format
                 use_zarr = self.use_zarr
-                if file_size_GB > 4:
-                    use_zarr = True
-                    if not self.use_zarr:
-                        print(
-                            f"File size ({file_size_GB:.2f}GB) exceeds 4GB limit for TIF, automatically using ZARR format"
-                        )
-                        self.file_done.emit(
-                            filepath,
-                            True,
-                            f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using ZARR format",
-                        )
+                # If file is very large (>4GB) and user didn't explicitly choose TIF,
+                # auto-switch to ZARR format
+                if file_size_GB > 4 and not self.use_zarr:
+                    # Recommend ZARR format but respect user's choice by still allowing TIF
+                    print(
+                        f"File size ({file_size_GB:.2f}GB) exceeds 4GB, ZARR format is recommended but using TIF with BigTIFF format"
+                    )
+                    self.file_done.emit(
+                        filepath,
+                        True,
+                        f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using TIF with BigTIFF format",
+                    )
+
                 # Set up the output path
                 if use_zarr:
                     output_path = os.path.join(
@@ -1171,11 +1173,21 @@ class ConversionWorker(QThread):
     def _save_tif(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Enhanced TIF saving with proper dimension handling"""
+        """Enhanced TIF saving with proper dimension handling and BigTIFF support"""
         import tifffile
 
         print(f"Saving TIF file: {output_path}")
         print(f"Image data shape: {image_data.shape}")
+
+        # Check if this is a large file that needs BigTIFF
+        estimated_size_bytes = np.prod(image_data.shape) * image_data.itemsize
+        file_size_GB = estimated_size_bytes / (1024**3)
+        use_bigtiff = file_size_GB > 4
+
+        if use_bigtiff:
+            print(
+                f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using BigTIFF format"
+            )
 
         if metadata:
             print(f"Metadata keys: {list(metadata.keys())}")
@@ -1198,7 +1210,12 @@ class ConversionWorker(QThread):
         # Basic save if no metadata
         if metadata is None:
             print("No metadata provided, using basic save")
-            tifffile.imwrite(output_path, image_data, compression="zstd")
+            tifffile.imwrite(
+                output_path,
+                image_data,
+                compression="zstd",
+                bigtiff=use_bigtiff,
+            )
             return
 
         # Get image dimensions and axis order
@@ -1261,7 +1278,10 @@ class ConversionWorker(QThread):
                     print(f"Error reordering dimensions: {e}")
                     # Fall back to simple save without reordering
                     tifffile.imwrite(
-                        output_path, image_data, compression="zstd"
+                        output_path,
+                        image_data,
+                        compression="zstd",
+                        bigtiff=use_bigtiff,
                     )
                     return
 
@@ -1288,6 +1308,7 @@ class ConversionWorker(QThread):
                     image_data,
                     resolution=resolution,
                     compression="zstd",
+                    bigtiff=use_bigtiff,
                 )
             else:
                 # Hyperstack case
@@ -1307,13 +1328,14 @@ class ConversionWorker(QThread):
                     resolution=resolution,
                     metadata=imagej_metadata,
                     compression="zstd",
+                    bigtiff=use_bigtiff,
                 )
 
             print(f"Successfully saved TIF file: {output_path}")
         except (ValueError, FileNotFoundError) as e:
             print(f"Error saving TIF file: {e}")
             # Try simple save as fallback
-            tifffile.imwrite(output_path, image_data)
+            tifffile.imwrite(output_path, image_data, bigtiff=use_bigtiff)
 
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
