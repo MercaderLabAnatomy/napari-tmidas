@@ -609,8 +609,16 @@ class ProcessingWorker(QThread):
             image = imread(filepath)
             image_dtype = image.dtype
 
+            # Print diagnostic information
+            print(f"Original image shape: {image.shape}, dtype: {image_dtype}")
+
             # Apply processing with parameters
             processed_image = self.processing_func(image, **self.param_values)
+
+            # Print processed image information
+            print(
+                f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}"
+            )
 
             # Generate new filename base
             filename = os.path.basename(filepath)
@@ -623,29 +631,83 @@ class ProcessingWorker(QThread):
             if processed_image.ndim > image.ndim:
                 # Save each channel as a separate image
                 processed_files = []
-                for i in range(processed_image.shape[0]):
+
+                # Determine the channel dimension (assuming first dim for multi-channel output)
+                channel_dim = 0
+                num_channels = processed_image.shape[channel_dim]
+
+                print(f"Saving {num_channels} separate channel files")
+
+                for i in range(num_channels):
                     channel_filename = f"{new_filename_base}_channel_{i}{ext}"
                     channel_filepath = os.path.join(
                         self.output_folder, channel_filename
                     )
 
+                    # Extract channel data
+                    channel_image = processed_image[i]
+
+                    # Remove singleton dimensions
+                    channel_image = np.squeeze(channel_image)
+
+                    print(
+                        f"Channel {i} shape after squeeze: {channel_image.shape}"
+                    )
+
+                    # Check data range to ensure it's within valid bounds for the format
+                    data_min = (
+                        np.min(channel_image) if channel_image.size > 0 else 0
+                    )
+                    data_max = (
+                        np.max(channel_image) if channel_image.size > 0 else 0
+                    )
+                    print(f"Channel {i} data range: {data_min} to {data_max}")
+
+                    # Determine appropriate data type
                     if (
                         "labels" in channel_filename
                         or "semantic" in channel_filename
                     ):
+                        # For label images, ensure values are within uint32 range
+                        if data_max <= 255:
+                            save_dtype = np.uint8
+                        elif data_max <= 65535:
+                            save_dtype = np.uint16
+                        else:
+                            save_dtype = np.uint32
+
+                        print(
+                            f"Label image detected, saving as {save_dtype.__name__}"
+                        )
                         tifffile.imwrite(
                             channel_filepath,
-                            processed_image[i].astype(np.uint32),
+                            channel_image.astype(save_dtype),
                             compression="zlib",
                         )
                     else:
-                        # First remove singletons
-                        channel_image = np.squeeze(processed_image[i])
+                        # For normal images, use original dtype or something appropriate
+                        print(
+                            f"Regular image channel, saving with original dtype {image_dtype}"
+                        )
+
+                        # Check if there are any NaN or infinity values
+                        if np.issubdtype(channel_image.dtype, np.floating):
+                            has_nan = np.isnan(channel_image).any()
+                            has_inf = np.isinf(channel_image).any()
+                            if has_nan or has_inf:
+                                print(
+                                    f"Warning: Channel {i} contains NaN: {has_nan} or Inf: {has_inf} values"
+                                )
+                                # Replace NaN/Inf with safe values
+                                channel_image = np.nan_to_num(channel_image)
+
+                        # Save image with original dtype
                         tifffile.imwrite(
                             channel_filepath,
                             channel_image.astype(image_dtype),
                             compression="zlib",
                         )
+
                     processed_files.append(channel_filepath)
 
                 # Return processing info
@@ -659,16 +721,50 @@ class ProcessingWorker(QThread):
                     self.output_folder, new_filename_base + ext
                 )
 
+                # Remove singleton dimensions
+                processed_image = np.squeeze(processed_image)
+
+                print(f"Single output image shape: {processed_image.shape}")
+
+                # Check data range
+                data_min = (
+                    np.min(processed_image) if processed_image.size > 0 else 0
+                )
+                data_max = (
+                    np.max(processed_image) if processed_image.size > 0 else 0
+                )
+                print(f"Data range: {data_min} to {data_max}")
+
                 if (
                     "labels" in new_filename_base
                     or "semantic" in new_filename_base
                 ):
+                    # Choose appropriate integer type based on data range
+                    if data_max <= 255:
+                        save_dtype = np.uint8
+                    elif data_max <= 65535:
+                        save_dtype = np.uint16
+                    else:
+                        save_dtype = np.uint32
+
+                    print(f"Saving label image as {save_dtype.__name__}")
                     tifffile.imwrite(
                         new_filepath,
-                        processed_image.astype(np.uint32),
+                        processed_image.astype(save_dtype),
                         compression="zlib",
                     )
                 else:
+                    # Handle NaN/Inf values if floating-point data
+                    if np.issubdtype(processed_image.dtype, np.floating):
+                        has_nan = np.isnan(processed_image).any()
+                        has_inf = np.isinf(processed_image).any()
+                        if has_nan or has_inf:
+                            print(
+                                f"Warning: Output contains NaN: {has_nan} or Inf: {has_inf} values"
+                            )
+                            processed_image = np.nan_to_num(processed_image)
+
+                    print(f"Saving image with original dtype {image_dtype}")
                     tifffile.imwrite(
                         new_filepath,
                         processed_image.astype(image_dtype),
@@ -684,6 +780,9 @@ class ProcessingWorker(QThread):
         except Exception as e:
             # Log the error and re-raise to be caught by the executor
             print(f"Error processing {filepath}: {e}")
+            import traceback
+
+            traceback.print_exc()
             raise
         finally:
             # Explicit cleanup to help with memory management
@@ -691,10 +790,6 @@ class ProcessingWorker(QThread):
                 del image
             if "processed_image" in locals():
                 del processed_image
-
-    def stop(self):
-        """Request worker to stop processing"""
-        self.stop_requested = True
 
 
 class FileResultsWidget(QWidget):
