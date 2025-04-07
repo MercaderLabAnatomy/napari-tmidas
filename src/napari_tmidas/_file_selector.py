@@ -603,21 +603,27 @@ class ProcessingWorker(QThread):
         self.processing_finished.emit()
 
     def process_file(self, filepath):
-        """Process a single file"""
+        """Process a single file with support for large TIFF files and removal of all singleton dimensions"""
         try:
             # Load the image
             image = imread(filepath)
             image_dtype = image.dtype
 
-            # Print diagnostic information
             print(f"Original image shape: {image.shape}, dtype: {image_dtype}")
 
             # Apply processing with parameters
             processed_image = self.processing_func(image, **self.param_values)
 
-            # Print processed image information
             print(
-                f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}"
+                f"Processed image shape before removing singletons: {processed_image.shape}, dtype: {processed_image.dtype}"
+            )
+
+            # Remove ALL singleton dimensions from the processed image
+            # This will keep only dimensions with size > 1
+            processed_image = np.squeeze(processed_image)
+
+            print(
+                f"Processed image shape after removing singletons: {processed_image.shape}"
             )
 
             # Generate new filename base
@@ -627,16 +633,24 @@ class ProcessingWorker(QThread):
                 name.replace(self.input_suffix, "") + self.output_suffix
             )
 
-            # Check if the processed image is a stacked array
-            if processed_image.ndim > image.ndim:
+            # Check if the first dimension should be treated as channels
+            # If processed_image has more dimensions than the original image,
+            # assume the first dimension represents channels
+            is_multi_channel = (processed_image.ndim > image.ndim - 1) or (
+                processed_image.ndim == image.ndim
+                and processed_image.shape[0] <= 10
+            )
+
+            if (
+                is_multi_channel and processed_image.shape[0] <= 10
+            ):  # Reasonable number of channels
                 # Save each channel as a separate image
                 processed_files = []
 
-                # Determine the channel dimension (assuming first dim for multi-channel output)
-                channel_dim = 0
-                num_channels = processed_image.shape[channel_dim]
-
-                print(f"Saving {num_channels} separate channel files")
+                num_channels = processed_image.shape[0]
+                print(
+                    f"Treating first dimension as channels. Saving {num_channels} separate channel files"
+                )
 
                 for i in range(num_channels):
                     channel_filename = f"{new_filename_base}_channel_{i}{ext}"
@@ -644,17 +658,18 @@ class ProcessingWorker(QThread):
                         self.output_folder, channel_filename
                     )
 
-                    # Extract channel data
-                    channel_image = processed_image[i]
+                    # Extract channel data and remove any remaining singleton dimensions
+                    channel_image = np.squeeze(processed_image[i])
 
-                    # Remove singleton dimensions
-                    channel_image = np.squeeze(channel_image)
+                    print(f"Channel {i} shape: {channel_image.shape}")
 
-                    print(
-                        f"Channel {i} shape after squeeze: {channel_image.shape}"
+                    # Calculate approx file size in GB
+                    size_gb = (
+                        channel_image.size * channel_image.itemsize / (1024**3)
                     )
+                    print(f"Estimated file size: {size_gb:.2f} GB")
 
-                    # Check data range to ensure it's within valid bounds for the format
+                    # Check data range
                     data_min = (
                         np.min(channel_image) if channel_image.size > 0 else 0
                     )
@@ -663,12 +678,16 @@ class ProcessingWorker(QThread):
                     )
                     print(f"Channel {i} data range: {data_min} to {data_max}")
 
-                    # Determine appropriate data type
+                    # For very large files, we need to use BigTIFF format
+                    use_bigtiff = (
+                        size_gb > 2.0
+                    )  # Use BigTIFF for files over 2GB
+
                     if (
                         "labels" in channel_filename
                         or "semantic" in channel_filename
                     ):
-                        # For label images, ensure values are within uint32 range
+                        # Choose appropriate integer type based on data range
                         if data_max <= 255:
                             save_dtype = np.uint8
                         elif data_max <= 65535:
@@ -677,35 +696,26 @@ class ProcessingWorker(QThread):
                             save_dtype = np.uint32
 
                         print(
-                            f"Label image detected, saving as {save_dtype.__name__}"
+                            f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
                         )
                         tifffile.imwrite(
                             channel_filepath,
                             channel_image.astype(save_dtype),
                             compression="zlib",
+                            bigtiff=use_bigtiff,
                         )
                     else:
-                        # For normal images, use original dtype or something appropriate
+                        # Handle large images with bigtiff format
                         print(
-                            f"Regular image channel, saving with original dtype {image_dtype}"
+                            f"Regular image channel, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
                         )
 
-                        # Check if there are any NaN or infinity values
-                        if np.issubdtype(channel_image.dtype, np.floating):
-                            has_nan = np.isnan(channel_image).any()
-                            has_inf = np.isinf(channel_image).any()
-                            if has_nan or has_inf:
-                                print(
-                                    f"Warning: Channel {i} contains NaN: {has_nan} or Inf: {has_inf} values"
-                                )
-                                # Replace NaN/Inf with safe values
-                                channel_image = np.nan_to_num(channel_image)
-
-                        # Save image with original dtype
+                        # Save with original dtype and bigtiff format if needed
                         tifffile.imwrite(
                             channel_filepath,
                             channel_image.astype(image_dtype),
                             compression="zlib",
+                            bigtiff=use_bigtiff,
                         )
 
                     processed_files.append(channel_filepath)
@@ -716,15 +726,21 @@ class ProcessingWorker(QThread):
                     "processed_files": processed_files,
                 }
             else:
-                # Save as a single image (original behavior)
+                # Save as a single image
                 new_filepath = os.path.join(
                     self.output_folder, new_filename_base + ext
                 )
 
-                # Remove singleton dimensions
-                processed_image = np.squeeze(processed_image)
-
                 print(f"Single output image shape: {processed_image.shape}")
+
+                # Calculate approx file size in GB
+                size_gb = (
+                    processed_image.size * processed_image.itemsize / (1024**3)
+                )
+                print(f"Estimated file size: {size_gb:.2f} GB")
+
+                # For very large files, we need to use BigTIFF format
+                use_bigtiff = size_gb > 2.0  # Use BigTIFF for files over 2GB
 
                 # Check data range
                 data_min = (
@@ -747,28 +763,24 @@ class ProcessingWorker(QThread):
                     else:
                         save_dtype = np.uint32
 
-                    print(f"Saving label image as {save_dtype.__name__}")
+                    print(
+                        f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                    )
                     tifffile.imwrite(
                         new_filepath,
                         processed_image.astype(save_dtype),
                         compression="zlib",
+                        bigtiff=use_bigtiff,
                     )
                 else:
-                    # Handle NaN/Inf values if floating-point data
-                    if np.issubdtype(processed_image.dtype, np.floating):
-                        has_nan = np.isnan(processed_image).any()
-                        has_inf = np.isinf(processed_image).any()
-                        if has_nan or has_inf:
-                            print(
-                                f"Warning: Output contains NaN: {has_nan} or Inf: {has_inf} values"
-                            )
-                            processed_image = np.nan_to_num(processed_image)
-
-                    print(f"Saving image with original dtype {image_dtype}")
+                    print(
+                        f"Saving image with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                    )
                     tifffile.imwrite(
                         new_filepath,
                         processed_image.astype(image_dtype),
                         compression="zlib",
+                        bigtiff=use_bigtiff,
                     )
 
                 # Return processing info
