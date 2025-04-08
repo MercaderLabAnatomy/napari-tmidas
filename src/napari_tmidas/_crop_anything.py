@@ -29,6 +29,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from skimage.io import imread
+from skimage.transform import resize  # Added import for resize function
 from tifffile import imwrite
 
 
@@ -48,6 +49,7 @@ class BatchCropAnything:
         self.original_image = None
         self.segmentation_result = None
         self.current_image_for_segmentation = None
+        self.current_scale_factor = 1.0  # Added scale factor tracking
 
         # UI references
         self.image_layer = None
@@ -356,10 +358,41 @@ class BatchCropAnything:
             # Convert back to uint8
             image_gamma = (image_gamma * 255).astype(np.uint8)
 
+            # Check if the image is very large and needs downscaling
+            orig_shape = image_gamma.shape[:2]  # (height, width)
+
+            # Calculate image size in megapixels
+            image_mp = (orig_shape[0] * orig_shape[1]) / 1e6
+
+            # If image is larger than 2 megapixels, downscale it
+            max_mp = 2.0  # Maximum image size in megapixels
+            scale_factor = 1.0
+
+            if image_mp > max_mp:
+                scale_factor = np.sqrt(max_mp / image_mp)
+                new_height = int(orig_shape[0] * scale_factor)
+                new_width = int(orig_shape[1] * scale_factor)
+
+                self.viewer.status = f"Downscaling image from {orig_shape} to {(new_height, new_width)} for processing (scale: {scale_factor:.2f})"
+
+                # Resize the image for processing
+                image_gamma_resized = resize(
+                    image_gamma,
+                    (new_height, new_width),
+                    anti_aliasing=True,
+                    preserve_range=True,
+                ).astype(np.uint8)
+
+                # Store scale factor for later use
+                self.current_scale_factor = scale_factor
+            else:
+                image_gamma_resized = image_gamma
+                self.current_scale_factor = 1.0
+
             self.viewer.status = f"Generating segmentation with sensitivity {self.sensitivity} (gamma={gamma:.2f})..."
 
-            # Generate masks with gamma-corrected image
-            masks = self.mask_generator.generate(image_gamma)
+            # Generate masks with gamma-corrected and potentially resized image
+            masks = self.mask_generator.generate(image_gamma_resized)
             self.viewer.status = f"Generated {len(masks)} masks"
 
             if not masks:
@@ -390,9 +423,16 @@ class BatchCropAnything:
                 return
 
             # Process segmentation masks
-            self._process_segmentation_masks(
-                masks, self.current_image_for_segmentation.shape[:2]
-            )
+            # If image was downscaled, we need to ensure masks are upscaled correctly
+            if self.current_scale_factor < 1.0:
+                # Upscale the segmentation masks to match the original image dimensions
+                self._process_segmentation_masks_with_scaling(
+                    masks, self.current_image_for_segmentation.shape[:2]
+                )
+            else:
+                self._process_segmentation_masks(
+                    masks, self.current_image_for_segmentation.shape[:2]
+                )
 
             # Clear selected labels since segmentation has changed
             self.selected_labels = set()
@@ -473,6 +513,98 @@ class BatchCropAnything:
         self.label_layer.mouse_drag_callbacks.append(self._on_label_clicked)
 
         # image_name = os.path.basename(self.images[self.current_index])
+        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {len(masks)} segments"
+
+    # New method for handling scaled segmentation masks
+    def _process_segmentation_masks_with_scaling(self, masks, original_shape):
+        """Process segmentation masks with scaling to match the original image size."""
+        # Create label image from masks
+        # First determine the size of the mask predictions (which are at the downscaled resolution)
+        if not masks:
+            return
+
+        mask_shape = masks[0]["segmentation"].shape
+
+        # Create an empty label image at the downscaled resolution
+        downscaled_labels = np.zeros(mask_shape, dtype=np.uint32)
+        self.label_info = {}  # Reset label info
+
+        # Fill in the downscaled labels
+        for i, mask_data in enumerate(masks):
+            mask = mask_data["segmentation"]
+            label_id = i + 1  # Start label IDs from 1
+            downscaled_labels[mask] = label_id
+
+            # Store basic label info
+            area = np.sum(mask)
+            y_indices, x_indices = np.where(mask)
+            center_y = np.mean(y_indices) if len(y_indices) > 0 else 0
+            center_x = np.mean(x_indices) if len(x_indices) > 0 else 0
+
+            # Scale centers to original image coordinates
+            center_y_orig = center_y / self.current_scale_factor
+            center_x_orig = center_x / self.current_scale_factor
+
+            # Store label info at original scale
+            self.label_info[label_id] = {
+                "area": area
+                / (
+                    self.current_scale_factor**2
+                ),  # Approximate area in original scale
+                "center_y": center_y_orig,
+                "center_x": center_x_orig,
+                "score": mask_data.get("stability_score", 0),
+            }
+
+        # Upscale the labels to the original image size
+        upscaled_labels = resize(
+            downscaled_labels,
+            original_shape,
+            order=0,  # Nearest neighbor interpolation
+            preserve_range=True,
+            anti_aliasing=False,
+        ).astype(np.uint32)
+
+        # Sort labels by area (largest first)
+        self.label_info = dict(
+            sorted(
+                self.label_info.items(),
+                key=lambda item: item[1]["area"],
+                reverse=True,
+            )
+        )
+
+        # Save segmentation result
+        self.segmentation_result = upscaled_labels
+
+        # Remove existing label layer if exists
+        for layer in list(self.viewer.layers):
+            if isinstance(layer, Labels) and "Segmentation" in layer.name:
+                self.viewer.layers.remove(layer)
+
+        # Add label layer to viewer
+        self.label_layer = self.viewer.add_labels(
+            upscaled_labels,
+            name=f"Segmentation ({os.path.basename(self.images[self.current_index])})",
+            opacity=0.7,
+        )
+
+        # Make the label layer active by default
+        self.viewer.layers.selection.active = self.label_layer
+
+        # Disconnect existing callbacks if any
+        if (
+            hasattr(self, "label_layer")
+            and self.label_layer is not None
+            and hasattr(self.label_layer, "mouse_drag_callbacks")
+        ):
+            # Remove old callbacks
+            for callback in list(self.label_layer.mouse_drag_callbacks):
+                self.label_layer.mouse_drag_callbacks.remove(callback)
+
+        # Connect mouse click event to label selection
+        self.label_layer.mouse_drag_callbacks.append(self._on_label_clicked)
+
         self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {len(masks)} segments"
 
     # --------------------------------------------------
