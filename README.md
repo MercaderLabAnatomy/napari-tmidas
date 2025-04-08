@@ -116,9 +116,9 @@ If you have already segmented a folder full of images and now you want to maybe 
 ![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
 
 ### Crop Anything
-This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`
+This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Click the image below to see a video demo.
 
-![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)
+[![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)](https://youtu.be/xPh0dRD_FbE)
 
 ### ROI Colocalization
 This pipeline quantifies colocalization between labeled regions of interest (ROIs) across multiple image channels. It determines the extent of overlap between ROIs in a reference channel and those in one or two other channels. The output is a table of colocalization counts. Optionally, the size of reference channel ROIs, as well as the total or median size of colocalizing ROIs in the other channels, can be included. Colocalization is determined using Boolean masking. The number of colocalizing instances is determined by counting unique label IDs within the overlapping regions. Typically, the reference channel contains larger structures, while other channels contain smaller, potentially nested, structures. For example, the reference channel might contain cell bodies, with the second and third channels containing nuclei and sub-nuclear objects, respectively.
