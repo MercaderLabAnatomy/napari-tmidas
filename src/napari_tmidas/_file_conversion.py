@@ -1213,7 +1213,7 @@ class ConversionWorker(QThread):
             tifffile.imwrite(
                 output_path,
                 image_data,
-                compression="zstd",
+                compression="zlib",
                 bigtiff=use_bigtiff,
             )
             return
@@ -1280,7 +1280,7 @@ class ConversionWorker(QThread):
                     tifffile.imwrite(
                         output_path,
                         image_data,
-                        compression="zstd",
+                        compression="zlib",
                         bigtiff=use_bigtiff,
                     )
                     return
@@ -1307,7 +1307,7 @@ class ConversionWorker(QThread):
                     output_path,
                     image_data,
                     resolution=resolution,
-                    compression="zstd",
+                    compression="zlib",
                     bigtiff=use_bigtiff,
                 )
             else:
@@ -1327,7 +1327,7 @@ class ConversionWorker(QThread):
                     imagej=True,
                     resolution=resolution,
                     metadata=imagej_metadata,
-                    compression="zstd",
+                    compression="zlib",
                     bigtiff=use_bigtiff,
                 )
 
