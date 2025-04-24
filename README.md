@@ -79,16 +79,15 @@ To use the plugin, start napari in the activated virtual environment with this t
 
     mamba run -n napari-tmidas napari
 
-You can find the installed plugin here:
-
-![image](https://github.com/user-attachments/assets/504db09a-d66e-49eb-90cd-3237024d9d7a)
-
+You can then find the installed plugin in the Plugins tab.
 
 ### Microscopy Image Conversion
 
 You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conversion`. Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` and acquifer data. After scanning a folder of your choice for microscopy image data, select a file in the first column of the table and preview and export any image data it contains.
 
-![image](https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b)
+
+<img src="https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b" alt="Microscopy Image Conversion Widget" style="width:75%; height:auto;">
+
 
 ### Image Processing
 
@@ -96,7 +95,7 @@ You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conv
 
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
-2. As a result, a table appears with the found images.
+2. As a result, a table appears with the found images. You can click on them to inspect them in the viewer.
 
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
@@ -105,26 +104,28 @@ You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conv
 ![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
 
 4. You can click on the images in the table to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
+   
+<img src="https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce" alt="Image Processing Widget" style="width:75%; height:auto;">
 
-![image](https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce)
 
 Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
 
 ### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
-![image](https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e)
+<img src="https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e" alt="Batch Label Inspection Widget" style="width:75%; height:auto;">
+
 
 ### Crop Anything
 This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Click the image below to see a video demo.
 
-[![image](https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443)](https://youtu.be/xPh0dRD_FbE)
+<img src="https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443" alt="Crop Anything Widget" style="width:75%; height:auto;">
+
 
 ### ROI Colocalization
 This pipeline quantifies colocalization between labeled regions of interest (ROIs) across multiple image channels. It determines the extent of overlap between ROIs in a reference channel and those in one or two other channels. The output is a table of colocalization counts. Optionally, the size of reference channel ROIs, as well as the total or median size of colocalizing ROIs in the other channels, can be included. Colocalization is determined using Boolean masking. The number of colocalizing instances is determined by counting unique label IDs within the overlapping regions. Typically, the reference channel contains larger structures, while other channels contain smaller, potentially nested, structures. For example, the reference channel might contain cell bodies, with the second and third channels containing nuclei and sub-nuclear objects, respectively.
 
-![napari-tmidas_coloc_pipeline](https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7)
-
+<img src="https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7" alt="ROI Colocalization Widget" style="width:75%; height:auto;">
 
 ## Contributing
 
