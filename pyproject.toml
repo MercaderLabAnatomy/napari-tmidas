@@ -1,7 +1,7 @@
 [project]
 name = "napari-tmidas"
 dynamic = ["version"]
-description = "Tissue Microscopy Image Data Analysis Suite"
+description = "A plugin for batch processing of confocal microscopy images"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
