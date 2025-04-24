@@ -8,40 +8,12 @@
 <!-- [![codecov](https://codecov.io/gh/macromeer/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/macromeer/napari-tmidas) -->
 The `napari-tmidas` plugin consists of a growing collection of pipelines for fast batch processing of confocal and whole slide microscopy images of biological tissues. This is a WIP and based on the CLI version of [T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
-## Feature Overview
-
-1. **Image Processing**
-   - Process image folders with:
-     - Gamma correction & histogram equalization
-     - Z-projection and channel splitting
-     - Gaussian & median filters
-     - Thresholding (Otsu/manual)
-     - Label cleaning & binary conversion
-     - RGB to labels conversion
-     - Cellpose 3.0 automated segmentation
-     - File compression (Zstandard)
-
-2. **Label Inspection**
-   - Review and edit label images with auto-save
-
-3. **Microscopy Image Conversion**
-   - Convert .nd2/.lif/.ndpi/.czi/acquifer → .tif/.zarr with metadata preservation
-
-4. **Crop Anything**
-   - Interactive ROI selection via click interface
-
-5. **ROI Colocalization**
-   - Count colocalized labels across multiple channels
-
-
-
-### Coming Soon
-New features arriving April 2025
-
+## Features
+Currently, napari-tmidas provides pipelines as widgets for batch image conversion / cropping / processing, ROI colocalization and label inspection (cf. [Usage](#usage) below).
 
 ## Installation
 
-First install Napari in a virtual environment:
+First, install Napari in a virtual environment:
 
     mamba create -y -n napari-tmidas -c conda-forge python=3.11 tqdm
     mamba activate napari-tmidas
