@@ -1,7 +1,7 @@
 [project]
 name = "napari-tmidas"
 dynamic = ["version"]
-description = "A plugin for batch processing of confocal microscopy images"
+description = "A plugin for batch processing of confocal and whole-slide microscopy images"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
