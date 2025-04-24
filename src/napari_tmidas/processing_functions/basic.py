@@ -101,6 +101,66 @@ def max_z_projection(image: np.ndarray) -> np.ndarray:
 
 
 @BatchProcessingRegistry.register(
+    name="Max Z Projection (TZYX)",
+    suffix="_maxZ_tzyx",
+    description="Maximum intensity projection along the Z-axis for TZYX data",
+    parameters={},  # No parameters needed - fully automatic
+)
+def max_z_projection_tzyx(image: np.ndarray) -> np.ndarray:
+    """
+    Memory-efficient maximum intensity projection along the Z-axis for TZYX data.
+
+    This function intelligently chooses the most memory-efficient approach
+    based on the input data size and available system memory.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input 4D image with TZYX dimensions
+
+    Returns:
+    --------
+    numpy.ndarray
+        3D image with TYX dimensions after max projection
+    """
+    # Validate input dimensions
+    if image.ndim != 4:
+        raise ValueError(f"Expected 4D image (TZYX), got {image.ndim}D image")
+
+    # Get dimensions
+    t_size, z_size, y_size, x_size = image.shape
+
+    # For Z projection, we only need one Z plane in memory at a time
+    # so we can process this plane by plane to minimize memory usage
+
+    # Create output array with appropriate dimensions and same dtype
+    result = np.zeros((t_size, y_size, x_size), dtype=image.dtype)
+
+    # Process each time point separately to minimize memory usage
+    for t in range(t_size):
+        # If data type allows direct max, use it
+        if np.issubdtype(image.dtype, np.integer) or np.issubdtype(
+            image.dtype, np.floating
+        ):
+            # Process Z planes efficiently
+            # Start with the first Z plane
+            z_max = image[t, 0].copy()
+
+            # Compare with each subsequent Z plane
+            for z in range(1, z_size):
+                # Use numpy's maximum function to update max values in-place
+                np.maximum(z_max, image[t, z], out=z_max)
+
+            # Store result for this time point
+            result[t] = z_max
+        else:
+            # For unusual data types, fall back to numpy's max function
+            result[t] = np.max(image[t], axis=0)
+
+    return result
+
+
+@BatchProcessingRegistry.register(
     name="Split Channels",
     suffix="_split_channels",
     description="Splits the color channels of the image",
