@@ -11,10 +11,11 @@ Users can make and save changes to the labels, and proceed to the next pair.
 import os
 import sys
 
+import numpy as np
 from magicgui import magicgui
 from napari.layers import Labels
 from napari.viewer import Viewer
-from qtpy.QtWidgets import QFileDialog, QPushButton
+from qtpy.QtWidgets import QFileDialog, QMessageBox, QPushButton
 from skimage.io import imread  # , imsave
 
 sys.path.append("src/napari_tmidas")
@@ -29,63 +30,105 @@ class LabelInspector:
     def load_image_label_pairs(self, folder_path: str, label_suffix: str):
         """
         Load image-label pairs from a folder.
-        Finds label files with the given suffix and matches them with their corresponding image files.
+        Finds all files with the given suffix and matches them with their corresponding image files.
+        Validates that label files are in the correct format.
         """
+        if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+            self.viewer.status = f"Folder path does not exist: {folder_path}"
+            return
+
         files = os.listdir(folder_path)
-        label_files = [file for file in files if file.endswith(label_suffix)]
 
-        # Extract the file extension (e.g., .tif)
-        file_extension = (
-            os.path.splitext(label_suffix)[-1] if "." in label_suffix else ""
-        )
+        # Find all files that contain the label suffix
+        # Using "in" instead of "endswith" for more flexibility
+        potential_label_files = [
+            file for file in files if label_suffix in file
+        ]
 
-        # Modified matching logic
+        if not potential_label_files:
+            self.viewer.status = f"No files found with suffix '{label_suffix}'"
+            QMessageBox.warning(
+                None,
+                "No Label Files Found",
+                f"No files containing '{label_suffix}' were found in {folder_path}.",
+            )
+            return
+
+        # Process all potential label files
         self.image_label_pairs = []
-        for lbl in label_files:
-            # Remove the label suffix to get the base name
-            label_prefix = lbl[: -len(label_suffix)]
+        skipped_files = []
+        format_issues = []
 
-            # Potential corresponding image file
-            img = f"{label_prefix}{file_extension}"
-            img_path = os.path.join(folder_path, img)
+        for label_file in potential_label_files:
+            label_path = os.path.join(folder_path, label_file)
 
-            # Check if the image file exists
-            if os.path.exists(img_path):
-                self.image_label_pairs.append(
-                    (
-                        img_path,
-                        os.path.join(folder_path, lbl),
-                    )
-                )
-                continue
+            # Get file extension
+            _, file_extension = os.path.splitext(label_file)
 
-            # If not found, try finding any file that starts with the base name
+            # Try to find a matching image file (everything before the label suffix)
+            base_name = label_file.split(label_suffix)[0]
+
+            # Look for potential images matching the base name
             potential_images = [
                 file
                 for file in files
-                if file.startswith(label_prefix)
+                if file.startswith(base_name)
+                and file != label_file
                 and file.endswith(file_extension)
-                and file != lbl
             ]
 
+            # If we found at least one potential image
             if potential_images:
-                # Use the first matching image
-                self.image_label_pairs.append(
-                    (
-                        os.path.join(folder_path, potential_images[0]),
-                        os.path.join(folder_path, lbl),
-                    )
-                )
+                image_path = os.path.join(folder_path, potential_images[0])
 
-        if not self.image_label_pairs:
-            self.viewer.status = "No matching image-label pairs found."
-            return
+                # Validate label file format
+                try:
+                    label_data = imread(label_path)
 
-        self.viewer.status = (
-            f"Found {len(self.image_label_pairs)} image-label pairs."
-        )
-        self.current_index = 0
-        self._load_current_pair()
+                    # Check if it looks like a label image (integer type)
+                    if not np.issubdtype(label_data.dtype, np.integer):
+                        format_issues.append(
+                            (label_file, "not an integer type")
+                        )
+                        continue
+
+                    # Add valid pair
+                    self.image_label_pairs.append((image_path, label_path))
+
+                except (
+                    FileNotFoundError,
+                    OSError,
+                    ValueError,
+                    Exception,
+                ) as e:
+                    skipped_files.append((label_file, str(e)))
+            else:
+                skipped_files.append((label_file, "no matching image found"))
+
+        # Report results
+        if self.image_label_pairs:
+            self.viewer.status = (
+                f"Found {len(self.image_label_pairs)} valid image-label pairs."
+            )
+            self.current_index = 0
+            self._load_current_pair()
+        else:
+            self.viewer.status = "No valid image-label pairs found."
+
+        # Show detailed report if there were issues
+        if skipped_files or format_issues:
+            msg = ""
+            if skipped_files:
+                msg += "Skipped files:\n"
+                for file, reason in skipped_files:
+                    msg += f"- {file}: {reason}\n"
+
+            if format_issues:
+                msg += "\nFormat issues:\n"
+                for file, issue in format_issues:
+                    msg += f"- {file}: {issue}\n"
+
+            QMessageBox.information(None, "Loading Report", msg)
 
     def _load_current_pair(self):
         """
@@ -109,6 +152,10 @@ class LabelInspector:
         self.viewer.add_labels(
             label_image, name=f"Labels ({os.path.basename(label_path)})"
         )
+
+        # Show progress
+        total = len(self.image_label_pairs)
+        self.viewer.status = f"Viewing pair {self.current_index + 1} of {total}: {os.path.basename(image_path)}"
 
     def save_current_labels(self):
         """
@@ -172,7 +219,7 @@ class LabelInspector:
 @magicgui(
     call_button="Start Label Inspection",
     folder_path={"label": "Folder Path", "widget_type": "LineEdit"},
-    label_suffix={"label": "Label Suffix (e.g., _otsu_labels.tif)"},
+    label_suffix={"label": "Label Suffix (e.g., _labels.tif)"},
 )
 def label_inspector(
     folder_path: str,
