@@ -33,11 +33,6 @@ To use the Batch Microscopy Image Conversion pipeline, we need some libraries to
 
     pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari
 
-For the Batch Crop Anything pipeline, we need to install MobileSAM and its dependencies:
-
-    pip install git+https://github.com/ChaoningZhang/MobileSAM.git
-
-
 If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
     sudo apt-get install zstd    # for Linux
