@@ -1,13 +1,15 @@
 """
 Batch Crop Anything - A Napari plugin for interactive image cropping
 
-This plugin combines Segment Anything Model (SAM) for automatic object detection with
+This plugin combines SAM2 for automatic object detection with
 an interactive interface for selecting and cropping objects from images.
+The plugin supports both 2D (YX) and 3D (TYX/ZYX) data.
 """
 
 import os
 
 import numpy as np
+import requests
 import torch
 from magicgui import magicgui
 from napari.layers import Labels
@@ -22,34 +24,34 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 from skimage.io import imread
-from skimage.transform import resize  # Added import for resize function
+from skimage.transform import resize
 from tifffile import imwrite
+
+from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
 
 class BatchCropAnything:
-    """
-    Class for processing images with Segment Anything and cropping selected objects.
-    """
+    """Class for processing images with SAM2 and cropping selected objects."""
 
-    def __init__(self, viewer: Viewer):
+    def __init__(self, viewer: Viewer, use_3d=False):
         """Initialize the BatchCropAnything processor."""
         # Core components
         self.viewer = viewer
         self.images = []
         self.current_index = 0
+        self.use_3d = use_3d
 
         # Image and segmentation data
         self.original_image = None
         self.segmentation_result = None
         self.current_image_for_segmentation = None
-        self.current_scale_factor = 1.0  # Added scale factor tracking
+        self.current_scale_factor = 1.0
 
         # UI references
         self.image_layer = None
@@ -63,101 +65,73 @@ class BatchCropAnything:
         # Segmentation parameters
         self.sensitivity = 50  # Default sensitivity (0-100 scale)
 
-        # Initialize the SAM model
-        self._initialize_sam()
+        # Initialize the SAM2 model
+        self._initialize_sam2()
 
-    # --------------------------------------------------
-    # Model Initialization
-    # --------------------------------------------------
+    def _initialize_sam2(self):
+        """Initialize the SAM2 model based on dimension mode."""
 
-    def _initialize_sam(self):
-        """Initialize the Segment Anything Model."""
+        def download_checkpoint(url, dest_folder):
+            import os
+
+            os.makedirs(dest_folder, exist_ok=True)
+            filename = os.path.join(dest_folder, url.split("/")[-1])
+            if not os.path.exists(filename):
+                print(f"Downloading checkpoint to {filename}...")
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                with open(filename, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                print("Download complete.")
+            else:
+                print(f"Checkpoint already exists at {filename}.")
+            return filename
+
         try:
-            # Import required modules
-            from mobile_sam import (
-                SamAutomaticMaskGenerator,
-                sam_model_registry,
-            )
+            import torch
 
-            # Setup device
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            model_type = "vit_t"
 
-            # Find the model weights file
-            checkpoint_path = self._find_sam_checkpoint()
-            if checkpoint_path is None:
-                self.mobile_sam = None
-                self.mask_generator = None
-                return
-
-            # Initialize the model
-            self.mobile_sam = sam_model_registry[model_type](
-                checkpoint=checkpoint_path
+            # Download checkpoint if needed
+            checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+            checkpoint_path = download_checkpoint(
+                checkpoint_url, "/opt/sam2/checkpoints/"
             )
-            self.mobile_sam.to(device=self.device)
-            self.mobile_sam.eval()
+            model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
-            # Create mask generator with default parameters
-            self.mask_generator = SamAutomaticMaskGenerator(self.mobile_sam)
-            self.viewer.status = f"Initialized SAM model from {checkpoint_path} on {self.device}"
+            if self.use_3d:
+                from sam2.build_sam import build_sam2_video_predictor
 
-        except (ImportError, Exception) as e:
-            self.viewer.status = f"Error initializing SAM: {str(e)}"
-            self.mobile_sam = None
-            self.mask_generator = None
+                self.predictor = build_sam2_video_predictor(
+                    model_cfg, checkpoint_path, device=self.device
+                )
+                self.viewer.status = (
+                    f"Initialized SAM2 Video Predictor on {self.device}"
+                )
+            else:
+                from sam2.build_sam import build_sam2
+                from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    def _find_sam_checkpoint(self):
-        """Find the SAM model checkpoint file."""
-        try:
-            import importlib.util
+                self.predictor = SAM2ImagePredictor(
+                    build_sam2(model_cfg, checkpoint_path)
+                )
+                self.viewer.status = (
+                    f"Initialized SAM2 Image Predictor on {self.device}"
+                )
 
-            # Find the mobile_sam package location
-            mobile_sam_spec = importlib.util.find_spec("mobile_sam")
-            if mobile_sam_spec is None:
-                raise ImportError("mobile_sam package not found")
+        except (
+            ImportError,
+            RuntimeError,
+            ValueError,
+            FileNotFoundError,
+            requests.RequestException,
+        ) as e:
+            import traceback
 
-            mobile_sam_path = os.path.dirname(mobile_sam_spec.origin)
-
-            # Check common locations for the model file
-            checkpoint_paths = [
-                os.path.join(mobile_sam_path, "weights", "mobile_sam.pt"),
-                os.path.join(mobile_sam_path, "mobile_sam.pt"),
-                os.path.join(
-                    os.path.dirname(mobile_sam_path),
-                    "weights",
-                    "mobile_sam.pt",
-                ),
-                os.path.join(
-                    os.path.expanduser("~"), "models", "mobile_sam.pt"
-                ),
-                "/opt/T-MIDAS/models/mobile_sam.pt",
-                os.path.join(os.getcwd(), "mobile_sam.pt"),
-            ]
-
-            for path in checkpoint_paths:
-                if os.path.exists(path):
-                    return path
-
-            # If model not found, ask user
-            QMessageBox.information(
-                None,
-                "Model Not Found",
-                "Mobile-SAM model weights not found. Please select the mobile_sam.pt file.",
-            )
-
-            checkpoint_path, _ = QFileDialog.getOpenFileName(
-                None, "Select Mobile-SAM model file", "", "Model Files (*.pt)"
-            )
-
-            return checkpoint_path if checkpoint_path else None
-
-        except (ImportError, Exception) as e:
-            self.viewer.status = f"Error finding SAM checkpoint: {str(e)}"
-            return None
-
-    # --------------------------------------------------
-    # Image Loading and Navigation
-    # --------------------------------------------------
+            self.viewer.status = f"Error initializing SAM2: {str(e)}"
+            self.predictor = None
+            print(traceback.format_exc())
 
     def load_images(self, folder_path: str):
         """Load images from the specified folder path."""
@@ -169,17 +143,19 @@ class BatchCropAnything:
         self.images = [
             os.path.join(folder_path, file)
             for file in files
-            if file.lower().endswith(
-                (".tif", ".tiff", ".png", ".jpg", ".jpeg")
-            )
-            and not file.endswith(("_labels.tif", "_cropped.tif", "_cropped_"))
+            if file.lower().endswith(".tif")
+            or file.lower().endswith(".tiff")
+            and "label" not in file.lower()
+            and "cropped" not in file.lower()
+            and "_labels_" not in file.lower()
+            and "_cropped_" not in file.lower()
         ]
 
         if not self.images:
             self.viewer.status = "No compatible images found in the folder."
             return
 
-        self.viewer.status = f"Found {len(self.images)} images."
+        self.viewer.status = f"Found {len(self.images)} .tif images."
         self.current_index = 0
         self._load_current_image()
 
@@ -237,9 +213,9 @@ class BatchCropAnything:
             self.viewer.status = "No images to process."
             return
 
-        if self.mobile_sam is None or self.mask_generator is None:
+        if self.predictor is None:
             self.viewer.status = (
-                "SAM model not initialized. Cannot segment images."
+                "SAM2 model not initialized. Cannot segment images."
             )
             return
 
@@ -253,66 +229,72 @@ class BatchCropAnything:
             # Load and process image
             self.original_image = imread(image_path)
 
-            # Ensure image is 8-bit for SAM display (keeping original for saving)
-            if self.original_image.dtype != np.uint8:
-                image_for_display = (
-                    self.original_image / np.amax(self.original_image) * 255
-                ).astype(np.uint8)
+            # For 3D data, determine if it's TYX or ZYX based on shape
+            if self.use_3d and len(self.original_image.shape) == 3:
+                # Add image to viewer - napari can handle 3D data directly
+                self.image_layer = self.viewer.add_image(
+                    self.original_image,
+                    name=f"Image ({os.path.basename(image_path)})",
+                )
             else:
-                image_for_display = self.original_image
+                # Handle 2D data as before
+                if self.original_image.dtype != np.uint8:
+                    image_for_display = (
+                        self.original_image
+                        / np.amax(self.original_image)
+                        * 255
+                    ).astype(np.uint8)
+                else:
+                    image_for_display = self.original_image
 
-            # Add image to viewer
-            self.image_layer = self.viewer.add_image(
-                image_for_display,
-                name=f"Image ({os.path.basename(image_path)})",
-            )
+                # Add image to viewer
+                self.image_layer = self.viewer.add_image(
+                    image_for_display,
+                    name=f"Image ({os.path.basename(image_path)})",
+                )
 
             # Generate segmentation
-            self._generate_segmentation(image_for_display)
+            self._generate_segmentation(self.original_image, image_path)
 
-        except (Exception, ValueError) as e:
+        except (FileNotFoundError, ValueError, TypeError, OSError) as e:
             import traceback
 
             self.viewer.status = f"Error processing image: {str(e)}"
             traceback.print_exc()
+
             # Create empty segmentation in case of error
             if (
                 hasattr(self, "original_image")
                 and self.original_image is not None
             ):
-                self.segmentation_result = np.zeros(
-                    self.original_image.shape[:2], dtype=np.uint32
-                )
+                if self.use_3d:
+                    shape = self.original_image.shape
+                else:
+                    shape = self.original_image.shape[:2]
+
+                self.segmentation_result = np.zeros(shape, dtype=np.uint32)
                 self.label_layer = self.viewer.add_labels(
                     self.segmentation_result, name="Error: No Segmentation"
                 )
 
-    # --------------------------------------------------
-    # Segmentation Generation and Control
-    # --------------------------------------------------
-
-    def _generate_segmentation(self, image):
-        """Generate segmentation for the current image."""
-        # Prepare for SAM (add color channel if needed)
-        if len(image.shape) == 2:
-            image_for_sam = image[:, :, np.newaxis].repeat(3, axis=2)
-        else:
-            image_for_sam = image
-
-        # Store the current image for later regeneration if sensitivity changes
-        self.current_image_for_segmentation = image_for_sam
+    def _generate_segmentation(self, image, image_path: str):
+        """Generate segmentation for the current image using SAM2."""
+        # Store the current image for later processing
+        self.current_image_for_segmentation = image
 
         # Generate segmentation with current sensitivity
-        self.generate_segmentation_with_sensitivity()
+        self.generate_segmentation_with_sensitivity(image_path)
 
-    def generate_segmentation_with_sensitivity(self, sensitivity=None):
+    def generate_segmentation_with_sensitivity(
+        self, image_path: str, sensitivity=None
+    ):
         """Generate segmentation with the specified sensitivity."""
         if sensitivity is not None:
             self.sensitivity = sensitivity
 
-        if self.mobile_sam is None or self.mask_generator is None:
+        if self.predictor is None:
             self.viewer.status = (
-                "SAM model not initialized. Cannot segment images."
+                "SAM2 model not initialized. Cannot segment images."
             )
             return
 
@@ -321,140 +303,109 @@ class BatchCropAnything:
             return
 
         try:
-            # Map sensitivity (0-100) to SAM parameters
-            # Higher sensitivity (100) = lower thresholds = more objects detected
-            # Lower sensitivity (0) = higher thresholds = fewer objects detected
+            # Map sensitivity (0-100) to SAM2 parameters
+            # For SAM2, adjust confidence threshold based on sensitivity
+            confidence_threshold = (
+                0.9 - (self.sensitivity / 100) * 0.4
+            )  # Range from 0.9 to 0.5
 
-            # pred_iou_thresh range: 0.92 (low sensitivity) to 0.75 (high sensitivity)
-            pred_iou = 0.92 - (self.sensitivity / 100) * 0.17
-
-            # stability_score_thresh range: 0.97 (low sensitivity) to 0.85 (high sensitivity)
-            stability = 0.97 - (self.sensitivity / 100) * 0.12
-
-            # min_mask_region_area range: 300 (low sensitivity) to 30 (high sensitivity)
-            min_area = 300 - (self.sensitivity / 100) * 270
-
-            # Configure mask generator with sensitivity-adjusted parameters
-            self.mask_generator.pred_iou_thresh = pred_iou
-            self.mask_generator.stability_score_thresh = stability
-            self.mask_generator.min_mask_region_area = min_area
-
-            # Apply gamma correction based on sensitivity
-            # Low sensitivity: gamma > 1 (brighten image)
-            # High sensitivity: gamma < 1 (darken image)
-            gamma = (
-                1.5 - (self.sensitivity / 100) * 1.0
-            )  # Range from 1.5 to 0.5
-
-            # Apply gamma correction to the input image
-            image_for_processing = self.current_image_for_segmentation.copy()
-
-            # Convert to float for proper gamma correction
-            image_float = image_for_processing.astype(np.float32) / 255.0
-
-            # Apply gamma correction
-            image_gamma = np.power(image_float, gamma)
-
-            # Convert back to uint8
-            image_gamma = (image_gamma * 255).astype(np.uint8)
-
-            # Check if the image is very large and needs downscaling
-            orig_shape = image_gamma.shape[:2]  # (height, width)
-
-            # Calculate image size in megapixels
-            image_mp = (orig_shape[0] * orig_shape[1]) / 1e6
-
-            # If image is larger than 2 megapixels, downscale it
-            max_mp = 2.0  # Maximum image size in megapixels
-            scale_factor = 1.0
-
-            if image_mp > max_mp:
-                scale_factor = np.sqrt(max_mp / image_mp)
-                new_height = int(orig_shape[0] * scale_factor)
-                new_width = int(orig_shape[1] * scale_factor)
-
-                self.viewer.status = f"Downscaling image from {orig_shape} to {(new_height, new_width)} for processing (scale: {scale_factor:.2f})"
-
-                # Resize the image for processing
-                image_gamma_resized = resize(
-                    image_gamma,
-                    (new_height, new_width),
-                    anti_aliasing=True,
-                    preserve_range=True,
-                ).astype(np.uint8)
-
-                # Store scale factor for later use
-                self.current_scale_factor = scale_factor
-            else:
-                image_gamma_resized = image_gamma
-                self.current_scale_factor = 1.0
-
-            self.viewer.status = f"Generating segmentation with sensitivity {self.sensitivity} (gamma={gamma:.2f})..."
-
-            # Generate masks with gamma-corrected and potentially resized image
-            masks = self.mask_generator.generate(image_gamma_resized)
-            self.viewer.status = f"Generated {len(masks)} masks"
-
-            if not masks:
-                self.viewer.status = (
-                    "No segments detected. Try increasing the sensitivity."
-                )
-                # Create empty label layer
-                shape = self.current_image_for_segmentation.shape[:2]
-                self.segmentation_result = np.zeros(shape, dtype=np.uint32)
-
-                # Remove existing label layer if exists
-                for layer in list(self.viewer.layers):
-                    if (
-                        isinstance(layer, Labels)
-                        and "Segmentation" in layer.name
-                    ):
-                        self.viewer.layers.remove(layer)
-
-                # Add new empty label layer
-                self.label_layer = self.viewer.add_labels(
-                    self.segmentation_result,
-                    name=f"Segmentation ({os.path.basename(self.images[self.current_index])})",
-                    opacity=0.7,
-                )
-
-                # Make the label layer active
-                self.viewer.layers.selection.active = self.label_layer
-                return
-
-            # Process segmentation masks
-            # If image was downscaled, we need to ensure masks are upscaled correctly
-            if self.current_scale_factor < 1.0:
-                # Upscale the segmentation masks to match the original image dimensions
-                self._process_segmentation_masks_with_scaling(
-                    masks, self.current_image_for_segmentation.shape[:2]
+            # Process based on dimension mode
+            if self.use_3d:
+                # Process 3D data
+                self._generate_3d_segmentation(
+                    confidence_threshold, image_path
                 )
             else:
-                self._process_segmentation_masks(
-                    masks, self.current_image_for_segmentation.shape[:2]
-                )
+                # Process 2D data
+                self._generate_2d_segmentation(confidence_threshold)
 
-            # Clear selected labels since segmentation has changed
-            self.selected_labels = set()
-
-            # Update table if it exists
-            if self.label_table_widget:
-                self._populate_label_table(self.label_table_widget)
-
-        except (Exception, ValueError) as e:
+        except (
+            ValueError,
+            RuntimeError,
+            torch.cuda.OutOfMemoryError,
+            TypeError,
+        ) as e:
             import traceback
 
             self.viewer.status = f"Error generating segmentation: {str(e)}"
             traceback.print_exc()
 
-    def _process_segmentation_masks(self, masks, shape):
-        """Process segmentation masks and create label layer."""
-        # Create label image from masks
-        labels = np.zeros(shape, dtype=np.uint32)
+    def _generate_2d_segmentation(self, confidence_threshold):
+        """Generate 2D segmentation using SAM2 Image Predictor."""
+        # Ensure image is in the correct format for SAM2
+        image = self.current_image_for_segmentation
+
+        # Handle resizing for very large images
+        orig_shape = image.shape[:2]
+        image_mp = (orig_shape[0] * orig_shape[1]) / 1e6
+        max_mp = 2.0  # Maximum image size in megapixels
+
+        if image_mp > max_mp:
+            scale_factor = np.sqrt(max_mp / image_mp)
+            new_height = int(orig_shape[0] * scale_factor)
+            new_width = int(orig_shape[1] * scale_factor)
+
+            self.viewer.status = f"Downscaling image from {orig_shape} to {(new_height, new_width)} for processing"
+
+            # Resize image
+            resized_image = resize(
+                image,
+                (new_height, new_width),
+                anti_aliasing=True,
+                preserve_range=True,
+            ).astype(
+                np.float32
+            )  # Convert to float32
+
+            self.current_scale_factor = scale_factor
+        else:
+            # Convert to float32 format
+            if image.dtype != np.float32:
+                resized_image = image.astype(np.float32)
+            else:
+                resized_image = image
+            self.current_scale_factor = 1.0
+
+        # Ensure image is in RGB format for SAM2
+        if len(resized_image.shape) == 2:
+            # Convert grayscale to RGB
+            resized_image = np.stack([resized_image] * 3, axis=-1)
+        elif len(resized_image.shape) == 3 and resized_image.shape[2] == 1:
+            # Convert single channel to RGB
+            resized_image = np.concatenate([resized_image] * 3, axis=2)
+        elif len(resized_image.shape) == 3 and resized_image.shape[2] > 3:
+            # Use first 3 channels
+            resized_image = resized_image[:, :, :3]
+
+        # Normalize the image to [0,1] range if it's not already
+        if resized_image.max() > 1.0:
+            resized_image = resized_image / 255.0
+
+        # Set SAM2 prediction parameters based on sensitivity
+        with torch.inference_mode(), torch.autocast(
+            "cuda", dtype=torch.float32
+        ):
+            # Set the image in the predictor
+            self.predictor.set_image(resized_image)
+
+            # Use automatic points generation with confidence threshold
+            masks, scores, _ = self.predictor.predict(
+                point_coords=None,
+                point_labels=None,
+                box=None,
+                multimask_output=True,
+            )
+
+            # Filter masks by confidence threshold
+            valid_masks = scores > confidence_threshold
+            masks = masks[valid_masks]
+            scores = scores[valid_masks]
+
+        # Convert masks to label image
+        labels = np.zeros(resized_image.shape[:2], dtype=np.uint32)
         self.label_info = {}  # Reset label info
 
-        for i, mask_data in enumerate(masks):
-            mask = mask_data["segmentation"]
+        for i, mask in enumerate(masks):
             label_id = i + 1  # Start label IDs from 1
             labels[mask] = label_id
 
@@ -469,8 +420,18 @@ class BatchCropAnything:
                 "area": area,
                 "center_y": center_y,
                 "center_x": center_x,
-                "score": mask_data.get("stability_score", 0),
+                "score": float(scores[i]),
             }
+
+        # Handle upscaling if needed
+        if self.current_scale_factor < 1.0:
+            labels = resize(
+                labels,
+                orig_shape,
+                order=0,  # Nearest neighbor interpolation
+                preserve_range=True,
+                anti_aliasing=False,
+            ).astype(np.uint32)
 
         # Sort labels by area (largest first)
         self.label_info = dict(
@@ -484,135 +445,538 @@ class BatchCropAnything:
         # Save segmentation result
         self.segmentation_result = labels
 
-        # Remove existing label layer if exists
-        for layer in list(self.viewer.layers):
-            if isinstance(layer, Labels) and "Segmentation" in layer.name:
-                self.viewer.layers.remove(layer)
+        # Update the label layer
+        self._update_label_layer()
 
-        # Add label layer to viewer
-        self.label_layer = self.viewer.add_labels(
-            labels,
-            name=f"Segmentation ({os.path.basename(self.images[self.current_index])})",
-            opacity=0.7,
-        )
+    def _generate_3d_segmentation(self, confidence_threshold, image_path):
+        """
+        Initialize 3D segmentation using SAM2 Video Predictor.
+        This correctly sets up interactive segmentation following SAM2's video approach.
+        """
+        try:
+            # Handle image_path - make sure it's a string
+            if not isinstance(image_path, str):
+                image_path = self.images[self.current_index]
 
-        # Make the label layer active by default
-        self.viewer.layers.selection.active = self.label_layer
+            # Initialize empty segmentation
+            volume_shape = self.current_image_for_segmentation.shape
+            labels = np.zeros(volume_shape, dtype=np.uint32)
+            self.segmentation_result = labels
 
-        # Disconnect existing callbacks if any
-        if (
-            hasattr(self, "label_layer")
-            and self.label_layer is not None
-            and hasattr(self.label_layer, "mouse_drag_callbacks")
-        ):
-            # Remove old callbacks
-            for callback in list(self.label_layer.mouse_drag_callbacks):
-                self.label_layer.mouse_drag_callbacks.remove(callback)
+            # Create a temp directory for the MP4 conversion if needed
+            import os
+            import tempfile
 
-        # Connect mouse click event to label selection
-        self.label_layer.mouse_drag_callbacks.append(self._on_label_clicked)
+            temp_dir = tempfile.gettempdir()
+            mp4_path = os.path.join(
+                temp_dir, f"temp_volume_{os.path.basename(image_path)}.mp4"
+            )
 
-        # image_name = os.path.basename(self.images[self.current_index])
-        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {len(masks)} segments"
+            # Convert volume to video format for SAM2
+            self.viewer.status = (
+                "Converting 3D volume to MP4 format for SAM2..."
+            )
+            mp4_path = tif_to_mp4(image_path)
 
-    # New method for handling scaled segmentation masks
-    def _process_segmentation_masks_with_scaling(self, masks, original_shape):
-        """Process segmentation masks with scaling to match the original image size."""
-        # Create label image from masks
-        # First determine the size of the mask predictions (which are at the downscaled resolution)
-        if not masks:
+            # Initialize SAM2 state with the video
+            self.viewer.status = "Initializing SAM2 Video Predictor..."
+            with torch.inference_mode(), torch.autocast(
+                "cuda", dtype=torch.bfloat16
+            ):
+                self._sam2_state = self.predictor.init_state(mp4_path)
+
+            # Store needed state for 3D processing
+            self._sam2_next_obj_id = 1
+            self._sam2_prompts = (
+                {}
+            )  # Store prompts for each object (points, labels, box)
+
+            # Update the label layer with empty segmentation
+            self._update_label_layer()
+
+            # Replace the click handler for interactive 3D segmentation
+            if self.label_layer is not None and hasattr(
+                self.label_layer, "mouse_drag_callbacks"
+            ):
+                for callback in list(self.label_layer.mouse_drag_callbacks):
+                    self.label_layer.mouse_drag_callbacks.remove(callback)
+
+                # Add 3D-specific click handler
+                self.label_layer.mouse_drag_callbacks.append(
+                    self._on_3d_label_clicked
+                )
+
+            # Set the viewer to show the first frame
+            if hasattr(self.viewer, "dims") and self.viewer.dims.ndim > 2:
+                self.viewer.dims.set_point(
+                    0, 0
+                )  # Set the first dimension (typically time/z) to 0
+
+            # Show instructions
+            self.viewer.status = (
+                "3D Mode active: Navigate to the first frame where object appears, then click. "
+                "Use Shift+click for negative points (to remove areas). "
+                "Segmentation will be propagated to all frames automatically."
+            )
+
+            return True
+
+        except (
+            FileNotFoundError,
+            RuntimeError,
+            torch.cuda.OutOfMemoryError,
+            ValueError,
+            OSError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in 3D segmentation setup: {str(e)}"
+            traceback.print_exc()
+            return False
+
+    def _on_3d_label_clicked(self, layer, event):
+        """Handle click on 3D label layer to add a prompt for segmentation."""
+        try:
+            if event.button != 1:
+                return
+
+            coords = layer.world_to_data(event.position)
+            if len(coords) == 3:
+                z, y, x = map(int, coords)
+            elif len(coords) == 2:
+                z = int(self.viewer.dims.current_step[0])
+                y, x = map(int, coords)
+            else:
+                self.viewer.status = (
+                    f"Unexpected coordinate dimensions: {coords}"
+                )
+                return
+
+            # Check if Shift key is pressed
+            is_negative = "Shift" in event.modifiers
+            point_label = -1 if is_negative else 1
+
+            # Initialize a unique object ID for this click
+            if not hasattr(self, "_sam2_next_obj_id"):
+                self._sam2_next_obj_id = 1
+
+            # Get current object ID (or create new one)
+            label_id = self.segmentation_result[z, y, x]
+            if is_negative and label_id > 0:
+                # Use existing object ID for negative points
+                ann_obj_id = label_id
+            else:
+                # Create new object for positive points on background
+                ann_obj_id = self._sam2_next_obj_id
+                if point_label > 0 and label_id == 0:
+                    self._sam2_next_obj_id += 1
+
+            # Find or create points layer for this object
+            points_layer = None
+            for layer in list(self.viewer.layers):
+                if f"Points for Object {ann_obj_id}" in layer.name:
+                    points_layer = layer
+                    break
+
+            if points_layer is None:
+                # Create new points layer for this object
+                points_layer = self.viewer.add_points(
+                    np.array([[z, y, x]]),
+                    name=f"Points for Object {ann_obj_id}",
+                    size=10,
+                    face_color="green" if point_label > 0 else "red",
+                    border_color="white",
+                    border_width=1,
+                    opacity=0.8,
+                )
+                # Initialize points for this object
+                if not hasattr(self, "sam2_points_by_obj"):
+                    self.sam2_points_by_obj = {}
+                    self.sam2_labels_by_obj = {}
+
+                self.sam2_points_by_obj[ann_obj_id] = [[x, y]]
+                self.sam2_labels_by_obj[ann_obj_id] = [point_label]
+            else:
+                # Add to existing points layer
+                current_points = points_layer.data
+                new_points = np.vstack([current_points, [z, y, x]])
+                points_layer.data = new_points
+
+                # Add to existing point lists
+                if not hasattr(self, "sam2_points_by_obj"):
+                    self.sam2_points_by_obj = {}
+                    self.sam2_labels_by_obj = {}
+
+                if ann_obj_id not in self.sam2_points_by_obj:
+                    self.sam2_points_by_obj[ann_obj_id] = []
+                    self.sam2_labels_by_obj[ann_obj_id] = []
+
+                self.sam2_points_by_obj[ann_obj_id].append([x, y])
+                self.sam2_labels_by_obj[ann_obj_id].append(point_label)
+
+            # Perform SAM2 segmentation
+            if hasattr(self, "_sam2_state") and self._sam2_state is not None:
+                points = np.array(
+                    self.sam2_points_by_obj[ann_obj_id], dtype=np.float32
+                )
+                labels = np.array(
+                    self.sam2_labels_by_obj[ann_obj_id], dtype=np.int32
+                )
+
+                self.viewer.status = f"Processing object at frame {z}..."
+
+                _, out_obj_ids, out_mask_logits = (
+                    self.predictor.add_new_points_or_box(
+                        inference_state=self._sam2_state,
+                        frame_idx=z,
+                        obj_id=ann_obj_id,
+                        points=points,
+                        labels=labels,
+                    )
+                )
+
+                # Convert logits to mask and update segmentation
+                mask = (out_mask_logits[0] > 0.0).cpu().numpy()
+
+                # Fix mask dimensions if needed
+                if mask.ndim > 2:
+                    mask = mask.squeeze()
+
+                # Check mask dimensions and resize if needed
+                if mask.shape != self.segmentation_result[z].shape:
+                    from skimage.transform import resize
+
+                    mask = resize(
+                        mask.astype(float),
+                        self.segmentation_result[z].shape,
+                        order=0,
+                        preserve_range=True,
+                        anti_aliasing=False,
+                    ).astype(bool)
+
+                # Apply the mask to current frame
+                # For negative points, only remove from the current object
+                if point_label < 0:
+                    # Remove only from current object
+                    self.segmentation_result[z][
+                        (self.segmentation_result[z] == ann_obj_id) & mask
+                    ] = 0
+                else:
+                    # Add to current object (only overwrite background)
+                    self.segmentation_result[z][
+                        mask & (self.segmentation_result[z] == 0)
+                    ] = ann_obj_id
+
+                # Automatically propagate to other frames
+                self._propagate_mask_for_current_object(ann_obj_id, z)
+
+                # Update label layer
+                self._update_label_layer()
+
+                # Update label table if needed
+                if (
+                    hasattr(self, "label_table_widget")
+                    and self.label_table_widget is not None
+                ):
+                    self._populate_label_table(self.label_table_widget)
+
+                self.viewer.status = (
+                    f"Updated 3D object {ann_obj_id} across all frames"
+                )
+            else:
+                self.viewer.status = "SAM2 3D state not initialized"
+
+        except (
+            IndexError,
+            KeyError,
+            ValueError,
+            RuntimeError,
+            torch.cuda.OutOfMemoryError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in 3D click handler: {str(e)}"
+            traceback.print_exc()
+
+    def _propagate_mask_for_current_object(self, obj_id, current_frame_idx):
+        """
+        Propagate the mask for the current object from the given frame to all other frames.
+        Uses SAM2's video propagation with proper error handling.
+
+        Parameters:
+            obj_id: The ID of the object to propagate
+            current_frame_idx: The frame index where the object was identified
+        """
+        try:
+            if not hasattr(self, "_sam2_state") or self._sam2_state is None:
+                self.viewer.status = (
+                    "SAM2 3D state not initialized for propagation"
+                )
+                return
+
+            total_frames = self.segmentation_result.shape[0]
+            self.viewer.status = f"Propagating object {obj_id} through all {total_frames} frames..."
+
+            # Create a progress layer for visualization
+            progress_layer = None
+            for layer in list(self.viewer.layers):
+                if "Propagation Progress" in layer.name:
+                    progress_layer = layer
+                    break
+
+            if progress_layer is None:
+                progress_data = np.zeros_like(
+                    self.segmentation_result, dtype=float
+                )
+                progress_layer = self.viewer.add_image(
+                    progress_data,
+                    name="Propagation Progress",
+                    colormap="magma",
+                    opacity=0.3,
+                    visible=True,
+                )
+
+            # Update current frame in the progress layer
+            progress_data = progress_layer.data
+            current_mask = (
+                self.segmentation_result[current_frame_idx] == obj_id
+            )
+            progress_data[current_frame_idx] = current_mask.astype(float) * 0.8
+            progress_layer.data = progress_data
+
+            # Try to perform SAM2 propagation with error handling
+            try:
+                # Use torch.inference_mode() and torch.autocast to ensure consistent dtypes
+                with torch.inference_mode(), torch.autocast(
+                    "cuda", dtype=torch.float32
+                ):
+                    # Attempt to run SAM2 propagation - this will iterate through all frames
+                    for (
+                        frame_idx,
+                        object_ids,
+                        mask_logits,
+                    ) in self.predictor.propagate_in_video(self._sam2_state):
+                        if frame_idx >= total_frames:
+                            continue
+
+                        # Find our object ID in the results
+                        # obj_mask = None
+                        for i, prop_obj_id in enumerate(object_ids):
+                            if prop_obj_id == obj_id:
+                                # Get the mask for our object
+                                mask = (mask_logits[i] > 0.0).cpu().numpy()
+
+                                # Fix dimensions if needed
+                                if mask.ndim > 2:
+                                    mask = mask.squeeze()
+
+                                # Resize if needed
+                                if (
+                                    mask.shape
+                                    != self.segmentation_result[
+                                        frame_idx
+                                    ].shape
+                                ):
+                                    from skimage.transform import resize
+
+                                    mask = resize(
+                                        mask.astype(float),
+                                        self.segmentation_result[
+                                            frame_idx
+                                        ].shape,
+                                        order=0,
+                                        preserve_range=True,
+                                        anti_aliasing=False,
+                                    ).astype(bool)
+
+                                # Update segmentation - only replacing background pixels
+                                self.segmentation_result[frame_idx][
+                                    mask
+                                    & (
+                                        self.segmentation_result[frame_idx]
+                                        == 0
+                                    )
+                                ] = obj_id
+
+                                # Update progress visualization
+                                progress_data = progress_layer.data
+                                progress_data[frame_idx] = (
+                                    mask.astype(float) * 0.8
+                                )
+                                progress_layer.data = progress_data
+
+                        # Update status occasionally
+                        if frame_idx % 10 == 0:
+                            self.viewer.status = f"Propagating: frame {frame_idx+1}/{total_frames}"
+
+            except RuntimeError as e:
+                # If we get a dtype mismatch or other error, the current frame's mask to other frames
+                self.viewer.status = f"SAM2 propagation failed with error: {str(e)}. Falling back to alternative method."
+
+                # Use the current frame's mask for propagation
+                for frame_idx in range(total_frames):
+                    if (
+                        frame_idx != current_frame_idx
+                    ):  # Skip current frame as it's already done
+                        # Only replace background pixels with the current frame's object
+                        self.segmentation_result[frame_idx][
+                            current_mask
+                            & (self.segmentation_result[frame_idx] == 0)
+                        ] = obj_id
+
+                        # Update progress layer
+                        progress_data = progress_layer.data
+                        progress_data[frame_idx] = (
+                            current_mask.astype(float) * 0.5
+                        )  # Different intensity to indicate fallback
+                        progress_layer.data = progress_data
+
+                    # Update status occasionally
+                    if frame_idx % 10 == 0:
+                        self.viewer.status = f"Fallback propagation: frame {frame_idx+1}/{total_frames}"
+
+            # Remove progress layer after 2 seconds
+            import threading
+
+            def remove_progress():
+                import time
+
+                time.sleep(2)
+                for layer in list(self.viewer.layers):
+                    if "Propagation Progress" in layer.name:
+                        self.viewer.layers.remove(layer)
+
+            threading.Thread(target=remove_progress).start()
+
+            self.viewer.status = f"Propagation of object {obj_id} complete"
+
+        except (
+            IndexError,
+            ValueError,
+            RuntimeError,
+            torch.cuda.OutOfMemoryError,
+            TypeError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in propagation: {str(e)}"
+            traceback.print_exc()
+
+    def _add_3d_prompt(self, prompt_coords):
+        """
+        Given a 3D coordinate (x, y, z), run SAM2 video predictor to segment the object at that point,
+        update the segmentation result and label layer.
+        """
+        if not hasattr(self, "_sam2_state") or self._sam2_state is None:
+            self.viewer.status = "SAM2 3D state not initialized."
             return
 
-        mask_shape = masks[0]["segmentation"].shape
+        if self.predictor is None:
+            self.viewer.status = "SAM2 predictor not initialized."
+            return
 
-        # Create an empty label image at the downscaled resolution
-        downscaled_labels = np.zeros(mask_shape, dtype=np.uint32)
-        self.label_info = {}  # Reset label info
+        # Prepare prompt for SAM2: point_coords is [[x, y, t]], point_labels is [1]
+        x, y, z = prompt_coords
+        point_coords = np.array([[x, y, z]])
+        point_labels = np.array([1])  # 1 = foreground
 
-        # Fill in the downscaled labels
-        for i, mask_data in enumerate(masks):
-            mask = mask_data["segmentation"]
-            label_id = i + 1  # Start label IDs from 1
-            downscaled_labels[mask] = label_id
-
-            # Store basic label info
-            area = np.sum(mask)
-            y_indices, x_indices = np.where(mask)
-            center_y = np.mean(y_indices) if len(y_indices) > 0 else 0
-            center_x = np.mean(x_indices) if len(x_indices) > 0 else 0
-
-            # Scale centers to original image coordinates
-            center_y_orig = center_y / self.current_scale_factor
-            center_x_orig = center_x / self.current_scale_factor
-
-            # Store label info at original scale
-            self.label_info[label_id] = {
-                "area": area
-                / (
-                    self.current_scale_factor**2
-                ),  # Approximate area in original scale
-                "center_y": center_y_orig,
-                "center_x": center_x_orig,
-                "score": mask_data.get("stability_score", 0),
-            }
-
-        # Upscale the labels to the original image size
-        upscaled_labels = resize(
-            downscaled_labels,
-            original_shape,
-            order=0,  # Nearest neighbor interpolation
-            preserve_range=True,
-            anti_aliasing=False,
-        ).astype(np.uint32)
-
-        # Sort labels by area (largest first)
-        self.label_info = dict(
-            sorted(
-                self.label_info.items(),
-                key=lambda item: item[1]["area"],
-                reverse=True,
+        with torch.inference_mode(), torch.autocast(
+            "cuda", dtype=torch.bfloat16
+        ):
+            masks, scores, _ = self.predictor.predict(
+                state=self._sam2_state,
+                point_coords=point_coords,
+                point_labels=point_labels,
+                multimask_output=True,
             )
-        )
 
-        # Save segmentation result
-        self.segmentation_result = upscaled_labels
+        # Pick the best mask (highest score)
+        if masks is not None and len(masks) > 0:
+            best_idx = np.argmax(scores)
+            mask = masks[best_idx]
+            obj_id = self._sam2_next_obj_id
+            self.segmentation_result[mask] = obj_id
+            self._sam2_next_obj_id += 1
+            self.viewer.status = (
+                f"Added object {obj_id} at (x={x}, y={y}, z={z})"
+            )
+            self._update_label_layer()
+        else:
+            self.viewer.status = "No mask found for this prompt."
 
-        # Remove existing label layer if exists
+    def on_apply_propagate(self):
+        """Propagate masks across the video and update the segmentation layer."""
+        self.viewer.status = "Propagating masks across all frames..."
+        self.viewer.window._qt_window.setCursor(Qt.WaitCursor)
+
+        self.segmentation_result[:] = 0
+
+        for (
+            frame_idx,
+            object_ids,
+            mask_logits,
+        ) in self.predictor.propagate_in_video(self._sam2_state):
+            masks = (mask_logits > 0.0).cpu().numpy()
+            if frame_idx >= self.segmentation_result.shape[0]:
+                print(
+                    f"Warning: frame_idx {frame_idx} out of bounds for segmentation_result with shape {self.segmentation_result.shape}"
+                )
+                continue
+            for i, obj_id in enumerate(object_ids):
+                self.segmentation_result[frame_idx][masks[i]] = obj_id
+            self.viewer.status = f"Propagating: frame {frame_idx+1}"
+
+        self._update_label_layer()
+        self.viewer.status = "Propagation complete!"
+        self.viewer.window._qt_window.setCursor(Qt.ArrowCursor)
+
+    def _update_label_layer(self):
+        """Update the label layer in the viewer."""
+        # Remove existing label layer if it exists
         for layer in list(self.viewer.layers):
             if isinstance(layer, Labels) and "Segmentation" in layer.name:
                 self.viewer.layers.remove(layer)
 
         # Add label layer to viewer
         self.label_layer = self.viewer.add_labels(
-            upscaled_labels,
+            self.segmentation_result,
             name=f"Segmentation ({os.path.basename(self.images[self.current_index])})",
             opacity=0.7,
         )
 
-        # Make the label layer active by default
-        self.viewer.layers.selection.active = self.label_layer
+        # Create points layer for interaction if it doesn't exist
+        points_layer = None
+        for layer in list(self.viewer.layers):
+            if "Points" in layer.name:
+                points_layer = layer
+                break
 
-        # Disconnect existing callbacks if any
-        if (
-            hasattr(self, "label_layer")
-            and self.label_layer is not None
-            and hasattr(self.label_layer, "mouse_drag_callbacks")
-        ):
-            # Remove old callbacks
-            for callback in list(self.label_layer.mouse_drag_callbacks):
-                self.label_layer.mouse_drag_callbacks.remove(callback)
+        if points_layer is None:
+            # Initialize an empty points layer
+            points_layer = self.viewer.add_points(
+                np.zeros((0, 2 if not self.use_3d else 3)),
+                name="Points (Click to Add)",
+                size=10,
+                face_color="green",
+                border_color="white",
+                border_width=1,
+                opacity=0.8,
+            )
 
-        # Connect mouse click event to label selection
-        self.label_layer.mouse_drag_callbacks.append(self._on_label_clicked)
+            # Connect points layer mouse click event
+            points_layer.mouse_drag_callbacks.append(self._on_points_clicked)
 
-        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {len(masks)} segments"
+        # Make the points layer active to encourage interaction with it
+        self.viewer.layers.selection.active = points_layer
 
-    # --------------------------------------------------
-    # Label Selection and UI Elements
-    # --------------------------------------------------
+        # Update status
+        n_labels = len(np.unique(self.segmentation_result)) - (
+            1 if 0 in np.unique(self.segmentation_result) else 0
+        )
+        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {n_labels} segments"
 
-    def _on_label_clicked(self, layer, event):
-        """Handle label selection on mouse click."""
+    def _on_points_clicked(self, layer, event):
+        """Handle clicks on the points layer for adding/removing points."""
         try:
             # Only process clicks, not drags
             if event.type != "mouse_press":
@@ -621,39 +985,799 @@ class BatchCropAnything:
             # Get coordinates of mouse click
             coords = np.round(event.position).astype(int)
 
-            # Make sure coordinates are within bounds
-            shape = self.segmentation_result.shape
-            if (
-                coords[0] < 0
-                or coords[1] < 0
-                or coords[0] >= shape[0]
-                or coords[1] >= shape[1]
-            ):
-                return
+            # Check if Shift is pressed for negative points
+            is_negative = "Shift" in event.modifiers
+            point_label = -1 if is_negative else 1
 
-            # Get the label ID at the clicked position
-            label_id = self.segmentation_result[coords[0], coords[1]]
+            # Handle 2D vs 3D coordinates
+            if self.use_3d:
+                if len(coords) == 3:
+                    t, y, x = map(int, coords)
+                elif len(coords) == 2:
+                    t = int(self.viewer.dims.current_step[0])
+                    y, x = map(int, coords)
+                else:
+                    self.viewer.status = (
+                        f"Unexpected coordinate dimensions: {coords}"
+                    )
+                    return
 
-            # Skip if background (0) is clicked
-            if label_id == 0:
-                return
+                # Add point to the layer immediately for visual feedback
+                new_point = np.array([[t, y, x]])
+                if len(layer.data) == 0:
+                    layer.data = new_point
+                else:
+                    layer.data = np.vstack([layer.data, new_point])
 
-            # Toggle the label selection
-            if label_id in self.selected_labels:
-                self.selected_labels.remove(label_id)
-                self.viewer.status = f"Deselected label ID: {label_id} | Selected labels: {self.selected_labels}"
+                # Update point colors
+                colors = layer.face_color
+                if isinstance(colors, list):
+                    colors.append("red" if is_negative else "green")
+                else:
+                    n_points = len(layer.data)
+                    colors = ["green"] * (n_points - 1)
+                    colors.append("red" if is_negative else "green")
+                layer.face_color = colors
+
+                # Get the object ID
+                # If clicking on existing segmentation with negative point
+                label_id = self.segmentation_result[t, y, x]
+                if is_negative and label_id > 0:
+                    obj_id = label_id
+                else:
+                    # For new objects or negative on background
+                    if not hasattr(self, "_sam2_next_obj_id"):
+                        self._sam2_next_obj_id = 1
+                    obj_id = self._sam2_next_obj_id
+                    if point_label > 0 and label_id == 0:
+                        self._sam2_next_obj_id += 1
+
+                # Store point information
+                if not hasattr(self, "points_data"):
+                    self.points_data = {}
+                    self.points_labels = {}
+
+                if obj_id not in self.points_data:
+                    self.points_data[obj_id] = []
+                    self.points_labels[obj_id] = []
+
+                self.points_data[obj_id].append(
+                    [x, y]
+                )  # Note: SAM2 expects [x,y] format
+                self.points_labels[obj_id].append(point_label)
+
+                # Perform segmentation
+                if (
+                    hasattr(self, "_sam2_state")
+                    and self._sam2_state is not None
+                ):
+                    # Prepare points
+                    points = np.array(
+                        self.points_data[obj_id], dtype=np.float32
+                    )
+                    labels = np.array(
+                        self.points_labels[obj_id], dtype=np.int32
+                    )
+
+                    # Create progress layer for visual feedback
+                    progress_layer = None
+                    for existing_layer in self.viewer.layers:
+                        if "Propagation Progress" in existing_layer.name:
+                            progress_layer = existing_layer
+                            break
+
+                    if progress_layer is None:
+                        progress_data = np.zeros_like(self.segmentation_result)
+                        progress_layer = self.viewer.add_image(
+                            progress_data,
+                            name="Propagation Progress",
+                            colormap="magma",
+                            opacity=0.5,
+                            visible=True,
+                        )
+
+                    # First update the current frame immediately
+                    self.viewer.status = f"Processing object at frame {t}..."
+
+                    # Run SAM2 on current frame
+                    _, out_obj_ids, out_mask_logits = (
+                        self.predictor.add_new_points_or_box(
+                            inference_state=self._sam2_state,
+                            frame_idx=t,
+                            obj_id=obj_id,
+                            points=points,
+                            labels=labels,
+                        )
+                    )
+
+                    # Update current frame
+                    mask = (out_mask_logits[0] > 0.0).cpu().numpy()
+                    if mask.ndim > 2:
+                        mask = mask.squeeze()
+
+                    # Resize if needed
+                    if mask.shape != self.segmentation_result[t].shape:
+                        from skimage.transform import resize
+
+                        mask = resize(
+                            mask.astype(float),
+                            self.segmentation_result[t].shape,
+                            order=0,
+                            preserve_range=True,
+                            anti_aliasing=False,
+                        ).astype(bool)
+
+                    # Update segmentation for this frame
+                    if point_label < 0:
+                        # For negative points, only remove from this object
+                        self.segmentation_result[t][
+                            (self.segmentation_result[t] == obj_id) & mask
+                        ] = 0
+                    else:
+                        # For positive points, only replace background
+                        self.segmentation_result[t][
+                            mask & (self.segmentation_result[t] == 0)
+                        ] = obj_id
+
+                    # Update progress layer for this frame
+                    progress_data = progress_layer.data
+                    progress_data[t] = (
+                        mask.astype(float) * 0.5
+                    )  # Highlight current frame
+                    progress_layer.data = progress_data
+
+                    # Now propagate to all frames with visual feedback
+                    self.viewer.status = "Propagating to all frames..."
+
+                    # Run propagation
+                    frame_count = self.segmentation_result.shape[0]
+                    for (
+                        frame_idx,
+                        prop_obj_ids,
+                        mask_logits,
+                    ) in self.predictor.propagate_in_video(self._sam2_state):
+                        if frame_idx >= frame_count:
+                            continue
+
+                        # Find our object
+                        obj_mask = None
+                        for i, prop_obj_id in enumerate(prop_obj_ids):
+                            if prop_obj_id == obj_id:
+                                obj_mask = (mask_logits[i] > 0.0).cpu().numpy()
+                                if obj_mask.ndim > 2:
+                                    obj_mask = obj_mask.squeeze()
+
+                                # Resize if needed
+                                if (
+                                    obj_mask.shape
+                                    != self.segmentation_result[
+                                        frame_idx
+                                    ].shape
+                                ):
+                                    obj_mask = resize(
+                                        obj_mask.astype(float),
+                                        self.segmentation_result[
+                                            frame_idx
+                                        ].shape,
+                                        order=0,
+                                        preserve_range=True,
+                                        anti_aliasing=False,
+                                    ).astype(bool)
+
+                                # Update segmentation
+                                self.segmentation_result[frame_idx][
+                                    obj_mask
+                                    & (
+                                        self.segmentation_result[frame_idx]
+                                        == 0
+                                    )
+                                ] = obj_id
+
+                                # Update progress visualization
+                                progress_data = progress_layer.data
+                                progress_data[frame_idx] = (
+                                    obj_mask.astype(float) * 0.8
+                                )  # Show as processed
+                                progress_layer.data = progress_data
+
+                                # Update status
+                                if frame_idx % 5 == 0:
+                                    self.viewer.status = f"Propagating: frame {frame_idx+1}/{frame_count}"
+                                    # Remove the viewer.update() call as it's causing errors
+
+                    # Process any missing frames
+                    processed_frames = set(range(frame_count))
+                    for frame_idx in range(frame_count):
+                        if (
+                            progress_data[frame_idx].max() == 0
+                        ):  # Frame not processed yet
+                            # Use nearest processed frame's mask
+                            nearest_idx = min(
+                                processed_frames,
+                                key=lambda x: abs(x - frame_idx),
+                            )
+                            if progress_data[nearest_idx].max() > 0:
+                                self.segmentation_result[frame_idx][
+                                    (self.segmentation_result[frame_idx] == 0)
+                                    & (
+                                        self.segmentation_result[nearest_idx]
+                                        == obj_id
+                                    )
+                                ] = obj_id
+
+                                # Update progress visualization
+                                progress_data[frame_idx] = (
+                                    progress_data[nearest_idx] * 0.6
+                                )  # Mark as copied
+
+                    # Final update of progress layer
+                    progress_layer.data = progress_data
+
+                    # Remove progress layer after 2 seconds
+                    import threading
+
+                    def remove_progress():
+                        import time
+
+                        time.sleep(2)
+                        for layer in list(self.viewer.layers):
+                            if "Propagation Progress" in layer.name:
+                                self.viewer.layers.remove(layer)
+
+                    threading.Thread(target=remove_progress).start()
+
+                    # Update UI
+                    self._update_label_layer()
+                    if (
+                        hasattr(self, "label_table_widget")
+                        and self.label_table_widget is not None
+                    ):
+                        self._populate_label_table(self.label_table_widget)
+
+                    self.viewer.status = f"Object {obj_id} segmented and propagated to all frames"
+
             else:
-                self.selected_labels.add(label_id)
-                self.viewer.status = f"Selected label ID: {label_id} | Selected labels: {self.selected_labels}"
+                # 2D case
+                if len(coords) == 2:
+                    y, x = map(int, coords)
+                else:
+                    self.viewer.status = (
+                        f"Unexpected coordinate dimensions: {coords}"
+                    )
+                    return
 
-            # Update table if it exists
-            self._update_label_table()
+                # Add point to the layer immediately for visual feedback
+                new_point = np.array([[y, x]])
+                if len(layer.data) == 0:
+                    layer.data = new_point
+                else:
+                    layer.data = np.vstack([layer.data, new_point])
 
-            # Update preview after selection changes
-            self.preview_crop()
+                # Update point colors
+                colors = layer.face_color
+                if isinstance(colors, list):
+                    colors.append("red" if is_negative else "green")
+                else:
+                    n_points = len(layer.data)
+                    colors = ["green"] * (n_points - 1)
+                    colors.append("red" if is_negative else "green")
+                layer.face_color = colors
 
-        except (Exception, ValueError) as e:
-            self.viewer.status = f"Error selecting label: {str(e)}"
+                # Get object ID
+                label_id = self.segmentation_result[y, x]
+                if is_negative and label_id > 0:
+                    obj_id = label_id
+                else:
+                    if not hasattr(self, "next_obj_id"):
+                        self.next_obj_id = 1
+                    obj_id = self.next_obj_id
+                    if point_label > 0 and label_id == 0:
+                        self.next_obj_id += 1
+
+                # Store point information
+                if not hasattr(self, "obj_points"):
+                    self.obj_points = {}
+                    self.obj_labels = {}
+
+                if obj_id not in self.obj_points:
+                    self.obj_points[obj_id] = []
+                    self.obj_labels[obj_id] = []
+
+                self.obj_points[obj_id].append(
+                    [x, y]
+                )  # SAM2 expects [x,y] format
+                self.obj_labels[obj_id].append(point_label)
+
+                # Perform segmentation
+                if hasattr(self, "predictor") and self.predictor is not None:
+                    # Make sure image is loaded
+                    if self.current_image_for_segmentation is None:
+                        self.viewer.status = "No image loaded for segmentation"
+                        return
+
+                    # Prepare image for SAM2
+                    image = self.current_image_for_segmentation
+                    if len(image.shape) == 2:
+                        image = np.stack([image] * 3, axis=-1)
+                    elif len(image.shape) == 3 and image.shape[2] == 1:
+                        image = np.concatenate([image] * 3, axis=2)
+                    elif len(image.shape) == 3 and image.shape[2] > 3:
+                        image = image[:, :, :3]
+
+                    if image.dtype != np.uint8:
+                        image = (image / np.max(image) * 255).astype(np.uint8)
+
+                    # Set the image in the predictor
+                    self.predictor.set_image(image)
+
+                    # Use only points for current object
+                    points = np.array(
+                        self.obj_points[obj_id], dtype=np.float32
+                    )
+                    labels = np.array(self.obj_labels[obj_id], dtype=np.int32)
+
+                    self.viewer.status = f"Segmenting object {obj_id} with {len(points)} points..."
+
+                    with torch.inference_mode(), torch.autocast("cuda"):
+                        masks, scores, _ = self.predictor.predict(
+                            point_coords=points,
+                            point_labels=labels,
+                            multimask_output=True,
+                        )
+
+                        # Get best mask
+                        if len(masks) > 0:
+                            best_mask = masks[0]
+
+                            # Update segmentation result
+                            if (
+                                best_mask.shape
+                                != self.segmentation_result.shape
+                            ):
+                                from skimage.transform import resize
+
+                                best_mask = resize(
+                                    best_mask.astype(float),
+                                    self.segmentation_result.shape,
+                                    order=0,
+                                    preserve_range=True,
+                                    anti_aliasing=False,
+                                ).astype(bool)
+
+                            # Apply mask based on point type
+                            if point_label < 0:
+                                # Remove only from current object
+                                mask_condition = np.logical_and(
+                                    self.segmentation_result == obj_id,
+                                    best_mask,
+                                )
+                                self.segmentation_result[mask_condition] = 0
+                            else:
+                                # Add to current object (only overwrite background)
+                                mask_condition = np.logical_and(
+                                    best_mask, (self.segmentation_result == 0)
+                                )
+                                self.segmentation_result[mask_condition] = (
+                                    obj_id
+                                )
+
+                            # Update label info
+                            area = np.sum(self.segmentation_result == obj_id)
+                            y_indices, x_indices = np.where(
+                                self.segmentation_result == obj_id
+                            )
+                            center_y = (
+                                np.mean(y_indices) if len(y_indices) > 0 else 0
+                            )
+                            center_x = (
+                                np.mean(x_indices) if len(x_indices) > 0 else 0
+                            )
+
+                            self.label_info[obj_id] = {
+                                "area": area,
+                                "center_y": center_y,
+                                "center_x": center_x,
+                                "score": float(scores[0]),
+                            }
+
+                            self.viewer.status = f"Updated object {obj_id}"
+                        else:
+                            self.viewer.status = "No valid mask produced"
+
+                    # Update the UI
+                    self._update_label_layer()
+                    if (
+                        hasattr(self, "label_table_widget")
+                        and self.label_table_widget is not None
+                    ):
+                        self._populate_label_table(self.label_table_widget)
+
+        except (
+            IndexError,
+            KeyError,
+            ValueError,
+            RuntimeError,
+            TypeError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in points handling: {str(e)}"
+            traceback.print_exc()
+
+    def _on_label_clicked(self, layer, event):
+        """Handle label selection and user prompts on mouse click."""
+        try:
+            # Only process clicks, not drags
+            if event.type != "mouse_press":
+                return
+
+            # Get coordinates of mouse click
+            coords = np.round(event.position).astype(int)
+
+            # Check if Shift is pressed (negative point)
+            is_negative = "Shift" in event.modifiers
+            point_label = -1 if is_negative else 1
+
+            # For 2D data
+            if not self.use_3d:
+                if len(coords) == 2:
+                    y, x = map(int, coords)
+                else:
+                    self.viewer.status = (
+                        f"Unexpected coordinate dimensions: {coords}"
+                    )
+                    return
+
+                # Check if within image bounds
+                shape = self.segmentation_result.shape
+                if y < 0 or x < 0 or y >= shape[0] or x >= shape[1]:
+                    self.viewer.status = "Click is outside image bounds"
+                    return
+
+                # Get the label ID at the clicked position
+                label_id = self.segmentation_result[y, x]
+
+                # Initialize a unique object ID for this click (if needed)
+                if not hasattr(self, "next_obj_id"):
+                    # Start with highest existing ID + 1
+                    if self.segmentation_result.max() > 0:
+                        self.next_obj_id = (
+                            int(self.segmentation_result.max()) + 1
+                        )
+                    else:
+                        self.next_obj_id = 1
+
+                # If clicking on background or using negative click, handle segmentation
+                if label_id == 0 or is_negative:
+                    # Find or create points layer for the current object we're working on
+                    current_obj_id = None
+
+                    # If negative point on existing label, use that label's ID
+                    if is_negative and label_id > 0:
+                        current_obj_id = label_id
+                    # For positive clicks on background, create a new object
+                    elif point_label > 0 and label_id == 0:
+                        current_obj_id = self.next_obj_id
+                        self.next_obj_id += 1
+                    # For negative on background, try to find most recent object
+                    elif point_label < 0 and label_id == 0:
+                        # Use most recently created object if available
+                        if hasattr(self, "obj_points") and self.obj_points:
+                            current_obj_id = max(self.obj_points.keys())
+                        else:
+                            self.viewer.status = "No existing object to modify with negative point"
+                            return
+
+                    if current_obj_id is None:
+                        self.viewer.status = (
+                            "Could not determine which object to modify"
+                        )
+                        return
+
+                    # Find or create points layer for this object
+                    points_layer = None
+                    for layer in list(self.viewer.layers):
+                        if f"Points for Object {current_obj_id}" in layer.name:
+                            points_layer = layer
+                            break
+
+                    # Initialize object tracking if needed
+                    if not hasattr(self, "obj_points"):
+                        self.obj_points = {}
+                        self.obj_labels = {}
+
+                    if current_obj_id not in self.obj_points:
+                        self.obj_points[current_obj_id] = []
+                        self.obj_labels[current_obj_id] = []
+
+                    # Create or update points layer for this object
+                    if points_layer is None:
+                        # First point for this object
+                        points_layer = self.viewer.add_points(
+                            np.array([[y, x]]),
+                            name=f"Points for Object {current_obj_id}",
+                            size=10,
+                            face_color=["green" if point_label > 0 else "red"],
+                            border_color="white",
+                            border_width=1,
+                            opacity=0.8,
+                        )
+                        self.obj_points[current_obj_id] = [[x, y]]
+                        self.obj_labels[current_obj_id] = [point_label]
+                    else:
+                        # Add point to existing layer
+                        current_points = points_layer.data
+                        current_colors = points_layer.face_color
+
+                        # Add new point
+                        new_points = np.vstack([current_points, [y, x]])
+                        new_color = "green" if point_label > 0 else "red"
+
+                        # Update points layer
+                        points_layer.data = new_points
+
+                        # Update colors
+                        if isinstance(current_colors, list):
+                            current_colors.append(new_color)
+                            points_layer.face_color = current_colors
+                        else:
+                            # If it's an array, create a list of colors
+                            colors = []
+                            for i in range(len(new_points)):
+                                if i < len(current_points):
+                                    colors.append(
+                                        "green" if point_label > 0 else "red"
+                                    )
+                                else:
+                                    colors.append(new_color)
+                            points_layer.face_color = colors
+
+                        # Update object tracking
+                        self.obj_points[current_obj_id].append([x, y])
+                        self.obj_labels[current_obj_id].append(point_label)
+
+                    # Now do the actual segmentation using SAM2
+                    if (
+                        hasattr(self, "predictor")
+                        and self.predictor is not None
+                    ):
+                        try:
+                            # Make sure image is loaded
+                            if self.current_image_for_segmentation is None:
+                                self.viewer.status = (
+                                    "No image loaded for segmentation"
+                                )
+                                return
+
+                            # Prepare image for SAM2
+                            image = self.current_image_for_segmentation
+                            if len(image.shape) == 2:
+                                image = np.stack([image] * 3, axis=-1)
+                            elif len(image.shape) == 3 and image.shape[2] == 1:
+                                image = np.concatenate([image] * 3, axis=2)
+                            elif len(image.shape) == 3 and image.shape[2] > 3:
+                                image = image[:, :, :3]
+
+                            if image.dtype != np.uint8:
+                                image = (image / np.max(image) * 255).astype(
+                                    np.uint8
+                                )
+
+                            # Set the image in the predictor
+                            self.predictor.set_image(image)
+
+                            # Only use the points for the current object being segmented
+                            points = np.array(
+                                self.obj_points[current_obj_id],
+                                dtype=np.float32,
+                            )
+                            labels = np.array(
+                                self.obj_labels[current_obj_id], dtype=np.int32
+                            )
+
+                            self.viewer.status = f"Segmenting object {current_obj_id} with {len(points)} points..."
+
+                            with torch.inference_mode(), torch.autocast(
+                                "cuda"
+                            ):
+                                masks, scores, _ = self.predictor.predict(
+                                    point_coords=points,
+                                    point_labels=labels,
+                                    multimask_output=True,
+                                )
+
+                                # Get best mask
+                                if len(masks) > 0:
+                                    best_mask = masks[0]
+
+                                    # Update segmentation result
+                                    if (
+                                        best_mask.shape
+                                        != self.segmentation_result.shape
+                                    ):
+                                        from skimage.transform import resize
+
+                                        best_mask = resize(
+                                            best_mask.astype(float),
+                                            self.segmentation_result.shape,
+                                            order=0,
+                                            preserve_range=True,
+                                            anti_aliasing=False,
+                                        ).astype(bool)
+
+                                    # CRITICAL FIX: For negative points, only remove from this object's mask
+                                    # For positive points, add to this object's mask without removing other objects
+                                    if point_label < 0:
+                                        # Remove only from current object's mask
+                                        self.segmentation_result[
+                                            (
+                                                self.segmentation_result
+                                                == current_obj_id
+                                            )
+                                            & best_mask
+                                        ] = 0
+                                    else:
+                                        # Add to current object's mask without affecting other objects
+                                        # Only overwrite background (value 0)
+                                        self.segmentation_result[
+                                            best_mask
+                                            & (self.segmentation_result == 0)
+                                        ] = current_obj_id
+
+                                    # Update label info
+                                    area = np.sum(
+                                        self.segmentation_result
+                                        == current_obj_id
+                                    )
+                                    y_indices, x_indices = np.where(
+                                        self.segmentation_result
+                                        == current_obj_id
+                                    )
+                                    center_y = (
+                                        np.mean(y_indices)
+                                        if len(y_indices) > 0
+                                        else 0
+                                    )
+                                    center_x = (
+                                        np.mean(x_indices)
+                                        if len(x_indices) > 0
+                                        else 0
+                                    )
+
+                                    self.label_info[current_obj_id] = {
+                                        "area": area,
+                                        "center_y": center_y,
+                                        "center_x": center_x,
+                                        "score": float(scores[0]),
+                                    }
+
+                                    self.viewer.status = (
+                                        f"Updated object {current_obj_id}"
+                                    )
+                                else:
+                                    self.viewer.status = (
+                                        "No valid mask produced"
+                                    )
+
+                            # Update the UI
+                            self._update_label_layer()
+                            if (
+                                hasattr(self, "label_table_widget")
+                                and self.label_table_widget is not None
+                            ):
+                                self._populate_label_table(
+                                    self.label_table_widget
+                                )
+
+                        except (
+                            IndexError,
+                            KeyError,
+                            ValueError,
+                            AttributeError,
+                            TypeError,
+                        ) as e:
+                            import traceback
+
+                            self.viewer.status = (
+                                f"Error in SAM2 processing: {str(e)}"
+                            )
+                            traceback.print_exc()
+
+                # If clicking on an existing label, toggle selection
+                elif label_id > 0:
+                    # Toggle the label selection
+                    if label_id in self.selected_labels:
+                        self.selected_labels.remove(label_id)
+                        self.viewer.status = f"Deselected label ID: {label_id} | Selected labels: {self.selected_labels}"
+                    else:
+                        self.selected_labels.add(label_id)
+                        self.viewer.status = f"Selected label ID: {label_id} | Selected labels: {self.selected_labels}"
+
+                    # Update table and preview
+                    self._update_label_table()
+                    self.preview_crop()
+
+            # 3D case (handle differently)
+            else:
+                if len(coords) == 3:
+                    t, y, x = map(int, coords)
+                elif len(coords) == 2:
+                    t = int(self.viewer.dims.current_step[0])
+                    y, x = map(int, coords)
+                else:
+                    self.viewer.status = (
+                        f"Unexpected coordinate dimensions: {coords}"
+                    )
+                    return
+
+                # Check if within bounds
+                shape = self.segmentation_result.shape
+                if (
+                    t < 0
+                    or t >= shape[0]
+                    or y < 0
+                    or y >= shape[1]
+                    or x < 0
+                    or x >= shape[2]
+                ):
+                    self.viewer.status = "Click is outside volume bounds"
+                    return
+
+                # Get the label ID at the clicked position
+                label_id = self.segmentation_result[t, y, x]
+
+                # If background or shift is pressed, handle in _on_3d_label_clicked
+                if label_id == 0 or is_negative:
+                    # This will be handled by _on_3d_label_clicked already attached
+                    pass
+                # If clicking on an existing label, handle selection
+                elif label_id > 0:
+                    # Toggle the label selection
+                    if label_id in self.selected_labels:
+                        self.selected_labels.remove(label_id)
+                        self.viewer.status = f"Deselected label ID: {label_id} | Selected labels: {self.selected_labels}"
+                    else:
+                        self.selected_labels.add(label_id)
+                        self.viewer.status = f"Selected label ID: {label_id} | Selected labels: {self.selected_labels}"
+
+                    # Update table if it exists
+                    self._update_label_table()
+
+                    # Update preview after selection changes
+                    self.preview_crop()
+
+        except (
+            IndexError,
+            KeyError,
+            ValueError,
+            AttributeError,
+            TypeError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in click handling: {str(e)}"
+            traceback.print_exc()
+
+    def _add_point_marker(self, coords, label_type):
+        """Add a visible marker for where the user clicked."""
+        # Remove previous point markers
+        for layer in list(self.viewer.layers):
+            if "Point Prompt" in layer.name:
+                self.viewer.layers.remove(layer)
+
+        # Create points layer
+        color = (
+            "red" if label_type < 0 else "green"
+        )  # Red for negative, green for positive
+        self.viewer.add_points(
+            [coords],
+            name="Point Prompt",
+            size=10,
+            face_color=color,
+            edge_color="white",
+            edge_width=2,
+            opacity=0.8,
+        )
 
     def create_label_table(self, parent_widget):
         """Create a table widget displaying all detected labels."""
@@ -694,57 +1818,86 @@ class BatchCropAnything:
 
     def _populate_label_table(self, table):
         """Populate the table with label information."""
-        if not self.label_info:
+        try:
+            # Get all unique non-zero labels from the segmentation result safely
+            if self.segmentation_result is None:
+                # No segmentation yet
+                table.setRowCount(0)
+                self.viewer.status = "No segmentation available"
+                return
+
+            # Get unique labels, safely handling None values
+            unique_labels = []
+            for val in np.unique(self.segmentation_result):
+                if val is not None and val > 0:
+                    unique_labels.append(val)
+
+            if len(unique_labels) == 0:
+                table.setRowCount(0)
+                self.viewer.status = "No labeled objects found"
+                return
+
+            # Set row count
+            table.setRowCount(len(unique_labels))
+
+            # Fill in label info for any missing labels
+            for label_id in unique_labels:
+                if label_id not in self.label_info:
+                    # Calculate basic info for this label
+                    mask = self.segmentation_result == label_id
+                    area = np.sum(mask)
+
+                    # Add info to label_info dictionary
+                    self.label_info[label_id] = {
+                        "area": area,
+                        "score": 1.0,  # Default score
+                    }
+
+            # Fill table with data
+            for row, label_id in enumerate(unique_labels):
+                # Checkbox for selection
+                checkbox_widget = QWidget()
+                checkbox_layout = QHBoxLayout(checkbox_widget)
+                checkbox_layout.setContentsMargins(5, 0, 5, 0)
+                checkbox_layout.setAlignment(Qt.AlignCenter)
+
+                checkbox = QCheckBox()
+                checkbox.setChecked(label_id in self.selected_labels)
+
+                # Connect checkbox to label selection
+                def make_checkbox_callback(lid):
+                    def callback(state):
+                        if state == Qt.Checked:
+                            self.selected_labels.add(lid)
+                        else:
+                            self.selected_labels.discard(lid)
+                        self.preview_crop()
+
+                    return callback
+
+                checkbox.stateChanged.connect(make_checkbox_callback(label_id))
+
+                checkbox_layout.addWidget(checkbox)
+                table.setCellWidget(row, 0, checkbox_widget)
+
+                # Label ID as plain text with transparent background
+                item = QTableWidgetItem(str(label_id))
+                item.setTextAlignment(Qt.AlignCenter)
+
+                # Set the background color to transparent
+                brush = item.background()
+                brush.setStyle(Qt.NoBrush)
+                item.setBackground(brush)
+
+                table.setItem(row, 1, item)
+
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            import traceback
+
+            self.viewer.status = f"Error populating table: {str(e)}"
+            traceback.print_exc()
+            # Set empty table as fallback
             table.setRowCount(0)
-            return
-
-        # Set row count
-        table.setRowCount(len(self.label_info))
-
-        # Sort labels by size (largest first)
-        sorted_labels = sorted(
-            self.label_info.items(),
-            key=lambda item: item[1]["area"],
-            reverse=True,
-        )
-
-        # Fill table with data
-        for row, (label_id, _info) in enumerate(sorted_labels):
-            # Checkbox for selection
-            checkbox_widget = QWidget()
-            checkbox_layout = QHBoxLayout(checkbox_widget)
-            checkbox_layout.setContentsMargins(5, 0, 5, 0)
-            checkbox_layout.setAlignment(Qt.AlignCenter)
-
-            checkbox = QCheckBox()
-            checkbox.setChecked(label_id in self.selected_labels)
-
-            # Connect checkbox to label selection
-            def make_checkbox_callback(lid):
-                def callback(state):
-                    if state == Qt.Checked:
-                        self.selected_labels.add(lid)
-                    else:
-                        self.selected_labels.discard(lid)
-                    self.preview_crop()
-
-                return callback
-
-            checkbox.stateChanged.connect(make_checkbox_callback(label_id))
-
-            checkbox_layout.addWidget(checkbox)
-            table.setCellWidget(row, 0, checkbox_widget)
-
-            # Label ID as plain text with transparent background
-            item = QTableWidgetItem(str(label_id))
-            item.setTextAlignment(Qt.AlignCenter)
-
-            # Set the background color to transparent
-            brush = item.background()
-            brush.setStyle(Qt.NoBrush)
-            item.setBackground(brush)
-
-            table.setItem(row, 1, item)
 
     def _update_label_table(self):
         """Update the label selection table if it exists."""
@@ -753,6 +1906,9 @@ class BatchCropAnything:
 
         # Block signals during update
         self.label_table_widget.blockSignals(True)
+
+        # Completely repopulate the table to ensure it's up to date
+        self._populate_label_table(self.label_table_widget)
 
         # Update checkboxes
         for row in range(self.label_table_widget.rowCount()):
@@ -793,10 +1949,6 @@ class BatchCropAnything:
         self.preview_crop()
         self.viewer.status = "Cleared all selections"
 
-    # --------------------------------------------------
-    # Image Processing and Export
-    # --------------------------------------------------
-
     def preview_crop(self, label_ids=None):
         """Preview the crop result with the selected label IDs."""
         if self.segmentation_result is None or self.image_layer is None:
@@ -826,20 +1978,29 @@ class BatchCropAnything:
             image = self.original_image.copy()
 
             # Create mask from selected label IDs
-            mask = np.zeros_like(self.segmentation_result, dtype=bool)
-            for label_id in label_ids:
-                mask |= self.segmentation_result == label_id
+            if self.use_3d:
+                # For 3D data
+                mask = np.zeros_like(self.segmentation_result, dtype=bool)
+                for label_id in label_ids:
+                    mask |= self.segmentation_result == label_id
 
-            # Apply mask to image for preview (set everything outside mask to 0)
-            if len(image.shape) == 2:
-                # Grayscale image
+                # Apply mask
                 preview_image = image.copy()
                 preview_image[~mask] = 0
             else:
-                # Color image
-                preview_image = image.copy()
-                for c in range(preview_image.shape[2]):
-                    preview_image[:, :, c][~mask] = 0
+                # For 2D data
+                mask = np.zeros_like(self.segmentation_result, dtype=bool)
+                for label_id in label_ids:
+                    mask |= self.segmentation_result == label_id
+
+                # Apply mask
+                if len(image.shape) == 2:
+                    preview_image = image.copy()
+                    preview_image[~mask] = 0
+                else:
+                    preview_image = image.copy()
+                    for c in range(preview_image.shape[2]):
+                        preview_image[:, :, c][~mask] = 0
 
             # Remove previous preview if exists
             for layer in list(self.viewer.layers):
@@ -879,20 +2040,58 @@ class BatchCropAnything:
             image = self.original_image
 
             # Create mask from all selected label IDs
-            mask = np.zeros_like(self.segmentation_result, dtype=bool)
-            for label_id in self.selected_labels:
-                mask |= self.segmentation_result == label_id
+            if self.use_3d:
+                # For 3D data, create a 3D mask
+                mask = np.zeros_like(self.segmentation_result, dtype=bool)
+                for label_id in self.selected_labels:
+                    mask |= self.segmentation_result == label_id
 
-            # Apply mask to image (set everything outside mask to 0)
-            if len(image.shape) == 2:
-                # Grayscale image
+                # Apply mask to image (set everything outside mask to 0)
                 cropped_image = image.copy()
                 cropped_image[~mask] = 0
+
+                # Save label image with same dimensions as original
+                label_image = np.zeros_like(
+                    self.segmentation_result, dtype=np.uint32
+                )
+                for label_id in self.selected_labels:
+                    label_image[self.segmentation_result == label_id] = (
+                        label_id
+                    )
             else:
-                # Color image
-                cropped_image = image.copy()
-                for c in range(cropped_image.shape[2]):
-                    cropped_image[:, :, c][~mask] = 0
+                # For 2D data, handle as before
+                mask = np.zeros_like(self.segmentation_result, dtype=bool)
+                for label_id in self.selected_labels:
+                    mask |= self.segmentation_result == label_id
+
+                # Apply mask to image (set everything outside mask to 0)
+                if len(image.shape) == 2:
+                    # Grayscale image
+                    cropped_image = image.copy()
+                    cropped_image[~mask] = 0
+
+                    # Create label image with same dimensions
+                    label_image = np.zeros_like(
+                        self.segmentation_result, dtype=np.uint32
+                    )
+                    for label_id in self.selected_labels:
+                        label_image[self.segmentation_result == label_id] = (
+                            label_id
+                        )
+                else:
+                    # Color image - mask must be expanded to match channel dimension
+                    cropped_image = image.copy()
+                    for c in range(cropped_image.shape[2]):
+                        cropped_image[:, :, c][~mask] = 0
+
+                    # Create label image with 2D dimensions (without channels)
+                    label_image = np.zeros_like(
+                        self.segmentation_result, dtype=np.uint32
+                    )
+                    for label_id in self.selected_labels:
+                        label_image[self.segmentation_result == label_id] = (
+                            label_id
+                        )
 
             # Save cropped image
             image_path = self.images[self.current_index]
@@ -900,17 +2099,16 @@ class BatchCropAnything:
             label_str = "_".join(
                 str(lid) for lid in sorted(self.selected_labels)
             )
-            output_path = f"{base_name}_cropped_{label_str}{ext}"
+            output_path = f"{base_name}_cropped_{label_str}.tif"
 
-            # Save using appropriate method based on file type
-            if output_path.lower().endswith((".tif", ".tiff")):
-                imwrite(output_path, cropped_image, compression="zlib")
-            else:
-                from skimage.io import imsave
-
-                imsave(output_path, cropped_image)
-
+            # Save using tifffile with explicit parameters for best compatibility
+            imwrite(output_path, cropped_image, compression="zlib")
             self.viewer.status = f"Saved cropped image to {output_path}"
+
+            # Save the label image with exact same dimensions as original
+            label_output_path = f"{base_name}_labels_{label_str}.tif"
+            imwrite(label_output_path, label_image, compression="zlib")
+            self.viewer.status += f"\nSaved label mask to {label_output_path}"
 
             # Make sure the segmentation layer is active again
             if self.label_layer is not None:
@@ -923,76 +2121,44 @@ class BatchCropAnything:
             return False
 
 
-# --------------------------------------------------
-# UI Creation Functions
-# --------------------------------------------------
-
-
 def create_crop_widget(processor):
     """Create the crop control widget."""
     crop_widget = QWidget()
     layout = QVBoxLayout()
-    layout.setSpacing(10)  # Add more space between elements
-    layout.setContentsMargins(
-        10, 10, 10, 10
-    )  # Add margins around all elements
+    layout.setSpacing(10)
+    layout.setContentsMargins(10, 10, 10, 10)
 
     # Instructions
+    dimension_type = "3D (TYX/ZYX)" if processor.use_3d else "2D (YX)"
     instructions_label = QLabel(
-        "Select objects to keep in the cropped image.\n"
-        "You can select labels using the table below or by clicking directly on objects "
-        "in the image (make sure the Segmentation layer is active)."
+        f"<b>Processing {dimension_type} data</b><br><br>"
+        "To create/edit objects:<br>"
+        "1. <b>Click on the POINTS layer</b> to add positive points<br>"
+        "2. Use Shift+click for negative points to refine segmentation<br>"
+        "3. Click on existing objects in the Segmentation layer to select them<br>"
+        "4. Press 'Crop' to save the selected objects to disk"
     )
     instructions_label.setWordWrap(True)
     layout.addWidget(instructions_label)
 
-    # Sensitivity slider
-    sensitivity_layout = QVBoxLayout()
-
-    # Header label
-    sensitivity_header_layout = QHBoxLayout()
-    sensitivity_label = QLabel("Segmentation Sensitivity:")
-    sensitivity_value_label = QLabel(f"{processor.sensitivity}")
-    sensitivity_header_layout.addWidget(sensitivity_label)
-    sensitivity_header_layout.addStretch()
-    sensitivity_header_layout.addWidget(sensitivity_value_label)
-    sensitivity_layout.addLayout(sensitivity_header_layout)
-
-    # Slider
-    slider_layout = QHBoxLayout()
-    sensitivity_slider = QSlider(Qt.Horizontal)
-    sensitivity_slider.setMinimum(0)
-    sensitivity_slider.setMaximum(100)
-    sensitivity_slider.setValue(processor.sensitivity)
-    sensitivity_slider.setTickPosition(QSlider.TicksBelow)
-    sensitivity_slider.setTickInterval(10)
-    slider_layout.addWidget(sensitivity_slider)
-
-    apply_sensitivity_button = QPushButton("Apply")
-    apply_sensitivity_button.setToolTip(
-        "Apply sensitivity changes to regenerate segmentation"
+    # Add a button to ensure points layer is active
+    activate_button = QPushButton("Make Points Layer Active")
+    activate_button.clicked.connect(
+        lambda: processor._ensure_points_layer_active()
     )
-    slider_layout.addWidget(apply_sensitivity_button)
-    sensitivity_layout.addLayout(slider_layout)
+    layout.addWidget(activate_button)
 
-    # Description label
-    sensitivity_description = QLabel(
-        "Medium sensitivity - Balanced detection (γ=1.00)"
-    )
-    sensitivity_description.setStyleSheet("font-style: italic; color: #666;")
-    sensitivity_layout.addWidget(sensitivity_description)
-
-    layout.addLayout(sensitivity_layout)
+    # Add a "Clear Points" button to reset prompts
+    clear_points_button = QPushButton("Clear Points")
+    layout.addWidget(clear_points_button)
 
     # Create label table
     label_table = processor.create_label_table(crop_widget)
-    label_table.setMinimumHeight(150)  # Reduce minimum height to save space
-    label_table.setMaximumHeight(
-        300
-    )  # Set maximum height to prevent taking too much space
+    label_table.setMinimumHeight(150)
+    label_table.setMaximumHeight(300)
     layout.addWidget(label_table)
 
-    # Remove "Focus on Segmentation Layer" button as it's now redundant
+    # Selection buttons
     selection_layout = QHBoxLayout()
     select_all_button = QPushButton("Select All")
     clear_selection_button = QPushButton("Clear Selection")
@@ -1014,7 +2180,7 @@ def create_crop_widget(processor):
 
     # Status label
     status_label = QLabel(
-        "Ready to process images. Select objects using the table or by clicking on them."
+        "Ready to process images. Click on POINTS layer to add segmentation points."
     )
     status_label.setWordWrap(True)
     layout.addWidget(status_label)
@@ -1033,36 +2199,51 @@ def create_crop_widget(processor):
         # Create new table
         label_table = processor.create_label_table(crop_widget)
         label_table.setMinimumHeight(200)
-        layout.insertWidget(3, label_table)  # Insert after sensitivity slider
+        layout.insertWidget(3, label_table)  # Insert after clear points button
         return label_table
 
-    # Connect button signals
-    def on_sensitivity_changed(value):
-        sensitivity_value_label.setText(f"{value}")
-        # Update description based on sensitivity
-        if value < 25:
-            gamma = (
-                1.5 - (value / 100) * 1.0
-            )  # Higher gamma for low sensitivity
-            description = f"Low sensitivity - Seeks large, distinct objects (γ={gamma:.2f})"
-        elif value < 75:
-            gamma = 1.5 - (value / 100) * 1.0
-            description = (
-                f"Medium sensitivity - Balanced detection (γ={gamma:.2f})"
+    # Add helper method to ensure points layer is active
+    def _ensure_points_layer_active():
+        points_layer = None
+        for layer in list(processor.viewer.layers):
+            if "Points" in layer.name:
+                points_layer = layer
+                break
+
+        if points_layer is not None:
+            processor.viewer.layers.selection.active = points_layer
+            status_label.setText(
+                "Points layer is now active - click to add points"
             )
         else:
-            gamma = (
-                1.5 - (value / 100) * 1.0
-            )  # Lower gamma for high sensitivity
-            description = f"High sensitivity - Detects subtle, small objects (γ={gamma:.2f})"
-        sensitivity_description.setText(description)
+            status_label.setText(
+                "No points layer found. Please load an image first."
+            )
 
-    def on_apply_sensitivity_clicked():
-        new_sensitivity = sensitivity_slider.value()
-        processor.generate_segmentation_with_sensitivity(new_sensitivity)
-        replace_table_widget()
+    processor._ensure_points_layer_active = _ensure_points_layer_active
+
+    # Connect button signals
+    def on_clear_points_clicked():
+        # Remove all point layers
+        for layer in list(processor.viewer.layers):
+            if "Points" in layer.name:
+                processor.viewer.layers.remove(layer)
+
+        # Reset point tracking attributes
+        if hasattr(processor, "points_data"):
+            processor.points_data = {}
+            processor.points_labels = {}
+
+        if hasattr(processor, "obj_points"):
+            processor.obj_points = {}
+            processor.obj_labels = {}
+
+        # Re-create empty points layer
+        processor._update_label_layer()
+        processor._ensure_points_layer_active()
+
         status_label.setText(
-            f"Regenerated segmentation with sensitivity {new_sensitivity}"
+            "Cleared all points. Click on Points layer to add new points."
         )
 
     def on_select_all_clicked():
@@ -1086,117 +2267,84 @@ def create_crop_widget(processor):
             )
 
     def on_next_clicked():
+        # Clear points before moving to next image
+        on_clear_points_clicked()
+
         if not processor.next_image():
             next_button.setEnabled(False)
         else:
             prev_button.setEnabled(True)
             replace_table_widget()
-            # Reset sensitivity slider to default
-            sensitivity_slider.setValue(processor.sensitivity)
-            sensitivity_value_label.setText(f"{processor.sensitivity}")
             status_label.setText(
                 f"Showing image {processor.current_index + 1}/{len(processor.images)}"
             )
+            processor._ensure_points_layer_active()
 
     def on_prev_clicked():
+        # Clear points before moving to previous image
+        on_clear_points_clicked()
+
         if not processor.previous_image():
             prev_button.setEnabled(False)
         else:
             next_button.setEnabled(True)
             replace_table_widget()
-            # Reset sensitivity slider to default
-            sensitivity_slider.setValue(processor.sensitivity)
-            sensitivity_value_label.setText(f"{processor.sensitivity}")
             status_label.setText(
                 f"Showing image {processor.current_index + 1}/{len(processor.images)}"
             )
+            processor._ensure_points_layer_active()
 
-    sensitivity_slider.valueChanged.connect(on_sensitivity_changed)
-    apply_sensitivity_button.clicked.connect(on_apply_sensitivity_clicked)
+    clear_points_button.clicked.connect(on_clear_points_clicked)
     select_all_button.clicked.connect(on_select_all_clicked)
     clear_selection_button.clicked.connect(on_clear_selection_clicked)
     crop_button.clicked.connect(on_crop_clicked)
     next_button.clicked.connect(on_next_clicked)
     prev_button.clicked.connect(on_prev_clicked)
+    activate_button.clicked.connect(_ensure_points_layer_active)
 
     return crop_widget
-
-
-# --------------------------------------------------
-# Napari Plugin Functions
-# --------------------------------------------------
 
 
 @magicgui(
     call_button="Start Batch Crop Anything",
     folder_path={"label": "Folder Path", "widget_type": "LineEdit"},
+    data_dimensions={
+        "label": "Data Dimensions",
+        "choices": ["YX (2D)", "TYX/ZYX (3D)"],
+    },
 )
 def batch_crop_anything(
     folder_path: str,
+    data_dimensions: str,
     viewer: Viewer = None,
 ):
-    """MagicGUI widget for starting Batch Crop Anything."""
-    # Check if Mobile-SAM is available
+    """MagicGUI widget for starting Batch Crop Anything using SAM2."""
+    # Check if SAM2 is available
     try:
-        # import torch
-        # from mobile_sam import sam_model_registry
+        import importlib.util
 
-        # Check if the required files are included with the package
-        try:
-            import importlib.util
-            import os
-
-            mobile_sam_spec = importlib.util.find_spec("mobile_sam")
-            if mobile_sam_spec is None:
-                raise ImportError("mobile_sam package not found")
-
-            mobile_sam_path = os.path.dirname(mobile_sam_spec.origin)
-
-            # Check for model file in package
-            model_found = False
-            checkpoint_paths = [
-                os.path.join(mobile_sam_path, "weights", "mobile_sam.pt"),
-                os.path.join(mobile_sam_path, "mobile_sam.pt"),
-                os.path.join(
-                    os.path.dirname(mobile_sam_path),
-                    "weights",
-                    "mobile_sam.pt",
-                ),
-                os.path.join(
-                    os.path.expanduser("~"), "models", "mobile_sam.pt"
-                ),
-                "/opt/T-MIDAS/models/mobile_sam.pt",
-                os.path.join(os.getcwd(), "mobile_sam.pt"),
-            ]
-
-            for path in checkpoint_paths:
-                if os.path.exists(path):
-                    model_found = True
-                    break
-
-            if not model_found:
-                QMessageBox.warning(
-                    None,
-                    "Model File Missing",
-                    "Mobile-SAM model weights (mobile_sam.pt) not found. You'll be prompted to locate it when starting the tool.\n\n"
-                    "You can download it from: https://github.com/ChaoningZhang/MobileSAM/tree/master/weights",
-                )
-        except (ImportError, AttributeError) as e:
-            print(f"Warning checking for model file: {str(e)}")
-
+        sam2_spec = importlib.util.find_spec("sam2")
+        if sam2_spec is None:
+            QMessageBox.critical(
+                None,
+                "Missing Dependency",
+                "SAM2 not found. Please install with:\n"
+                "git clone https://github.com/facebookresearch/sam2.git && cd sam2\n\n"
+                "pip install -e .\n"
+                "https://github.com/facebookresearch/sam2",
+            )
+            return
     except ImportError:
         QMessageBox.critical(
             None,
             "Missing Dependency",
-            "Mobile-SAM not found. Please install with:\n"
-            "pip install git+https://github.com/ChaoningZhang/MobileSAM.git\n\n"
-            "You'll also need to download the model weights file (mobile_sam.pt) from:\n"
-            "https://github.com/ChaoningZhang/MobileSAM/tree/master/weights",
+            "SAM2 package cannot be imported. Please install it properly.",
         )
         return
 
-    # Initialize processor and load images
-    processor = BatchCropAnything(viewer)
+    # Initialize processor with the selected dimensions mode
+    use_3d = "TYX/ZYX" in data_dimensions
+    processor = BatchCropAnything(viewer, use_3d=use_3d)
     processor.load_images(folder_path)
 
     # Create UI
@@ -1205,13 +2353,9 @@ def batch_crop_anything(
     # Wrap the widget in a scroll area
     scroll_area = QScrollArea()
     scroll_area.setWidget(crop_widget)
-    scroll_area.setWidgetResizable(
-        True
-    )  # This allows the widget to resize with the scroll area
-    scroll_area.setFrameShape(QScrollArea.NoFrame)  # Hide the frame
-    scroll_area.setMinimumHeight(
-        500
-    )  # Set a minimum height to ensure visibility
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QScrollArea.NoFrame)
+    scroll_area.setMinimumHeight(500)
 
     # Add scroll area to viewer
     viewer.window.add_dock_widget(scroll_area, name="Crop Controls")
