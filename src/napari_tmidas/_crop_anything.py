@@ -8,6 +8,10 @@ The plugin supports both 2D (YX) and 3D (TYX/ZYX) data.
 
 import os
 
+# Add this at the beginning of your plugin file
+import sys
+
+sys.path.append("/opt/sam2")
 import numpy as np
 import requests
 import torch
@@ -2328,18 +2332,16 @@ def batch_crop_anything(
             QMessageBox.critical(
                 None,
                 "Missing Dependency",
-                "SAM2 not found. Please install with:\n"
-                "mamba create --name sam2 python=3.11\n"
-                "mamba activate sam2\n"
-                "git clone https://github.com/facebookresearch/sam2.git && cd sam2\n\n"
-                "pip install -e .\n",
+                "SAM2 not found. Please follow installation instructions at:\n"
+                "https://github.com/MercaderLabAnatomy/napari-tmidas?tab=readme-ov-file#dependencies\n",
             )
             return
     except ImportError:
         QMessageBox.critical(
             None,
             "Missing Dependency",
-            "SAM2 package cannot be imported. Please install it properly.",
+            "SAM2 package cannot be imported. Please follow installation instructions at\n"
+            "https://github.com/MercaderLabAnatomy/napari-tmidas?tab=readme-ov-file#dependencies",
         )
         return
 
