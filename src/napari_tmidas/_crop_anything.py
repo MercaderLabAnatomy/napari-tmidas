@@ -2329,9 +2329,10 @@ def batch_crop_anything(
                 None,
                 "Missing Dependency",
                 "SAM2 not found. Please install with:\n"
+                "mamba create --name sam2 python=3.11\n"
+                "mamba activate sam2\n"
                 "git clone https://github.com/facebookresearch/sam2.git && cd sam2\n\n"
-                "pip install -e .\n"
-                "https://github.com/facebookresearch/sam2",
+                "pip install -e .\n",
             )
             return
     except ImportError:
