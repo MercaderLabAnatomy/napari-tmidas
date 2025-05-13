@@ -47,6 +47,7 @@ To use the Batch Crop Anything pipeline, we need to install SAM2 in the napari-t
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
     pip install -e .
     wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -P checkpoints/
+    pip install decord
 
 
 
