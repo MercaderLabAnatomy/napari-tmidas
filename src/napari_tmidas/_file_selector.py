@@ -687,13 +687,7 @@ class ProcessingWorker(QThread):
                         "labels" in channel_filename
                         or "semantic" in channel_filename
                     ):
-                        # Choose appropriate integer type based on data range
-                        if data_max <= 255:
-                            save_dtype = np.uint8
-                        elif data_max <= 65535:
-                            save_dtype = np.uint16
-                        else:
-                            save_dtype = np.uint32
+                        save_dtype = np.uint32
 
                         print(
                             f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -707,13 +701,13 @@ class ProcessingWorker(QThread):
                     else:
                         # Handle large images with bigtiff format
                         print(
-                            f"Regular image channel, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                            f"Regular image channel, saving with dtype {processed_image.dtype} and bigtiff={use_bigtiff}"
                         )
 
                         # Save with original dtype and bigtiff format if needed
                         tifffile.imwrite(
                             channel_filepath,
-                            channel_image.astype(image_dtype),
+                            channel_image,  # .astype(image_dtype),
                             compression="zlib",
                             bigtiff=use_bigtiff,
                         )
@@ -755,13 +749,8 @@ class ProcessingWorker(QThread):
                     "labels" in new_filename_base
                     or "semantic" in new_filename_base
                 ):
-                    # Choose appropriate integer type based on data range
-                    if data_max <= 255:
-                        save_dtype = np.uint8
-                    elif data_max <= 65535:
-                        save_dtype = np.uint16
-                    else:
-                        save_dtype = np.uint32
+
+                    save_dtype = np.uint32
 
                     print(
                         f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -774,11 +763,11 @@ class ProcessingWorker(QThread):
                     )
                 else:
                     print(
-                        f"Saving image with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                        f"Saving image with dtype {processed_image.dtype} and bigtiff={use_bigtiff}"
                     )
                     tifffile.imwrite(
                         new_filepath,
-                        processed_image.astype(image_dtype),
+                        processed_image,  # .astype(image_dtype),
                         compression="zlib",
                         bigtiff=use_bigtiff,
                     )
@@ -1014,6 +1003,23 @@ class FileResultsWidget(QWidget):
         self.batch_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 
+        # Set thread count based on function properties
+        worker_thread_count = self.thread_count.value()
+
+        # Check if function should run single-threaded
+        if (
+            hasattr(processing_func, "thread_safe")
+            and not processing_func.thread_safe
+        ):
+            worker_thread_count = 1
+            self.viewer.status = (
+                "Processing with a single thread (function is not thread-safe)"
+            )
+        else:
+            self.viewer.status = (
+                f"Processing with {worker_thread_count} threads"
+            )
+
         # Create and start the worker thread
         self.worker = ProcessingWorker(
             self.file_list,
@@ -1024,8 +1030,8 @@ class FileResultsWidget(QWidget):
             output_suffix,
         )
 
-        # Set the thread count from the UI
-        self.worker.thread_count = self.thread_count.value()
+        # Set the thread count from the UI or function attribute
+        self.worker.thread_count = worker_thread_count
 
         # Connect signals
         self.worker.progress_updated.connect(self.update_progress)
@@ -1037,7 +1043,7 @@ class FileResultsWidget(QWidget):
         self.worker.start()
 
         # Update status
-        self.viewer.status = f"Processing {len(self.file_list)} files with {selected_function_name} using {self.thread_count.value()} threads"
+        self.viewer.status = f"Processing {len(self.file_list)} files with {selected_function_name} using {worker_thread_count} threads"
 
     def update_progress(self, value):
         """Update the progress bar"""
