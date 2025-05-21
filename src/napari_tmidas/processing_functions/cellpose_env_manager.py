@@ -1,6 +1,7 @@
 # processing_functions/cellpose_env_manager.py
 """
 This module manages a dedicated virtual environment for Cellpose.
+Updated to support Cellpose 4 (Cellpose-SAM) installation.
 """
 
 import os
@@ -59,18 +60,47 @@ def create_cellpose_env():
     # Path to the Python executable in the new environment
     env_python = get_env_python_path()
 
-    # Install numpy first to ensure correct version
-    print("Installing NumPy...")
-    subprocess.check_call(
-        [env_python, "-m", "pip", "install", "numpy>=1.24,<1.25"]
-    )
+    # # Install numpy first to ensure correct version
+    # print("Installing NumPy...")
+    # subprocess.check_call(
+    #     [env_python, "-m", "pip", "install", "--upgrade", "pip"]
+    # )
+    # subprocess.check_call(
+    #     [env_python, "-m", "pip", "install", "numpy>=1.24,<1.25"]
+    # )
 
-    # Install cellpose and other dependencies
-    print("Installing Cellpose in the dedicated environment...")
+    # Install cellpose 4 and other dependencies
+    print(
+        "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
+    )
     subprocess.check_call([env_python, "-m", "pip", "install", "cellpose"])
 
-    # Install tifffile for image handling
-    subprocess.check_call([env_python, "-m", "pip", "install", "tifffile"])
+    # # Install PyTorch - needed for GPU acceleration
+    # print("Installing PyTorch for GPU acceleration...")
+    # subprocess.check_call([
+    #     env_python, "-m", "pip", "install",
+    #     "torch", "torchvision"
+    # ])
+
+    # # Install tifffile for image handling
+    # subprocess.check_call([env_python, "-m", "pip", "install", "tifffile"])
+
+    # Check if installation was successful
+    try:
+        # Run a command to check if cellpose can be imported and GPU is available
+        result = subprocess.run(
+            [
+                env_python,
+                "-c",
+                "from cellpose import core; print(f'GPU available: {core.use_gpu()}')",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        print(f"Cellpose environment check: {result.stdout.strip()}")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Cellpose installation check failed: {e.stderr}")
 
     print("Cellpose environment created successfully.")
     return env_python
@@ -109,26 +139,32 @@ def run_cellpose_in_env(func_name, args_dict):
         tifffile.imwrite(input_file.name, args_dict["image"])
 
         # Prepare a temporary script to run Cellpose
+        # Updated to use Cellpose 4 parameters
         script = f"""
 import numpy as np
-from cellpose import models
+from cellpose import models, core
 import tifffile
+
+
 
 # Load image
 image = tifffile.imread('{input_file.name}')
 
 # Create and run model
-model = models.Cellpose(
-    gpu={args_dict.get('use_gpu', True)},
-    model_type='{args_dict.get('model_type', 'cyto3')}'
-)
+model = models.CellposeModel(
+    gpu={args_dict.get('use_gpu', True)})
 
-# Perform segmentation
-masks, *_ = model.eval(
+# Prepare normalization parameters (Cellpose 4)
+normalize = {args_dict.get('normalize', {'tile_norm_blocksize': 128})}
+
+# Perform segmentation with Cellpose 4 parameters
+masks, flows, styles = model.eval(
     image,
-    diameter={args_dict.get('diameter', 30.0)},
-    flow_threshold={args_dict.get('flow_threshold', 0.4)},
     channels={args_dict.get('channels', [0, 0])},
+    flow_threshold={args_dict.get('flow_threshold', 0.4)},
+    cellprob_threshold={args_dict.get('cellprob_threshold', 0.0)},
+    batch_size={args_dict.get('batch_size', 32)},
+    normalize=normalize,
     do_3D={args_dict.get('do_3D', False)},
     z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None
 )
@@ -147,10 +183,9 @@ tifffile.imwrite('{output_file.name}', masks)
         result = subprocess.run(
             [env_python, script_file.name], capture_output=True, text=True
         )
-
+        print("Stdout:", result.stdout)
         # Check for errors
         if result.returncode != 0:
-            print("Stdout:", result.stdout)
             print("Stderr:", result.stderr)
             raise RuntimeError(
                 f"Cellpose segmentation failed: {result.stderr}"

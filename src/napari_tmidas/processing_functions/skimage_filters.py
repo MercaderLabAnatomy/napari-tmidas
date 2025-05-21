@@ -425,3 +425,33 @@ def binary_to_labels(image: np.ndarray) -> np.ndarray:
     label_image = skimage.measure.label(label_image, connectivity=2)
 
     return label_image
+
+
+@BatchProcessingRegistry.register(
+    name="Convert to 8-bit (uint8)",
+    suffix="_uint8",
+    description="Convert image data to 8-bit (uint8) format with proper scaling",
+)
+def convert_to_uint8(image: np.ndarray) -> np.ndarray:
+    """
+    Convert image data to 8-bit (uint8) format with proper scaling.
+
+    This function handles any input image dimensions (including TZYX) and properly
+    rescales data to the 0-1 range before conversion to uint8. Ideal for scientific
+    imaging data with arbitrary value ranges.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input image array of any numerical dtype
+
+    Returns:
+    --------
+    numpy.ndarray
+        8-bit image with shape preserved and values properly scaled
+    """
+    # Rescale to 0-1 range (works for any input range, negative or positive)
+    img_rescaled = skimage.exposure.rescale_intensity(image, out_range=(0, 1))
+
+    # Convert the rescaled image to uint8
+    return skimage.img_as_ubyte(img_rescaled)
