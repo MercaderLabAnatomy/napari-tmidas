@@ -6,6 +6,9 @@ This module provides functionality to automatically segment cells or nuclei in i
 using the Cellpose deep learning-based segmentation toolkit. It supports both 2D and 3D images,
 various dimension orders, and handles time series data.
 
+Updated to support Cellpose 4 (Cellpose-SAM) which offers improved generalization
+for cellular segmentation without requiring diameter parameter.
+
 Note: This requires the cellpose library to be installed.
 """
 import os
@@ -91,13 +94,15 @@ def run_cellpose(
     img,
     model,
     channels,
-    diameter,
     flow_threshold=0.4,
+    cellprob_threshold=0.0,
     dim_order="ZYX",
     max_pixels=4000000,
+    tile_norm_blocksize=128,
+    batch_size=32,
 ):
     """
-    Run Cellpose segmentation on an image.
+    Run Cellpose segmentation on an image using Cellpose 4 (Cellpose-SAM).
 
     Parameters:
     -----------
@@ -107,14 +112,18 @@ def run_cellpose(
         Cellpose model to use
     channels : list
         Channels to use for segmentation [0,0] = grayscale, [1,0] = green channel, [2,0] = red channel
-    diameter : float
-        Diameter of objects to segment
     flow_threshold : float
         Flow threshold for Cellpose
+    cellprob_threshold : float
+        Cell probability threshold
     dim_order : str
         Dimension order of the input image
     max_pixels : int
         Maximum number of pixels to process (for 2D images)
+    tile_norm_blocksize : int
+        Block size for tile normalization (new parameter in Cellpose 4)
+    batch_size : int
+        Batch size for processing multiple images or 3D slices at once
 
     Returns:
     --------
@@ -138,6 +147,9 @@ def run_cellpose(
     # Check if we have a time series
     has_time = "T" in new_dim_order
 
+    # Set up normalization with tile_norm_blocksize (Cellpose 4 parameter)
+    normalize = {"tile_norm_blocksize": tile_norm_blocksize}
+
     if has_time:
         # Handle time series - process each time point
         n_timepoints = img_transposed.shape[0]
@@ -146,48 +158,39 @@ def run_cellpose(
         # Process each time point
         for t in range(n_timepoints):
             img_t = img_transposed[t]
-            mask, _, _, _ = model.eval(
+            masks, _, _ = model.eval(
                 img_t,
-                diameter=diameter,
-                flow_threshold=flow_threshold,
                 channels=channels,
+                flow_threshold=flow_threshold,
+                cellprob_threshold=cellprob_threshold,
+                normalize=normalize,
                 z_axis=0 if is_3d else None,
                 do_3D=is_3d,
-                niter=2000,  # Maximum iterations
+                batch_size=batch_size,
             )
-            result[t] = mask
+            result[t] = masks
     else:
         # Process single time point
-        result, _, _, _ = model.eval(
+        masks, _, _ = model.eval(
             img_transposed,
-            diameter=diameter,
-            flow_threshold=flow_threshold,
             channels=channels,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
+            normalize=normalize,
             z_axis=0 if is_3d else None,
             do_3D=is_3d,
-            niter=2000,  # Maximum iterations
+            batch_size=batch_size,
         )
+        result = masks
 
     return result.astype(np.uint32)
 
 
 @BatchProcessingRegistry.register(
-    name="Segment cells or nuclei (Cellpose)",
+    name="Cellpose-SAM Segmentation",
     suffix="_labels",
-    description="Automatic instance segmentation using Cellpose 3.0 (dedicated environment)",
+    description="Automatic instance segmentation using Cellpose 4 (Cellpose-SAM) with improved generalization",
     parameters={
-        "model_type": {
-            "type": str,
-            "default": "cyto3",
-            "description": "Cellpose model type: 'cyto'/'cyto2'/'cyto3' for cells, 'nuclei' for nuclei",
-        },
-        "diameter": {
-            "type": float,
-            "default": 40.0,
-            "min": 5.0,
-            "max": 1000.0,
-            "description": "Approximate diameter of objects to segment (pixels)",
-        },
         "dim_order": {
             "type": str,
             "default": "YX",
@@ -214,6 +217,27 @@ def run_cellpose(
             "max": 0.9,
             "description": "Flow threshold for Cellpose segmentation",
         },
+        "cellprob_threshold": {
+            "type": float,
+            "default": 0.0,
+            "min": -6.0,
+            "max": 6.0,
+            "description": "Cell probability threshold (Cellpose 4 parameter)",
+        },
+        "tile_norm_blocksize": {
+            "type": int,
+            "default": 128,
+            "min": 32,
+            "max": 512,
+            "description": "Block size for tile normalization (Cellpose 4 parameter)",
+        },
+        "batch_size": {
+            "type": int,
+            "default": 32,
+            "min": 1,
+            "max": 128,
+            "description": "Batch size for processing multiple images/slices at once",
+        },
         "force_dedicated_env": {
             "type": bool,
             "default": False,
@@ -223,20 +247,21 @@ def run_cellpose(
 )
 def cellpose_segmentation(
     image: np.ndarray,
-    model_type: str = "cyto3",
-    diameter: float = 40.0,
     dim_order: str = "YX",
     channel_1: int = 0,
     channel_2: int = 0,
     flow_threshold: float = 0.4,
+    cellprob_threshold: float = 0.0,
+    tile_norm_blocksize: int = 128,
+    batch_size: int = 32,
     force_dedicated_env: bool = False,
 ) -> np.ndarray:
     """
-    Run Cellpose segmentation on an image.
+    Run Cellpose 4 (Cellpose-SAM) segmentation on an image.
 
     This function takes an image and performs automatic instance segmentation using
-    Cellpose. It supports both 2D and 3D images, various dimension orders, and handles
-    time series data.
+    Cellpose 4 with improved generalization for cellular segmentation. It supports
+    both 2D and 3D images, various dimension orders, and handles time series data.
 
     If Cellpose is not available in the current environment, a dedicated virtual
     environment will be created to run Cellpose.
@@ -245,10 +270,6 @@ def cellpose_segmentation(
     -----------
     image : numpy.ndarray
         Input image
-    model_type : str
-        Cellpose model type: 'cyto'/'cyto2'/'cyto3' for cells, 'nuclei' for nuclei (default: "cyto3")
-    diameter : float
-        Approximate diameter of objects to segment in pixels (default: 40.0)
     dim_order : str
         Dimension order of the input (e.g., 'YX', 'ZYX', 'TZYX') (default: "YX")
     channel_1 : int
@@ -257,6 +278,12 @@ def cellpose_segmentation(
         Second channel: 0=none, 1=green, 2=red, 3=blue (default: 0)
     flow_threshold : float
         Flow threshold for Cellpose segmentation (default: 0.4)
+    cellprob_threshold : float
+        Cell probability threshold (Cellpose 4 parameter) (default: 0.0)
+    tile_norm_blocksize : int
+        Block size for tile normalization (Cellpose 4 parameter) (default: 128)
+    batch_size : int
+        Batch size for processing multiple images/slices at once (default: 32)
     force_dedicated_env : bool
         Force using dedicated environment even if Cellpose is available (default: False)
 
@@ -267,14 +294,6 @@ def cellpose_segmentation(
     """
     # Convert channel parameters to Cellpose channels list
     channels = [channel_1, channel_2]
-
-    # Validate parameters
-    valid_models = ["cyto", "cyto2", "cyto3", "nuclei"]
-    if model_type not in valid_models:
-        raise ValueError(
-            f"Invalid model_type: {model_type}. "
-            f"Must be one of: {', '.join(valid_models)}"
-        )
 
     # Determine whether to use dedicated environment
     use_env = force_dedicated_env or USE_DEDICATED_ENV
@@ -293,29 +312,30 @@ def cellpose_segmentation(
         # Prepare arguments for the Cellpose function
         args = {
             "image": image,
-            "model_type": model_type,
-            "diameter": diameter,
             "channels": channels,
             "flow_threshold": flow_threshold,
+            "cellprob_threshold": cellprob_threshold,
+            "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
+            "batch_size": batch_size,
             "use_gpu": USE_GPU,
             "do_3D": "Z" in dim_order,
             "z_axis": 0 if "Z" in dim_order else None,
         }
 
         # Run Cellpose in the dedicated environment
-        print(f"Running Cellpose ({model_type}) in dedicated environment...")
+        print("Running Cellpose model in dedicated environment...")
         result = run_cellpose_in_env("eval", args)
         print(f"Segmentation complete. Found {np.max(result)} objects.")
         return result
 
     else:
-        print(f"Running Cellpose ({model_type}) in current environment...")
+        print("Running Cellpose model in current environment...")
         # Initialize Cellpose model in current environment
-        model = models.Cellpose(gpu=USE_GPU, model_type=model_type)
+        model = models.CellposeModel(gpu=USE_GPU)
 
     # Print status information
     gpu_status = "GPU" if USE_GPU else "CPU"
-    print(f"Using Cellpose {model_type} model on {gpu_status}")
+    print(f"Using Cellpose on {gpu_status}")
     print(
         f"Processing image with shape {image.shape}, dimension order: {dim_order}"
     )
@@ -323,7 +343,14 @@ def cellpose_segmentation(
     # Run segmentation
     try:
         result = run_cellpose(
-            image, model, channels, diameter, flow_threshold, dim_order
+            image,
+            model,
+            channels,
+            flow_threshold,
+            cellprob_threshold,
+            dim_order,
+            tile_norm_blocksize=tile_norm_blocksize,
+            batch_size=batch_size,
         )
 
         print(f"Segmentation complete. Found {np.max(result)} objects.")
@@ -338,10 +365,11 @@ def cellpose_segmentation(
             try:
                 args = {
                     "image": image,
-                    "model_type": model_type,
-                    "diameter": diameter,
                     "channels": channels,
                     "flow_threshold": flow_threshold,
+                    "cellprob_threshold": cellprob_threshold,
+                    "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
+                    "batch_size": batch_size,
                     "use_gpu": USE_GPU,
                     "do_3D": "Z" in dim_order,
                     "z_axis": 0 if "Z" in dim_order else None,
@@ -373,13 +401,10 @@ def run_cellpose_segmentation():
 
     # Parse arguments
     parser = argparse.ArgumentParser(
-        description="Runs automatic mask generation on images using Cellpose."
+        description="Runs automatic mask generation on images using Cellpose 4."
     )
     parser.add_argument(
         "--input", type=str, required=True, help="Path to input images."
-    )
-    parser.add_argument(
-        "--diameter", type=float, default=40.0, help="Diameter of objects."
     )
     parser.add_argument(
         "--channels",
@@ -395,17 +420,28 @@ def run_cellpose_segmentation():
         help="Dimension order of the input images.",
     )
     parser.add_argument(
-        "--model_type",
-        type=str,
-        default="cyto3",
-        choices=["cyto", "cyto2", "cyto3", "nuclei"],
-        help="Model type: 'cyto'/'cyto2'/'cyto3' for cells, 'nuclei' for nuclei",
-    )
-    parser.add_argument(
         "--flow_threshold",
         type=float,
         default=0.4,
         help="Flow threshold for Cellpose (default: 0.4)",
+    )
+    parser.add_argument(
+        "--cellprob_threshold",
+        type=float,
+        default=0.0,
+        help="Cell probability threshold (default: 0.0)",
+    )
+    parser.add_argument(
+        "--tile_norm_blocksize",
+        type=int,
+        default=128,
+        help="Block size for tile normalization (default: 128)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size for processing (default: 32)",
     )
     parser.add_argument(
         "--max_pixels",
@@ -445,11 +481,11 @@ def run_cellpose_segmentation():
         return 1
 
     # Initialize model
-    model = models.Cellpose(gpu=USE_GPU, model_type=args.model_type)
+    model = models.CellposeModel(gpu=USE_GPU)
 
     # Print status
     gpu_status = "GPU" if USE_GPU else "CPU"
-    print(f"Using Cellpose {args.model_type} model on {gpu_status}")
+    print(f"Using Cellpose model on {gpu_status}")
 
     # Process each file
     for input_file in tqdm(input_files, desc="Processing images"):
@@ -476,25 +512,29 @@ def run_cellpose_segmentation():
                 f"Image shape: {img.shape}, dimension order: {args.dim_order}\n"
             )
 
+            # Use Cellpose 4 parameter style
+            normalize = {"tile_norm_blocksize": args.tile_norm_blocksize}
+
             # Run segmentation
-            result = run_cellpose(
+            masks, flows, styles = model.eval(
                 img,
-                model,
-                args.channels,
-                args.diameter,
-                args.flow_threshold,
-                args.dim_order,
-                args.max_pixels,
+                channels=args.channels,
+                flow_threshold=args.flow_threshold,
+                cellprob_threshold=args.cellprob_threshold,
+                normalize=normalize,
+                batch_size=args.batch_size,
+                z_axis=0 if "Z" in args.dim_order else None,
+                do_3D="Z" in args.dim_order,
             )
 
             # Save result
             output_file = os.path.join(
                 input_folder, input_file.replace(".tif", "_labels.tif")
             )
-            imwrite(output_file, result, compression="zlib")
+            imwrite(output_file, masks, compression="zlib")
 
             print(
-                f"Saved segmentation with {np.max(result)} objects to {output_file}"
+                f"Saved segmentation with {np.max(masks)} objects to {output_file}"
             )
 
         except (Exception, MemoryError) as e:
@@ -502,6 +542,16 @@ def run_cellpose_segmentation():
 
     print("\nProcessing complete.")
     return 0
+
+
+# Update cellpose_env_manager.py to install Cellpose 4
+def update_cellpose_env_manager():
+    """
+    Update the cellpose_env_manager to install Cellpose 4
+    """
+    # This function can be called to update the environment manager code
+    # For example, by modifying the pip install command to install the latest version
+    # or specify Cellpose 4 explicitly
 
 
 # Run the command-line function if this script is run directly
