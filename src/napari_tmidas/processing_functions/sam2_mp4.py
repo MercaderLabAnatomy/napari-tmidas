@@ -151,30 +151,29 @@ def tif_to_mp4(input_path, fps=10, cleanup_temp=True):
                     f"Frame {i} stats - min: {np.min(frame)}, max: {np.max(frame)}, mean: {np.mean(frame):.2f}"
                 )
 
-            # Prepare frame for JP2 encoding - OpenCV's JP2 encoder requires uint8 or uint16
-            if frame.dtype not in [np.uint8, np.uint16]:
-                # Get actual range
+            # Improved handling for float32 and other types - prioritize conversion to uint8
+            if frame.dtype != np.uint8:
+                # Get actual data range
                 min_val, max_val = np.min(frame), np.max(frame)
 
-                # Special handling for different bit depths
-                if np.issubdtype(frame.dtype, np.floating):
-                    # For floating point, scale to full uint16 range for better precision
-                    if min_val < max_val:
-                        frame = (
-                            (frame - min_val) * 65535 / (max_val - min_val)
-                        ).astype(np.uint16)
-                    else:
-                        frame = np.full_like(frame, 32768, dtype=np.uint16)
+                # For float32 and other types, convert directly to uint8
+                if (
+                    np.issubdtype(frame.dtype, np.floating)
+                    or min_val < max_val
+                ):
+                    # Scale to full uint8 range [0, 255] with proper handling of min/max
+                    frame = np.clip(
+                        (frame - min_val)
+                        * 255.0
+                        / (max_val - min_val + 1e-10),
+                        0,
+                        255,
+                    ).astype(np.uint8)
                 else:
-                    # For other integer types, also convert to uint16
-                    if min_val < max_val:
-                        frame = (
-                            (frame - min_val) * 65535 / (max_val - min_val)
-                        ).astype(np.uint16)
-                    else:
-                        frame = np.full_like(frame, 32768, dtype=np.uint16)
+                    # If min equals max (constant image), create a mid-gray image
+                    frame = np.full_like(frame, 128, dtype=np.uint8)
 
-                # Report min/max after conversion for debugging
+                # Report conversion stats for debugging
                 if i == 0 or i == num_frames - 1:
                     print(
                         f"After conversion - min: {np.min(frame)}, max: {np.max(frame)}, "
@@ -183,18 +182,12 @@ def tif_to_mp4(input_path, fps=10, cleanup_temp=True):
 
             # Convert grayscale to RGB if needed for compatibility
             if is_grayscale and len(frame.shape) == 2:
-                if frame.dtype == np.uint16:
-                    # For uint16, we need to maintain the bit depth during color conversion
-                    # OpenCV doesn't have a direct grayscale to RGB for uint16, so we'll do it manually
-                    h, w = frame.shape
-                    rgb_frame = np.stack((frame, frame, frame), axis=2)
-                else:
-                    # For uint8, we can use cv2.cvtColor
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                # For uint8, we can use cv2.cvtColor
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
             else:
                 rgb_frame = frame
 
-            # Save frame as intermediate PNG (OpenCV's JP2 encoder can be inconsistent)
+            # Save frame as intermediate PNG
             png_path = temp_dir / f"frame_{i:06d}.png"
             cv2.imwrite(str(png_path), rgb_frame)
 
@@ -210,6 +203,8 @@ def tif_to_mp4(input_path, fps=10, cleanup_temp=True):
                 str(png_path),
                 "-codec",
                 "jpeg2000",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",  # width and height are required to be even numbers
                 "-pix_fmt",
                 (
                     "rgb24"
@@ -286,23 +281,3 @@ def tif_to_mp4(input_path, fps=10, cleanup_temp=True):
             print(f"Temporary files saved in: {temp_dir}")
 
     return str(output_path)
-
-
-# # Example usage
-# if __name__ == "__main__":
-#     import argparse
-
-#     parser = argparse.ArgumentParser(description='Convert TIF stack to MP4 via JPEG2000 lossless intermediate')
-#     parser.add_argument('input_path', help='Path to input TIF file')
-#     parser.add_argument('--fps', type=int, default=10, help='Frames per second for the video')
-#     parser.add_argument('--keep-temp', action='store_true', help='Keep temporary JP2 files')
-
-#     args = parser.parse_args()
-
-#     # Convert to MP4
-#     output_path = tif_to_mp4_via_jp2(
-#         args.input_path,
-#         fps=args.fps,
-#         cleanup_temp=not args.keep_temp
-#     )
-#     print(f"Video saved to: {output_path}")

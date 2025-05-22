@@ -585,7 +585,8 @@ class ProcessingWorker(QThread):
                 filepath = future_to_file[future]
                 try:
                     result = future.result()
-                    if result:
+                    # Only process result if it's not None (folder functions may return None)
+                    if result is not None:
                         processed_files_info.append(result)
                         self.file_processed.emit(result)
                 except (
@@ -611,12 +612,35 @@ class ProcessingWorker(QThread):
 
             print(f"Original image shape: {image.shape}, dtype: {image_dtype}")
 
+            # Check if this is a folder-processing function that shouldn't save individual files
+            function_name = getattr(
+                self.processing_func, "__name__", "unknown"
+            )
+            is_folder_function = (
+                "timepoint" in function_name.lower()
+                or "merge" in function_name.lower()
+                or "folder" in function_name.lower()
+            )
+
             # Apply processing with parameters
             processed_image = self.processing_func(image, **self.param_values)
 
             print(
                 f"Processed image shape before removing singletons: {processed_image.shape}, dtype: {processed_image.dtype}"
             )
+
+            # For folder functions, check if the output is the same as input (indicating no individual file should be saved)
+            if is_folder_function:
+                # If the function returns the original image unchanged, it means it handled saving internally
+                if np.array_equal(processed_image, image):
+                    print(
+                        "Folder function returned unchanged image - skipping individual file save"
+                    )
+                    return None  # Return None to indicate no file should be created
+                else:
+                    print(
+                        "Folder function returned different data - will save individual file"
+                    )
 
             # Remove ALL singleton dimensions from the processed image
             # This will keep only dimensions with size > 1
@@ -687,7 +711,13 @@ class ProcessingWorker(QThread):
                         "labels" in channel_filename
                         or "semantic" in channel_filename
                     ):
-                        save_dtype = np.uint32
+                        # Choose appropriate integer type based on data range
+                        if data_max <= 255:
+                            save_dtype = np.uint8
+                        elif data_max <= 65535:
+                            save_dtype = np.uint16
+                        else:
+                            save_dtype = np.uint32
 
                         print(
                             f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -701,13 +731,13 @@ class ProcessingWorker(QThread):
                     else:
                         # Handle large images with bigtiff format
                         print(
-                            f"Regular image channel, saving with dtype {processed_image.dtype} and bigtiff={use_bigtiff}"
+                            f"Regular image channel, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
                         )
 
                         # Save with original dtype and bigtiff format if needed
                         tifffile.imwrite(
                             channel_filepath,
-                            channel_image,  # .astype(image_dtype),
+                            channel_image.astype(image_dtype),
                             compression="zlib",
                             bigtiff=use_bigtiff,
                         )
@@ -749,8 +779,13 @@ class ProcessingWorker(QThread):
                     "labels" in new_filename_base
                     or "semantic" in new_filename_base
                 ):
-
-                    save_dtype = np.uint32
+                    # Choose appropriate integer type based on data range
+                    if data_max <= 255:
+                        save_dtype = np.uint8
+                    elif data_max <= 65535:
+                        save_dtype = np.uint16
+                    else:
+                        save_dtype = np.uint32
 
                     print(
                         f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -763,11 +798,11 @@ class ProcessingWorker(QThread):
                     )
                 else:
                     print(
-                        f"Saving image with dtype {processed_image.dtype} and bigtiff={use_bigtiff}"
+                        f"Saving image with dtype {image_dtype} and bigtiff={use_bigtiff}"
                     )
                     tifffile.imwrite(
                         new_filepath,
-                        processed_image,  # .astype(image_dtype),
+                        processed_image.astype(image_dtype),
                         compression="zlib",
                         bigtiff=use_bigtiff,
                     )
@@ -928,9 +963,46 @@ class FileResultsWidget(QWidget):
 
         # Update description
         description = function_info.get("description", "")
-        self.function_description.setText(description)
 
-        # Update parameters
+        # Check if this is a folder-processing function that needs single threading
+        is_folder_function = (
+            "folder" in function_name.lower()
+            or "timepoint" in function_name.lower()
+            or "merge" in function_name.lower()
+            or "folder" in description.lower()
+        )
+
+        # Disable threading controls for folder functions
+        if is_folder_function:
+            self.thread_count.setValue(1)
+            self.thread_count.setEnabled(False)
+            self.thread_count.setToolTip(
+                "This function processes entire folders and must run with 1 thread only."
+            )
+
+            # Add warning to description if not already present
+            if (
+                "IMPORTANT:" not in description
+                and "WARNING:" not in description
+            ):
+                description += "\n\n⚠️ IMPORTANT: This function processes entire folders. Set thread count to 1!"
+
+            self.function_description.setText(description)
+
+            # Change the description color to make it more prominent
+            self.function_description.setStyleSheet(
+                "QLabel { color: #ff6b00; font-weight: bold; }"
+            )
+        else:
+            # Re-enable threading controls for normal functions
+            self.thread_count.setEnabled(True)
+            self.thread_count.setToolTip(
+                "Number of threads to use for parallel processing"
+            )
+            self.function_description.setStyleSheet("")  # Reset styling
+            self.function_description.setText(description)
+
+        # Get parameters
         parameters = function_info.get("parameters", {})
 
         # Remove old parameters widget if it exists

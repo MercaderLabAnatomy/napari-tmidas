@@ -6,6 +6,7 @@ an interactive interface for selecting and cropping objects from images.
 The plugin supports both 2D (YX) and 3D (TYX/ZYX) data.
 """
 
+import contextlib
 import os
 
 # Add this at the beginning of your plugin file
@@ -38,6 +39,24 @@ from skimage.transform import resize
 from tifffile import imwrite
 
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
+
+
+def get_device():
+    """
+    Automatically detect the best available device for PyTorch.
+    Priority: CUDA > MPS (Apple Silicon) > CPU
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using CUDA GPU: {torch.cuda.get_device_name()}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using Apple Silicon GPU (MPS)")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+
+    return device
 
 
 class BatchCropAnything:
@@ -93,9 +112,9 @@ class BatchCropAnything:
             return filename
 
         try:
-            import torch
+            # import torch
 
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = get_device()
 
             # Download checkpoint if needed
             checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
@@ -233,13 +252,88 @@ class BatchCropAnything:
             # Load and process image
             self.original_image = imread(image_path)
 
-            # For 3D data, determine if it's TYX or ZYX based on shape
-            if self.use_3d and len(self.original_image.shape) == 3:
-                # Add image to viewer - napari can handle 3D data directly
-                self.image_layer = self.viewer.add_image(
-                    self.original_image,
-                    name=f"Image ({os.path.basename(image_path)})",
-                )
+            # For 3D/4D data, determine dimensions
+            if self.use_3d and len(self.original_image.shape) >= 3:
+                # Check shape to identify dimensions
+                if len(self.original_image.shape) == 4:  # TZYX or similar
+                    # Identify time dimension as first dim with size > 4 and < 400
+                    # This is a heuristic to differentiate time from channels/small Z stacks
+                    time_dim_idx = -1
+                    for i, dim_size in enumerate(self.original_image.shape):
+                        if 4 < dim_size < 400:
+                            time_dim_idx = i
+                            break
+
+                    if time_dim_idx == 0:  # TZYX format
+                        # Keep as is, T is already the first dimension
+                        self.image_layer = self.viewer.add_image(
+                            self.original_image,
+                            name=f"Image ({os.path.basename(image_path)})",
+                        )
+                        # Store time dimension info
+                        self.time_dim_size = self.original_image.shape[0]
+                        self.has_z_dim = True
+                    elif (
+                        time_dim_idx > 0
+                    ):  # Unusual format, we need to transpose
+                        # Transpose to move T to first dimension
+                        # Create permutation order that puts time_dim_idx first
+                        perm_order = list(
+                            range(len(self.original_image.shape))
+                        )
+                        perm_order.remove(time_dim_idx)
+                        perm_order.insert(0, time_dim_idx)
+
+                        transposed_image = np.transpose(
+                            self.original_image, perm_order
+                        )
+                        self.original_image = (
+                            transposed_image  # Replace with transposed version
+                        )
+
+                        self.image_layer = self.viewer.add_image(
+                            self.original_image,
+                            name=f"Image ({os.path.basename(image_path)})",
+                        )
+                        # Store time dimension info
+                        self.time_dim_size = self.original_image.shape[0]
+                        self.has_z_dim = True
+                    else:
+                        # No time dimension found, treat as ZYX
+                        self.image_layer = self.viewer.add_image(
+                            self.original_image,
+                            name=f"Image ({os.path.basename(image_path)})",
+                        )
+                        self.time_dim_size = 1
+                        self.has_z_dim = True
+                elif (
+                    len(self.original_image.shape) == 3
+                ):  # Could be TYX or ZYX
+                    # Check if first dimension is likely time (> 4, < 400)
+                    if 4 < self.original_image.shape[0] < 400:
+                        # Likely TYX format
+                        self.image_layer = self.viewer.add_image(
+                            self.original_image,
+                            name=f"Image ({os.path.basename(image_path)})",
+                        )
+                        self.time_dim_size = self.original_image.shape[0]
+                        self.has_z_dim = False
+                    else:
+                        # Likely ZYX format or another 3D format
+                        self.image_layer = self.viewer.add_image(
+                            self.original_image,
+                            name=f"Image ({os.path.basename(image_path)})",
+                        )
+                        self.time_dim_size = 1
+                        self.has_z_dim = True
+                else:
+                    # Should not reach here with use_3d=True, but just in case
+                    self.image_layer = self.viewer.add_image(
+                        self.original_image,
+                        name=f"Image ({os.path.basename(image_path)})",
+                    )
+                    self.time_dim_size = 1
+                    self.has_z_dim = False
             else:
                 # Handle 2D data as before
                 if self.original_image.dtype != np.uint8:
@@ -476,11 +570,45 @@ class BatchCropAnything:
                 temp_dir, f"temp_volume_{os.path.basename(image_path)}.mp4"
             )
 
-            # Convert volume to video format for SAM2
-            self.viewer.status = (
-                "Converting 3D volume to MP4 format for SAM2..."
-            )
-            mp4_path = tif_to_mp4(image_path)
+            # If we need to save a modified version for MP4 conversion
+            need_temp_tif = False
+            temp_tif_path = None
+
+            # Check if we have a 4D volume with Z dimension
+            if (
+                hasattr(self, "has_z_dim")
+                and self.has_z_dim
+                and len(self.current_image_for_segmentation.shape) == 4
+            ):
+                # We need to convert the 4D TZYX to a 3D TYX for proper video conversion
+                # by taking maximum intensity projection of Z for each time point
+                self.viewer.status = (
+                    "Converting 4D TZYX volume to 3D TYX for SAM2..."
+                )
+
+                # Create maximum intensity projection along Z axis (axis 1 in TZYX)
+                projected_volume = np.max(
+                    self.current_image_for_segmentation, axis=1
+                )
+
+                # Save this as a temporary TIF for MP4 conversion
+                temp_tif_path = os.path.join(
+                    temp_dir, f"temp_projected_{os.path.basename(image_path)}"
+                )
+                imwrite(temp_tif_path, projected_volume)
+                need_temp_tif = True
+
+                # Convert the projected TIF to MP4
+                self.viewer.status = (
+                    "Converting projected 3D volume to MP4 format for SAM2..."
+                )
+                mp4_path = tif_to_mp4(temp_tif_path)
+            else:
+                # Convert original volume to video format for SAM2
+                self.viewer.status = (
+                    "Converting 3D volume to MP4 format for SAM2..."
+                )
+                mp4_path = tif_to_mp4(image_path)
 
             # Initialize SAM2 state with the video
             self.viewer.status = "Initializing SAM2 Video Predictor..."
@@ -515,6 +643,15 @@ class BatchCropAnything:
                 self.viewer.dims.set_point(
                     0, 0
                 )  # Set the first dimension (typically time/z) to 0
+
+            # Clean up temporary file if we created one
+            if (
+                need_temp_tif
+                and temp_tif_path
+                and os.path.exists(temp_tif_path)
+            ):
+                with contextlib.suppress(Exception):
+                    os.remove(temp_tif_path)
 
             # Show instructions
             self.viewer.status = (
