@@ -40,22 +40,25 @@ from tifffile import imwrite
 
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
-
 def get_device():
-    try:
-        if hasattr(torch, "cuda") and torch.cuda.is_available():
-            device = torch.device("cuda")
-            print(f"Using CUDA GPU: {torch.cuda.get_device_name()}")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if sys.platform == "darwin":
+        # MacOS: Only check for MPS
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device = torch.device("mps")
             print("Using Apple Silicon GPU (MPS)")
         else:
             device = torch.device("cpu")
             print("Using CPU")
-        return device
-    except AssertionError as e:
-        print("CUDA not available, falling back to CPU.")
-        return torch.device("cpu")
+    else:
+        # Other platforms: check for CUDA, then CPU
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            device = torch.device("cuda")
+            print(f"Using CUDA GPU: {torch.cuda.get_device_name()}")
+        else:
+            device = torch.device("cpu")
+            print("Using CPU")
+    return device
+
 
 
 
