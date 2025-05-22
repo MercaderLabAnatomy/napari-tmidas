@@ -8,6 +8,7 @@ import traceback
 
 import dask.array as da
 import numpy as np
+import tifffile
 
 from napari_tmidas._registry import BatchProcessingRegistry
 
