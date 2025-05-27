@@ -23,7 +23,7 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-It is recommended to install the latest development version:
+It is recommended to install the latest development version. Please also regularly execute this command in the activated environment:
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
