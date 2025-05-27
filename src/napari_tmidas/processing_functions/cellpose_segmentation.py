@@ -189,7 +189,7 @@ def run_cellpose(
 @BatchProcessingRegistry.register(
     name="Cellpose-SAM Segmentation",
     suffix="_labels",
-    description="Automatic instance segmentation using Cellpose 4 (Cellpose-SAM) with improved generalization",
+    description="Automatic instance segmentation using Cellpose 4 (Cellpose-SAM) with improved generalization.",
     parameters={
         "dim_order": {
             "type": str,

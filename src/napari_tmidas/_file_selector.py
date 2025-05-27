@@ -970,6 +970,8 @@ class FileResultsWidget(QWidget):
             or "timepoint" in function_name.lower()
             or "merge" in function_name.lower()
             or "folder" in description.lower()
+            or "cellpose" in description.lower()
+            or "careamics" in description.lower()
         )
 
         # Disable threading controls for folder functions
@@ -985,7 +987,7 @@ class FileResultsWidget(QWidget):
                 "IMPORTANT:" not in description
                 and "WARNING:" not in description
             ):
-                description += "\n\n⚠️ IMPORTANT: This function processes entire folders. Set thread count to 1!"
+                description += "\nThis function has to run single-threaded."
 
             self.function_description.setText(description)
 
