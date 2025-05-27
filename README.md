@@ -31,7 +31,7 @@ It is recommended to install the latest development version:
 
 To use the Batch Microscopy Image Conversion pipeline, we need some libraries to read microscopy formats:
 
-    mamba activate napari-tmidas
+    # mamba activate napari-tmidas
     pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari
 
 If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
@@ -42,7 +42,7 @@ If you want to batch compress images using [Zstandard](https://github.com/facebo
 
 To use the Batch Crop Anything pipeline, we need to install SAM2 in the napari-tmidas environment:
 
-    mamba activate napari-tmidas
+    # mamba activate napari-tmidas
     cd /opt
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
     pip install -e .
