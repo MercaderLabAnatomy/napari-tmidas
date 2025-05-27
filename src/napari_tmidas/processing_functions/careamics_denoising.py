@@ -62,8 +62,8 @@ except ImportError:
         },
         "tile_size_z": {
             "type": int,
-            "default": 16,
-            "min": 16,
+            "default": 0,
+            "min": 0,
             "max": 256,
             "description": "Tile size in Z dimension (for 3D data)",
         },
