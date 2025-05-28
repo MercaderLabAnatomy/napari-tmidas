@@ -89,11 +89,18 @@ You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conv
 
 Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
 
+
+#### Processing Function Credits
+
+The image processing capabilities are powered by several excellent open-source tools:
+- [Cellpose 4](https://github.com/MouseLand/cellpose): Advanced cell segmentation
+- [Trackastra](https://github.com/weigertlab/trackastra): Cell tracking and analysis
+- [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
+
 ### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
 <img src="https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e" alt="Batch Label Inspection Widget" style="width:75%; height:auto;">
-
 
 ### Crop Anything
 This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Click the image below to see a video demo.
