@@ -196,20 +196,20 @@ def run_cellpose(
             "default": "YX",
             "description": "Dimension order of the input (e.g., 'YX', 'ZYX', 'TZYX')",
         },
-        "channel_1": {
-            "type": int,
-            "default": 0,
-            "min": 0,
-            "max": 3,
-            "description": "First channel: 0=grayscale, 1=green, 2=red, 3=blue",
-        },
-        "channel_2": {
-            "type": int,
-            "default": 0,
-            "min": 0,
-            "max": 3,
-            "description": "Second channel: 0=none, 1=green, 2=red, 3=blue",
-        },
+        # "channel_1": {
+        #     "type": int,
+        #     "default": 0,
+        #     "min": 0,
+        #     "max": 3,
+        #     "description": "First channel: 0=grayscale, 1=green, 2=red, 3=blue",
+        # },
+        # "channel_2": {
+        #     "type": int,
+        #     "default": 0,
+        #     "min": 0,
+        #     "max": 3,
+        #     "description": "Second channel: 0=none, 1=green, 2=red, 3=blue",
+        # },
         "flow_threshold": {
             "type": float,
             "default": 0.4,
@@ -293,8 +293,8 @@ def cellpose_segmentation(
         Segmented image with instance labels
     """
     # Convert channel parameters to Cellpose channels list
-    channels = [channel_1, channel_2]
-
+    # channels = [channel_1, channel_2]
+    channels = [0, 0]  # limit script to single channel
     # Determine whether to use dedicated environment
     use_env = force_dedicated_env or USE_DEDICATED_ENV
 
