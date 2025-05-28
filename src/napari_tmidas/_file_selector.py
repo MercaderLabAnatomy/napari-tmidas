@@ -972,6 +972,7 @@ class FileResultsWidget(QWidget):
             or "folder" in description.lower()
             or "cellpose" in description.lower()
             or "careamics" in description.lower()
+            or "trackastra" in description.lower()
         )
 
         # Disable threading controls for folder functions

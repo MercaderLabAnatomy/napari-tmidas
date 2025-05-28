@@ -282,7 +282,7 @@ if SKIMAGE_AVAILABLE:
 
         # Get region properties
         if intensity_image:
-            # Use the same image as both label and intensity image
+            # Use the same image as both label and intensity image # this is wrong
             regions = skimage.measure.regionprops(
                 label_image, intensity_image=image
             )
