@@ -558,6 +558,10 @@ class ProcessingWorker(QThread):
         self.stop_requested = False
         self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
+    def stop(self):
+        """Request the worker to stop processing"""
+        self.stop_requested = True
+
     def run(self):
         """Process files in a separate thread"""
         # Track processed files
