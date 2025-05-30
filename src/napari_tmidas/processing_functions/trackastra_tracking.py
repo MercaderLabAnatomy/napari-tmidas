@@ -252,16 +252,35 @@ def trackastra_tracking(
 
     temp_dir = Path(os.path.dirname(img_path))
 
-    # Save the mask data
-    mask_path = img_path.replace(".tif", "_labels.tif")
     # Create the tracking script
     script_path = temp_dir / "run_tracking.py"
-    output_path = temp_dir / os.path.basename(img_path).replace(
-        ".tif", "_tracked.tif"
+    # Save the mask data
+    # For label images, use the original path as mask_path
+    if label_pattern in os.path.basename(img_path):
+        mask_path = img_path
+        # Find corresponding raw image by removing the label pattern
+        raw_base = os.path.basename(img_path).replace(label_pattern, "")
+        raw_path = os.path.join(os.path.dirname(img_path), raw_base + ".tif")
+        if not os.path.exists(raw_path):
+            print(f"Warning: Could not find raw image for {img_path}")
+            raw_path = img_path  # Fallback to using label as input
+    else:
+        # For raw images, find the corresponding label image
+        raw_path = img_path
+        base_name = os.path.basename(img_path).replace(".tif", "")
+        mask_path = os.path.join(
+            os.path.dirname(img_path), base_name + label_pattern
+        )
+        if not os.path.exists(mask_path):
+            print(f"No label file found for {img_path}")
+            return image
+
+    output_path = temp_dir / os.path.basename(mask_path).replace(
+        label_pattern, "_tracked.tif"
     )
 
     script_content = create_trackastra_script(
-        str(img_path), str(mask_path), model, mode, str(output_path)
+        str(raw_path), str(mask_path), model, mode, str(output_path)
     )
 
     with open(script_path, "w") as f:

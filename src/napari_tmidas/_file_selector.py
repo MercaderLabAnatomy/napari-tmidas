@@ -653,9 +653,12 @@ class ProcessingWorker(QThread):
             # Generate new filename base
             filename = os.path.basename(filepath)
             name, ext = os.path.splitext(filename)
-            new_filename_base = (
-                name.replace(self.input_suffix, "") + self.output_suffix
-            )
+            if name.endswith(self.input_suffix):
+                new_filename_base = (
+                    name[: -len(self.input_suffix)] + self.output_suffix
+                )
+            else:
+                new_filename_base = name + self.output_suffix
 
             # Check if the first dimension should be treated as channels
             # If processed_image has more dimensions than the original image,
@@ -779,13 +782,8 @@ class ProcessingWorker(QThread):
                     "labels" in new_filename_base
                     or "semantic" in new_filename_base
                 ):
-                    # Choose appropriate integer type based on data range
-                    if data_max <= 255:
-                        save_dtype = np.uint8
-                    elif data_max <= 65535:
-                        save_dtype = np.uint16
-                    else:
-                        save_dtype = np.uint32
+
+                    save_dtype = np.uint32
 
                     print(
                         f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
