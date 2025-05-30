@@ -119,7 +119,7 @@ class BatchCropAnything:
             filename = os.path.join(dest_folder, url.split("/")[-1])
             if not os.path.exists(filename):
                 print(f"Downloading checkpoint to {filename}...")
-                response = requests.get(url, stream=True)
+                response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 with open(filename, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -748,6 +748,15 @@ class BatchCropAnything:
                     border_width=1,
                     opacity=0.8,
                 )
+
+                with contextlib.suppress(AttributeError, ValueError):
+                    points_layer.mouse_drag_callbacks.remove(
+                        self._on_points_clicked
+                    )
+                    points_layer.mouse_drag_callbacks.append(
+                        self._on_points_clicked
+                    )
+
                 # Initialize points for this object
                 if not hasattr(self, "sam2_points_by_obj"):
                     self.sam2_points_by_obj = {}
@@ -1121,6 +1130,14 @@ class BatchCropAnything:
                 border_width=1,
                 opacity=0.8,
             )
+
+            with contextlib.suppress(AttributeError, ValueError):
+                points_layer.mouse_drag_callbacks.remove(
+                    self._on_points_clicked
+                )
+                points_layer.mouse_drag_callbacks.append(
+                    self._on_points_clicked
+                )
 
             # Connect points layer mouse click event
             points_layer.mouse_drag_callbacks.append(self._on_points_clicked)
@@ -1661,6 +1678,14 @@ class BatchCropAnything:
                             border_width=1,
                             opacity=0.8,
                         )
+                        with contextlib.suppress(AttributeError, ValueError):
+                            points_layer.mouse_drag_callbacks.remove(
+                                self._on_points_clicked
+                            )
+                            points_layer.mouse_drag_callbacks.append(
+                                self._on_points_clicked
+                            )
+
                         self.obj_points[current_obj_id] = [[x, y]]
                         self.obj_labels[current_obj_id] = [point_label]
                     else:
@@ -1937,6 +1962,14 @@ class BatchCropAnything:
             edge_width=2,
             opacity=0.8,
         )
+
+        with contextlib.suppress(AttributeError, ValueError):
+            self.points_layer.mouse_drag_callbacks.remove(
+                self._on_points_clicked
+            )
+            self.points_layer.mouse_drag_callbacks.append(
+                self._on_points_clicked
+            )
 
     def create_label_table(self, parent_widget):
         """Create a table widget displaying all detected labels."""
