@@ -2,6 +2,7 @@
 """
 Registry for batch processing functions.
 """
+import threading
 from typing import Any, Dict, List, Optional
 
 
@@ -11,6 +12,7 @@ class BatchProcessingRegistry:
     """
 
     _processing_functions = {}
+    _lock = threading.RLock()  # Add thread lock
 
     @classmethod
     def register(
@@ -43,26 +45,25 @@ class BatchProcessingRegistry:
             parameters = {}
 
         def decorator(func):
-            cls._processing_functions[name] = {
-                "func": func,
-                "suffix": suffix,
-                "description": description,
-                "parameters": parameters,
-            }
+            with cls._lock:  # Thread-safe registration
+                cls._processing_functions[name] = {
+                    "func": func,
+                    "suffix": suffix,
+                    "description": description,
+                    "parameters": parameters,
+                }
             return func
 
         return decorator
 
     @classmethod
     def get_function_info(cls, name: str) -> Optional[dict]:
-        """
-        Retrieve a registered processing function and its metadata
-        """
-        return cls._processing_functions.get(name)
+        """Thread-safe retrieval"""
+        with cls._lock:
+            return cls._processing_functions.get(name)
 
     @classmethod
     def list_functions(cls) -> List[str]:
-        """
-        List all registered processing function names
-        """
-        return list(cls._processing_functions.keys())
+        """Thread-safe listing"""
+        with cls._lock:
+            return list(cls._processing_functions.keys())

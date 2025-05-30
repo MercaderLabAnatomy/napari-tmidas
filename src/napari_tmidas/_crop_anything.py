@@ -8,11 +8,8 @@ The plugin supports both 2D (YX) and 3D (TYX/ZYX) data.
 
 import contextlib
 import os
-
-# Add this at the beginning of your plugin file
 import sys
 
-sys.path.append("/opt/sam2")
 import numpy as np
 import requests
 import torch
@@ -40,10 +37,30 @@ from tifffile import imwrite
 
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
+sam2_paths = [
+    os.environ.get("SAM2_PATH"),
+    "/opt/sam2",
+    os.path.expanduser("~/sam2"),
+    "./sam2",
+]
+
+for path in sam2_paths:
+    if path and os.path.exists(path):
+        sys.path.append(path)
+        break
+else:
+    print(
+        "Warning: SAM2 not found in common locations. Please set SAM2_PATH environment variable."
+    )
+
+
 def get_device():
     if sys.platform == "darwin":
         # MacOS: Only check for MPS
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        if (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        ):
             device = torch.device("mps")
             print("Using Apple Silicon GPU (MPS)")
         else:
@@ -58,8 +75,6 @@ def get_device():
             device = torch.device("cpu")
             print("Using CPU")
     return device
-
-
 
 
 class BatchCropAnything:
