@@ -13,6 +13,8 @@ Currently, napari-tmidas provides pipelines as widgets for batch image conversio
 
 ## Installation
 
+(Video installation guides: https://www.youtube.com/@macromeer/videos)
+
 First, install Napari in a virtual environment:
 
     mamba create -y -n napari-tmidas -c conda-forge python=3.11
@@ -23,33 +25,26 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-It is recommended to install the latest development version. Please also regularly execute this command in the activated environment:
+It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
-Video installation guides coming soon here: https://www.youtube.com/@macromeer 
+To use the Batch Crop Anything pipeline, we need to install **Segment Anything 2** (2D/3D):
 
-
-### Dependencies
-
-If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
-
-    sudo apt-get install zstd    # for Linux
-    brew install zstd            # for macOS
-    choco install zstandard      # for Windows
-
-To use the Batch Crop Anything pipeline, we need to install **SAM2**:
-
-    # mamba activate napari-tmidas
-    cd /opt # if it does not exist: mkdir /opt
+    cd /opt # if the folder does not exist: mkdir /opt && cd /opt
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
     pip install -e .
     curl -L https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -o checkpoints/sam2.1_hiera_large.pt
+    mamba install -c conda-forge ffmpeg # we also need ffmpeg
 
-We also need ffmpeg:
+If you want to batch compress image data using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
-    # mamba activate napari-tmidas
-    mamba install -c conda-forge ffmpeg
+   ~~sudo apt-get install zstd~~    # Pre-installed on Linux :man_shrugging:
+
+    brew install zstd            # for macOS (requires [Homebrew](https://brew.sh/)
+    pip install zstandard        # Windows with Python >= 3.7
+
+
 
 And you are done! 
 
