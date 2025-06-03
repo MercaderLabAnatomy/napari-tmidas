@@ -9,7 +9,7 @@
 The `napari-tmidas` plugin consists of a growing collection of pipelines for fast batch processing of confocal and whole slide microscopy images of biological tissues. This is a WIP and based on the CLI version of [T-MIDAS](https://github.com/MercaderLabAnatomy/T-MIDAS).
 
 ## Features
-Currently, napari-tmidas provides pipelines as widgets for batch image conversion / cropping / processing, ROI colocalization and label inspection (cf. [Usage](#usage) below).
+Currently, **napari-tmidas** provides pipelines as widgets for batch image conversion and processing, object cropping, label image inspection and ROI colocalization (cf. [usage](#usage) below). You can request new batch image processing features in [Issues](https://github.com/MercaderLabAnatomy/napari-tmidas/issues).
 
 ## Installation
 
