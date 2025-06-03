@@ -29,11 +29,6 @@ It is recommended to install the latest development version. Please also regular
 
 ### Dependencies
 
-To use the Batch Microscopy Image Conversion pipeline, we need some libraries to read microscopy formats:
-
-    # mamba activate napari-tmidas
-    pip install nd2 readlif tiffslide pylibCZIrw acquifer-napari
-
 If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
     sudo apt-get install zstd    # for Linux
@@ -47,8 +42,11 @@ To use the Batch Crop Anything pipeline, we need to install SAM2 in the napari-t
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
     pip install -e .
     wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -P checkpoints/
-    pip install decord
 
+We also need ffmpeg:
+
+    # mamba activate napari-tmidas
+    mamba install -c conda-forge ffmpeg
 
 
 
