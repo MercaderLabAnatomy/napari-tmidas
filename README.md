@@ -15,7 +15,7 @@ Currently, napari-tmidas provides pipelines as widgets for batch image conversio
 
 First, install Napari in a virtual environment:
 
-    mamba create -y -n napari-tmidas -c conda-forge python=3.11 tqdm
+    mamba create -y -n napari-tmidas -c conda-forge python=3.11
     mamba activate napari-tmidas
     python -m pip install "napari[all]"
 
@@ -27,6 +27,9 @@ It is recommended to install the latest development version. Please also regular
 
     pip install git+https://github.com/macromeer/napari-tmidas.git
 
+Video installation guides coming soon here: https://www.youtube.com/@macromeer 
+
+
 ### Dependencies
 
 If you want to batch compress images using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
@@ -35,20 +38,20 @@ If you want to batch compress images using [Zstandard](https://github.com/facebo
     brew install zstd            # for macOS
     choco install zstandard      # for Windows
 
-To use the Batch Crop Anything pipeline, we need to install SAM2 in the napari-tmidas environment:
+To use the Batch Crop Anything pipeline, we need to install **SAM2**:
 
     # mamba activate napari-tmidas
-    cd /opt
+    cd /opt # if it does not exist: mkdir /opt
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
     pip install -e .
-    wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -P checkpoints/
+    curl -L https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -o checkpoints/sam2.1_hiera_large.pt
 
 We also need ffmpeg:
 
     # mamba activate napari-tmidas
     mamba install -c conda-forge ffmpeg
 
-
+And you are done! 
 
 ## Usage
 
