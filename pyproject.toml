@@ -45,6 +45,7 @@ dependencies = [
     "tiffslide",
     "hydra-core",
     "eva-decord",
+    "acquifer-napari",
 ]
 
 [project.optional-dependencies]
