@@ -64,11 +64,11 @@ Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` an
 
 ### Image Processing
 
-1. After entering the path to the folder containing the images to be processed (currently supports TIF, later also ZARR) and optionally a filter for filename suffix, press 'Scan folder'.
+1. You start with entering the path to the folder containing the images to be processed (currently supports TIF, later also ZARR) and optionally a filter for filename suffix
 
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
-2. As a result, a table appears with the found images. You can click on them to inspect them in the viewer.
+2. After indexing the files, a table appears with the found images. You can click on them to inspect them in the viewer.
 
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
