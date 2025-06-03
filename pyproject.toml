@@ -38,6 +38,13 @@ dependencies = [
     "torchvision",
     "timm",
     "opencv-python",
+    "cmake",
+    "nd2",
+    "pylibCZIrw",
+    "readlif",
+    "tiffslide",
+    "hydra-core",
+    "eva-decord",
 ]
 
 [project.optional-dependencies]
