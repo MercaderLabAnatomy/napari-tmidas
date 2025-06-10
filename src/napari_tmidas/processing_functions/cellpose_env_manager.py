@@ -166,6 +166,8 @@ masks, flows, styles = model.eval(
     batch_size={args_dict.get('batch_size', 32)},
     normalize=normalize,
     do_3D={args_dict.get('do_3D', False)},
+    flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
+    anisotropy={args_dict.get('anisotropy', None)},
     z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None
 )
 
