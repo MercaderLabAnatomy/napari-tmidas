@@ -41,10 +41,8 @@ If you want to batch compress image data using [Zstandard](https://github.com/fa
 
    ~~sudo apt-get install zstd~~    # Pre-installed on Linux :man_shrugging:
 
-    brew install zstd            # for macOS (requires [Homebrew](https://brew.sh/)
+    brew install zstd            # for macOS (requires Homebrew)
     pip install zstandard        # Windows with Python >= 3.7
-
-
 
 And you are done! 
 
@@ -58,7 +56,7 @@ You can then find the installed plugin in the Plugins tab.
 
 ### Microscopy Image Conversion
 
-You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conversion`. Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` and acquifer data. After scanning a folder of your choice for microscopy image data, select a file in the first column of the table and preview and export any image data it contains.
+Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` and acquifer data. After scanning a folder of your choice for microscopy image data, select a file in the first column of the table and preview and export any image data it contains.
 
 
 <img src="https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b" alt="Microscopy Image Conversion Widget" style="width:75%; height:auto;">
@@ -66,11 +64,11 @@ You can start this pipeline via `Plugins > T-MIDAS > Batch Microscopy Image Conv
 
 ### Image Processing
 
-1. After opening `Plugins > T-MIDAS > Batch Image Processing`, enter the path to the folder containing the images to be processed (currently supports TIF, later also ZARR). You can also filter for filename suffix.
+1. You start with entering the path to the folder containing the images to be processed (currently supports TIF, later also ZARR) and optionally a filter for filename suffix
 
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
-2. As a result, a table appears with the found images. You can click on them to inspect them in the viewer.
+2. After indexing the files, a table appears with the found images. You can click on them to inspect them in the viewer.
 
 ![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
 
@@ -99,7 +97,8 @@ If you have already segmented a folder full of images and now you want to maybe 
 <img src="https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e" alt="Batch Label Inspection Widget" style="width:75%; height:auto;">
 
 ### Crop Anything
-This pipeline combines the Segment Anything Model (SAM) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Cropping works like this: Enter 2D view and go to the first z slice where the object to be cropped is appearing. Activate/select the points layer and click on the object. Terminal shows progress. You can then proceed to select another object (always do this in 2D mode)
+
+This pipeline combines the Segment Anything Model (SAM2; supports YX, ZYX and TYX data) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Cropping works like this: Enter 2D view and go to the first z slice where the object to be cropped is appearing. Activate/select the points layer and click on the object. Terminal shows progress. You can then proceed to select another object (always do this in 2D mode)
 
 <img src="https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443" alt="Crop Anything Widget" style="width:75%; height:auto;">
 
@@ -107,6 +106,7 @@ This pipeline combines the Segment Anything Model (SAM) for automatic object det
 
 
 ### ROI Colocalization
+
 This pipeline quantifies colocalization between labeled regions of interest (ROIs) across multiple image channels. It determines the extent of overlap between ROIs in a reference channel and those in one or two other channels. The output is a table of colocalization counts. Optionally, the size of reference channel ROIs, as well as the total or median size of colocalizing ROIs in the other channels, can be included. Colocalization is determined using Boolean masking. The number of colocalizing instances is determined by counting unique label IDs within the overlapping regions. Typically, the reference channel contains larger structures, while other channels contain smaller, potentially nested, structures. For example, the reference channel might contain cell bodies, with the second and third channels containing nuclei and sub-nuclear objects, respectively.
 
 <img src="https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7" alt="ROI Colocalization Widget" style="width:75%; height:auto;">
