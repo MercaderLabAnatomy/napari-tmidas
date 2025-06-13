@@ -152,11 +152,6 @@ def load_and_validate_images(image_files: List[str]) -> Tuple[np.ndarray, str]:
     return time_series, dimension_order
 
 
-# Global variable to track which folders have been processed
-_processed_folders = set()
-
-
-# Advanced version with more options
 @BatchProcessingRegistry.register(
     name="Merge Timepoints",
     suffix="_merge_timeseries",
@@ -188,6 +183,11 @@ _processed_folders = set()
             "default": False,
             "description": "Use memory-efficient loading for very large datasets",
         },
+        "overwrite_existing": {
+            "type": bool,
+            "default": False,
+            "description": "Overwrite existing merged file if it exists",
+        },
     },
 )
 def merge_timepoint_folder_advanced(
@@ -196,6 +196,7 @@ def merge_timepoint_folder_advanced(
     max_timepoints: int = 0,
     start_timepoint: int = 0,
     memory_efficient: bool = False,
+    overwrite_existing: bool = False,
 ) -> np.ndarray:
     """
     Advanced timepoint merging with additional options for large datasets.
@@ -218,14 +219,14 @@ def merge_timepoint_folder_advanced(
         Starting timepoint index (0-based)
     memory_efficient : bool
         Use memory-efficient loading (loads images one at a time)
+    overwrite_existing : bool
+        Overwrite existing merged file if it exists
 
     Returns:
     --------
     numpy.ndarray
         Time series array with selected timepoints
     """
-    global _processed_folders
-
     # Get folder path and file suffix from batch processing context
     import inspect
 
@@ -256,17 +257,34 @@ def merge_timepoint_folder_advanced(
     if input_suffix is None:
         input_suffix = os.path.splitext(current_file)[1]
 
-    # Check if already processed
-    advanced_key = f"{folder_path}_advanced"
-    if advanced_key in _processed_folders:
-        print(
-            f"Advanced processing for {folder_name} already completed, skipping..."
-        )
+    # Generate output filename with parameters in the name for uniqueness
+    param_suffix = ""
+    if subsample_factor > 1:
+        param_suffix += f"_sub{subsample_factor}"
+    if start_timepoint > 0:
+        param_suffix += f"_start{start_timepoint}"
+    if max_timepoints > 0:
+        param_suffix += f"_max{max_timepoints}"
+
+    output_filename = f"{folder_name}_merged_timepoints{param_suffix}.tif"
+    output_path = os.path.join(output_folder, output_filename)
+
+    # Check if output file already exists
+    if os.path.exists(output_path) and not overwrite_existing:
+        print(f"🔵 Merged file already exists: {output_filename}")
+        print(f"   Full path: {output_path}")
+        print("   Skipping this folder. To reprocess:")
+        print("   - Delete the existing file, or")
+        print("   - Use a different output folder, or")
+        print("   - Enable 'overwrite_existing' parameter")
         return image
 
-    _processed_folders.add(advanced_key)
+    # If we're here and the file exists, we're overwriting
+    if os.path.exists(output_path):
+        print(f"⚠️  Overwriting existing file: {output_filename}")
 
-    print(f"🔄 ADVANCED PROCESSING FOLDER: {folder_name}")
+    print(f"🔄 PROCESSING FOLDER: {folder_name}")
+    print(f"📁 Output will be: {output_filename}")
     print(f"Using file suffix: {input_suffix}")
 
     # Use the same suffix from the batch processing widget
@@ -300,7 +318,6 @@ def merge_timepoint_folder_advanced(
         # Apply timepoint selection
         if start_timepoint > 0:
             if start_timepoint >= len(image_files):
-                _processed_folders.discard(advanced_key)
                 raise ValueError(
                     f"start_timepoint ({start_timepoint}) >= total timepoints ({len(image_files)})"
                 )
@@ -322,7 +339,6 @@ def merge_timepoint_folder_advanced(
             print(f"Limited to {max_timepoints} timepoints")
 
         if len(image_files) < 1:
-            _processed_folders.discard(advanced_key)
             raise ValueError("No timepoints selected after applying filters")
 
         print(f"Final selection: {len(image_files)} timepoints")
@@ -366,7 +382,6 @@ def merge_timepoint_folder_advanced(
 
                 img = imread(image_file)
                 if img.shape != first_image.shape:
-                    _processed_folders.discard(advanced_key)
                     raise ValueError(
                         f"Shape mismatch at timepoint {i}: {img.shape} vs {first_image.shape}"
                     )
@@ -383,10 +398,7 @@ def merge_timepoint_folder_advanced(
             time_series = load_and_validate_images(image_files)[0]
 
         # Save the advanced time series
-        output_filename = f"{folder_name}_merged_timepoints.tif"
-        output_path = os.path.join(output_folder, output_filename)
-
-        print(f"💾 Saving advanced time series to: {output_path}")
+        print(f"💾 Saving time series to: {output_path}")
 
         size_gb = time_series.nbytes / (1024**3)
         use_bigtiff = size_gb > 2.0
@@ -398,7 +410,7 @@ def merge_timepoint_folder_advanced(
             bigtiff=use_bigtiff,
         )
 
-        print("✅ Successfully saved advanced time series!")
+        print("✅ Successfully saved time series!")
         print(f"📁 Output file: {output_filename}")
         print(f"📊 File size: {size_gb:.2f} GB")
         print(f"📐 Final shape: {time_series.shape}")
@@ -408,10 +420,7 @@ def merge_timepoint_folder_advanced(
         return image
 
     except Exception as e:
-        _processed_folders.discard(advanced_key)
-        raise ValueError(
-            f"Error in advanced timepoint merging: {str(e)}"
-        ) from e
+        raise ValueError(f"Error in timepoint merging: {str(e)}") from e
 
 
 # Command-line utility function
