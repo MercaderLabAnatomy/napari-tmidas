@@ -369,6 +369,149 @@ def split_channels(
 
 
 @BatchProcessingRegistry.register(
+    name="Merge Color Channels",
+    suffix="_merged_colors",
+    description="Merges separate channel images from a folder into a single multi-channel image",
+    parameters={
+        "channel_substring": {
+            "type": str,
+            "default": "_channel_",
+            "description": "Substring before channel number",
+        },
+    },
+)
+def merge_channels(
+    image: np.ndarray,
+    channel_substring: str = "_channel_",
+) -> np.ndarray:
+    """
+    Merge multiple single-channel images from a folder into one multi-channel image.
+
+    Identifies channel files by finding a substring followed by a 1-2 digit number.
+    Adds channels as the last dimension regardless of input dimensionality.
+
+    Args:
+        image: Current image being processed
+        channel_substring: Substring that appears before channel number in filenames
+
+    Returns:
+        Multi-channel image with channels as last dimension
+    """
+    # Get file context from batch processing
+    import inspect
+    import re
+
+    from skimage.io import imread
+
+    current_file = None
+    output_folder = None
+
+    for frame_info in inspect.stack():
+        frame_locals = frame_info.frame.f_locals
+        if "filepath" in frame_locals:
+            current_file = frame_locals["filepath"]
+        if "self" in frame_locals:
+            obj = frame_locals["self"]
+            if hasattr(obj, "output_folder"):
+                output_folder = obj.output_folder
+                break
+
+    if current_file is None:
+        raise ValueError("Could not determine current file path")
+
+    folder_path = os.path.dirname(current_file)
+    filename = os.path.basename(current_file)
+
+    # Create regex pattern to find channel substring followed by 1-2 digits
+    pattern = re.compile(rf"({re.escape(channel_substring)})(\d{{1,2}})")
+    match = pattern.search(filename)
+
+    if not match:
+        print(
+            f"⚠️  No channel pattern '{channel_substring}[number]' found in filename"
+        )
+        return image
+
+    # Extract base name and channel number
+    channel_num = int(match.group(2))
+    base_name = filename[: match.start()] + filename[match.end() :]
+
+    print(f"\n📐 Current image shape: {image.shape}")
+    print(f"✅ Found channel {channel_num} in file: {filename}")
+
+    # Only process if this is the first channel in the set
+    if channel_num != 0:
+        return image
+
+    # Find all related channel files
+    all_files = os.listdir(folder_path)
+    channel_files = {}
+
+    for file in all_files:
+        file_match = pattern.search(file)
+        if file_match:
+            # Check if base name matches (excluding channel part)
+            file_base = file[: file_match.start()] + file[file_match.end() :]
+            if file_base == base_name:
+                ch_num = int(file_match.group(2))
+                channel_files[ch_num] = os.path.join(folder_path, file)
+
+    # Sort by channel number
+    sorted_channels = sorted(channel_files.keys())
+    num_channels = len(sorted_channels)
+
+    if num_channels < 2:
+        print(
+            f"⚠️  Only found {num_channels} channel(s). Need at least 2 for merging."
+        )
+        return image
+
+    print(f"📊 Found {num_channels} channels: {sorted_channels}")
+
+    # Load all channels in order
+    # First channel is the current image
+    channels = []
+    for ch_num in sorted_channels:
+        if ch_num == channel_num:
+            # Use the already loaded image for current channel
+            channels.append(image)
+        else:
+            # Load other channel files
+            channel_path = channel_files[ch_num]
+            channel_data = imread(channel_path)
+
+            if channel_data.shape != image.shape:
+                raise ValueError(
+                    f"Channel {ch_num} has different shape: {channel_data.shape} vs {image.shape}"
+                )
+
+            channels.append(channel_data)
+
+        print(
+            f"   Channel {ch_num}: {os.path.basename(channel_files[ch_num])}"
+        )
+
+    # Stack channels as last dimension
+    merged = np.stack(channels, axis=-1)
+
+    print(
+        f"✨ Merged shape: {merged.shape} (channels added as last dimension)"
+    )
+
+    # Save the merged result
+    if output_folder:
+        # Remove channel pattern from base name for output
+        output_base = filename[: match.start()] + filename[match.end() :]
+        output_base = os.path.splitext(output_base)[0]
+        output_path = os.path.join(output_folder, f"{output_base}_merged.tif")
+        tifffile.imwrite(output_path, merged, compression="zlib")
+        print(f"💾 Saved merged image: {output_path}")
+
+    # Return original to skip individual saving
+    return image
+
+
+@BatchProcessingRegistry.register(
     name="RGB to Labels",
     suffix="_labels",
     description="Convert RGB images to label images using a color map",
