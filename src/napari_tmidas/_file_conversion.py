@@ -116,10 +116,14 @@ class SeriesTableWidget(QTableWidget):
                     # Update the current file
                     self.current_file = filepath
 
+                    # IMPORTANT: Set default selection for this file
+                    self.parent().set_selected_series(filepath, 0)
+
                     # Signal to show series details
                     self.parent().show_series_details(filepath)
                 else:
-                    # Not a series file, just load the image
+                    # Not a series file, just load the image and set selection
+                    self.parent().set_selected_series(filepath, 0)
                     self.parent().load_image(filepath)
 
 
@@ -1564,13 +1568,20 @@ class MicroscopyImageConverterWidget(QWidget):
 
         # Conversion and cancel buttons
         button_layout = QHBoxLayout()
+
         convert_button = QPushButton("Convert Selected Files")
         convert_button.clicked.connect(self.convert_files)
+
+        # NEW: Add Convert All Files button
+        convert_all_button = QPushButton("Convert All Files")
+        convert_all_button.clicked.connect(self.convert_all_files)
+
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel_operation)
         self.cancel_button.setVisible(False)
 
         button_layout.addWidget(convert_button)
+        button_layout.addWidget(convert_all_button)  # NEW
         button_layout.addWidget(self.cancel_button)
         main_layout.addLayout(button_layout)
 
@@ -1786,10 +1797,22 @@ class MicroscopyImageConverterWidget(QWidget):
 
     def convert_files(self):
         """Convert selected files to TIF or ZARR"""
-        # Check if any files are selected
+
+        # NEW: Add option to convert all files
         if not self.selected_series:
-            self.status_label.setText("No files selected for conversion")
-            return
+            # If no specific series selected, convert all files with series 0
+            all_files = list(self.files_table.file_data.keys())
+            if not all_files:
+                self.status_label.setText("No files available for conversion")
+                return
+
+            # Set default series 0 for all files
+            for filepath in all_files:
+                self.selected_series[filepath] = 0
+
+            self.status_label.setText(
+                f"Converting all {len(all_files)} files with default series"
+            )
 
         # Check output folder
         output_folder = self.output_edit.text()
@@ -1800,7 +1823,7 @@ class MicroscopyImageConverterWidget(QWidget):
         if not self.is_output_folder_valid(output_folder):
             return
 
-        # Create files to convert list
+        # Rest of the method remains the same...
         files_to_convert = []
 
         for filepath, series_index in self.selected_series.items():
@@ -1932,6 +1955,31 @@ class MicroscopyImageConverterWidget(QWidget):
                 self.tif_radio.setChecked(False)
         finally:
             self.updating_format_buttons = False
+
+    def convert_all_files(self):
+        """Convert all files in the table to TIF or ZARR"""
+        # Clear existing selections
+        self.selected_series.clear()
+        self.export_all_series.clear()
+
+        # Get all files from the table
+        all_files = list(self.files_table.file_data.keys())
+        if not all_files:
+            self.status_label.setText("No files available for conversion")
+            return
+
+        # Set default series 0 for all files
+        for filepath in all_files:
+            self.selected_series[filepath] = 0
+            # For files with multiple series, export all by default
+            file_info = self.files_table.file_data.get(filepath)
+            if file_info and file_info.get("series_count", 0) > 1:
+                self.export_all_series[filepath] = True
+
+        self.status_label.setText(f"Converting all {len(all_files)} files...")
+
+        # Call the existing convert_files method
+        self.convert_files()
 
 
 # Create a MagicGUI widget that creates and returns the converter widget
