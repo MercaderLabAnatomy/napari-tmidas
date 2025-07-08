@@ -27,7 +27,7 @@ Now you can install `napari-tmidas` via [pip]:
 
 It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
 
-    pip install git+https://github.com/macromeer/napari-tmidas.git
+    pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git
 
 To use the Batch Crop Anything pipeline, we need to install **Segment Anything 2** (2D/3D):
 
