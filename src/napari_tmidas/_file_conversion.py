@@ -542,16 +542,45 @@ class ND2Loader(FormatLoader):
 
             # Load specific series/position
             if "P" in nd2_file.sizes:
+                # Find P dimension index in the axes order
+                axes_order = "".join(nd2_file.sizes.keys())
+                p_index = axes_order.index("P")
+                print(
+                    f"P dimension is at index {p_index} in axes order {axes_order}"
+                )
+
                 if size_GB > 4:
                     print(f"Using Dask for large series {series_index}")
-                    # Use nd2 library's position selection
                     data = nd2.imread(filepath, dask=True)
-                    # Select the specific position - P is typically the first dimension
-                    data = data[series_index]
+                    # Use slice indexing to select P dimension
+                    if p_index == 0:
+                        data = data[series_index]
+                    elif p_index == 1:
+                        data = data[:, series_index]
+                    elif p_index == 2:
+                        data = data[:, :, series_index]
+                    elif p_index == 3:
+                        data = data[:, :, :, series_index]
+                    elif p_index == 4:
+                        data = data[:, :, :, :, series_index]
+                    else:
+                        data = data[:, :, :, :, :, series_index]
                 else:
                     print(f"Direct loading series {series_index}")
                     data = nd2.imread(filepath)
-                    data = data[series_index]
+                    # Same indexing for numpy arrays
+                    if p_index == 0:
+                        data = data[series_index]
+                    elif p_index == 1:
+                        data = data[:, series_index]
+                    elif p_index == 2:
+                        data = data[:, :, series_index]
+                    elif p_index == 3:
+                        data = data[:, :, :, series_index]
+                    elif p_index == 4:
+                        data = data[:, :, :, :, series_index]
+                    else:
+                        data = data[:, :, :, :, :, series_index]
             else:
                 # No P dimension, load entire file
                 if size_GB > 4:
@@ -564,61 +593,41 @@ class ND2Loader(FormatLoader):
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
-        if series_index != 0:
-            return {}
-
         with nd2.ND2File(filepath) as nd2_file:
-            # Get all dimensions and their sizes
             dims = dict(nd2_file.sizes)
 
-            # Create a more detailed axes representation
-            axes = "".join(dims.keys())
+            # If file has P dimension, exclude it from metadata since we're loading single series
+            if "P" in dims:
+                dims_single_series = {
+                    k: v for k, v in dims.items() if k != "P"
+                }
+                axes = "".join(dims_single_series.keys())
+            else:
+                # Single series file
+                if series_index != 0:
+                    return {}
+                axes = "".join(dims.keys())
 
-            print(f"ND2 metadata - dims: {dims}")
-            print(f"ND2 metadata - axes: {axes}")
+            print(f"ND2 metadata for series {series_index} - dims: {dims}")
+            print(f"Single series axes: {axes}")
 
-            # Get spatial dimensions and convert to resolution
+            # Get spatial resolution
             try:
                 voxel = nd2_file.voxel_size()
                 x_res = 1 / voxel.x if voxel.x > 0 else 1.0
                 y_res = 1 / voxel.y if voxel.y > 0 else 1.0
                 z_spacing = 1 / voxel.z if voxel.z > 0 else 1.0
-
-                print(f"Voxel size: x={voxel.x}, y={voxel.y}, z={voxel.z}")
             except (ValueError, AttributeError) as e:
                 print(f"Error getting voxel size: {e}")
                 x_res, y_res, z_spacing = 1.0, 1.0, 1.0
 
-            # Create scale information for all dimensions
-            scales = {}
-            if "T" in dims:
-                scales["scale_t"] = 1.0
-            if "Z" in dims:
-                scales["scale_z"] = z_spacing
-            if "C" in dims:
-                scales["scale_c"] = 1.0
-            if "Y" in dims:
-                scales["scale_y"] = y_res
-            if "X" in dims:
-                scales["scale_x"] = x_res
-
-            # Build comprehensive metadata
+            # Build metadata for single series
             metadata = {
                 "axes": axes,
-                "dimensions": dims,
                 "resolution": (x_res, y_res),
                 "unit": "um",
                 "spacing": z_spacing,
-                **scales,  # Add all scale information
             }
-
-            # Add extra metadata for zarr transformations
-            ordered_scales = []
-            for ax in axes:
-                scale_key = f"scale_{ax.lower()}"
-                ordered_scales.append(scales.get(scale_key, 1.0))
-
-            metadata["scales"] = ordered_scales
 
             return metadata
 
