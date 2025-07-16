@@ -501,36 +501,65 @@ class ND2Loader(FormatLoader):
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
-        # ND2 files typically have a single series with multiple channels/dimensions
-        return 1
+        try:
+            with nd2.ND2File(filepath) as nd2_file:
+                # Check if file has P (Position) dimension which represents series
+                if "P" in nd2_file.sizes:
+                    return nd2_file.sizes["P"]
+                else:
+                    # Single series file
+                    return 1
+        except (ValueError, FileNotFoundError):
+            return 0
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
-        if series_index != 0:
-            raise ValueError("ND2 files only support series index 0")
-
-        # First open the file to check metadata
         with nd2.ND2File(filepath) as nd2_file:
-            # Calculate size in GB
-            total_size = np.prod(
-                [nd2_file.sizes[dim] for dim in nd2_file.sizes]
+            # Check if file has P dimension
+            if "P" in nd2_file.sizes:
+                max_series = nd2_file.sizes["P"]
+                if series_index < 0 or series_index >= max_series:
+                    raise ValueError(
+                        f"Series index {series_index} out of range (0-{max_series-1})"
+                    )
+            elif series_index != 0:
+                raise ValueError(
+                    "ND2 files without P dimension only support series index 0"
+                )
+
+            # Calculate single series size (without P dimension)
+            dims_without_p = {
+                k: v for k, v in nd2_file.sizes.items() if k != "P"
+            }
+            single_series_size = np.prod(
+                [dims_without_p[dim] for dim in dims_without_p]
             )
             pixel_size = nd2_file.dtype.itemsize
-            size_GB = (total_size * pixel_size) / (1024**3)
+            size_GB = (single_series_size * pixel_size) / (1024**3)
 
             print(f"ND2 file dimensions: {nd2_file.sizes}")
-            print(f"Pixel type: {nd2_file.dtype}, size: {pixel_size} bytes")
-            print(f"Estimated file size: {size_GB:.2f} GB")
+            print(f"Single series size: {size_GB:.2f} GB")
 
-        if size_GB > 4:
-            print("Using Dask for large file")
-            # Load as Dask array for large files
-            data = nd2.imread(filepath, dask=True)
-            return data
-        else:
-            print("Using direct loading for smaller file")
-            # Load directly into memory for smaller files
-            data = nd2.imread(filepath)
+            # Load specific series/position
+            if "P" in nd2_file.sizes:
+                if size_GB > 4:
+                    print(f"Using Dask for large series {series_index}")
+                    # Use nd2 library's position selection
+                    data = nd2.imread(filepath, dask=True)
+                    # Select the specific position - P is typically the first dimension
+                    data = data[series_index]
+                else:
+                    print(f"Direct loading series {series_index}")
+                    data = nd2.imread(filepath)
+                    data = data[series_index]
+            else:
+                # No P dimension, load entire file
+                if size_GB > 4:
+                    data = nd2.imread(filepath, dask=True)
+                else:
+                    data = nd2.imread(filepath)
+
+            print(f"Loaded series shape: {data.shape}")
             return data
 
     @staticmethod
@@ -1344,108 +1373,63 @@ class ConversionWorker(QThread):
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Enhanced ZARR saving with proper metadata storage and specific exceptions"""
         print(f"Saving ZARR file: {output_path}")
         print(f"Image data shape: {image_data.shape}")
 
         metadata = metadata or {}
-        print(
-            f"Metadata keys: {list(metadata.keys()) if metadata else 'No metadata'}"
-        )
 
-        # Handle overwriting by deleting the directory if it exists
         if os.path.exists(output_path):
             print(f"Deleting existing Zarr directory: {output_path}")
             shutil.rmtree(output_path)
 
-        # Explicitly create a DirectoryStore
         store = parse_url(output_path, mode="w").store
-
         ndim = len(image_data.shape)
+        axes = metadata.get("axes", "").lower() if metadata else None
 
-        axes = metadata.get("axes").lower() if metadata else None
+        # Standardize to czyx order (without t if not present)
+        has_time = "t" in axes if axes else False
+        target_axes = "tczyx" if has_time else "czyx"
+        target_axes = target_axes[:ndim]  # Trim to actual dimensions
 
-        # Standardize axes order to 'ctzyx' if possible, regardless of Z presence
-        target_axes = "tczyx"
-        if axes != target_axes[:ndim]:
-            print(f"Reordering axes from {axes} to {target_axes[:ndim]}")
+        if axes and axes != target_axes:
+            print(f"Reordering axes from {axes} to {target_axes}")
             try:
-                # Create a mapping from original axes to target axes
+                # Create mapping and reorder
                 axes_map = {ax: i for i, ax in enumerate(axes)}
                 reorder_list = []
-                for _i, target_ax in enumerate(target_axes[:ndim]):
+                for target_ax in target_axes:
                     if target_ax in axes_map:
                         reorder_list.append(axes_map[target_ax])
                     else:
-                        print(f"Axis {target_ax} not found in original axes")
-                        reorder_list.append(None)
+                        print(f"Warning: Axis {target_ax} not found in {axes}")
 
-                # Filter out None values (missing axes)
-                reorder_list = [i for i in reorder_list if i is not None]
-
-                if len(reorder_list) != len(axes):
-                    raise ValueError(
-                        "Reordering failed: Mismatch between original and reordered dimensions."
+                if len(reorder_list) == len(axes):
+                    image_data = np.moveaxis(
+                        image_data, range(len(axes)), reorder_list
                     )
-                image_data = np.moveaxis(
-                    image_data, range(len(axes)), reorder_list
-                )
-                axes = "".join(
-                    [axes[i] for i in reorder_list]
-                )  # Update axes to reflect new order
-                print(f"New axes order after reordering: {axes}")
+                    axes = target_axes
+                    print(f"Successfully reordered to: {axes}")
             except (ValueError, IndexError) as e:
-                print(f"Error during reordering: {e}")
-                raise
+                print(f"Reordering failed, using original order: {e}")
+                # Keep original axes
 
-        # Convert to Dask array
+        # Convert to Dask array and save
         if not hasattr(image_data, "dask"):
-            print("Converting to dask array with auto chunks...")
             image_data = da.from_array(image_data, chunks="auto")
-        else:
-            print("Using existing dask array")
 
-        # Write the image data as OME-Zarr
         try:
-            print("Writing image data using ome_zarr.writer.write_image...")
             with ProgressBar():
                 root = zarr.group(store=store)
                 write_image(
                     image_data,
                     group=root,
-                    axes=axes,
+                    axes=axes or "zyx",  # Fallback axes
                     scaler=None,
                     storage_options={"compression": "zstd"},
                 )
-
-            # Add basic OME-Zarr metadata
-            root = zarr.open(store)
-            root.attrs["multiscales"] = [
-                {
-                    "version": "0.4",
-                    "datasets": [{"path": "0"}],
-                    "axes": [
-                        {
-                            "name": ax,
-                            "type": (
-                                "space"
-                                if ax in "xyz"
-                                else "time" if ax == "t" else "channel"
-                            ),
-                        }
-                        for ax in axes
-                    ],
-                }
-            ]
-
-            print("OME-Zarr file saved successfully.")
             return True
-
         except (ValueError, FileNotFoundError) as e:
             print(f"Error during Zarr writing: {e}")
-            import traceback
-
-            traceback.print_exc()
             return False
 
 
