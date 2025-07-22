@@ -7,9 +7,12 @@ Supported formats: Leica LIF, Nikon ND2, Zeiss CZI, TIFF-based whole slide image
 """
 
 import concurrent.futures
+import contextlib
+import gc
 import os
 import re
 import shutil
+import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -326,85 +329,400 @@ class FormatLoader:
 
 
 class LIFLoader(FormatLoader):
-    """Loader for Leica LIF files"""
+    """
+    Leica LIF loader based on readlif API
+
+    """
 
     @staticmethod
     def can_load(filepath: str) -> bool:
-        return filepath.lower().endswith(".lif")
+        """Check if file can be loaded as LIF"""
+        if not filepath.lower().endswith(".lif"):
+            return False
+
+        try:
+            # Quick validation by attempting to open
+            lif_file = LifFile(filepath)
+            # Check if we can at least get the image list
+            list(lif_file.get_iter_image())
+            return True
+        except (OSError, ValueError, ImportError, AttributeError) as e:
+            print(f"Cannot load LIF file {filepath}: {e}")
+            return False
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
+        """Get number of series in LIF file with better error handling"""
         try:
             lif_file = LifFile(filepath)
-            return sum(1 for _ in lif_file.get_iter_image())
-        except (OSError, ValueError, ImportError):
+            # Count images more safely
+            count = 0
+            for _ in lif_file.get_iter_image():
+                count += 1
+            return count
+        except (OSError, ValueError, ImportError, AttributeError) as e:
+            print(f"Error counting series in {filepath}: {e}")
             return 0
 
     @staticmethod
-    def load_series(filepath: str, series_index: int) -> np.ndarray:
+    def load_series(
+        filepath: str, series_index: int
+    ) -> Union[np.ndarray, da.Array]:
+        """
+        Load LIF series with improved memory management and error handling
+        """
+        lif_file = None
         try:
+            print(f"Loading LIF series {series_index} from {filepath}")
             lif_file = LifFile(filepath)
-            image = lif_file.get_image(series_index)
 
-            # Extract dimensions
+            # Get the specific image
+            images = list(lif_file.get_iter_image())
+            if series_index >= len(images):
+                raise SeriesIndexError(
+                    f"Series index {series_index} out of range (0-{len(images)-1})"
+                )
+
+            image = images[series_index]
+
+            # Get image properties
             channels = image.channels
             z_stacks = image.nz
             timepoints = image.nt
             x_dim, y_dim = image.dims[0], image.dims[1]
 
-            series_shape = (timepoints, z_stacks, channels, y_dim, x_dim)
-            series_data = np.zeros(series_shape, dtype=np.uint16)
+            print(
+                f"LIF Image dimensions: T={timepoints}, Z={z_stacks}, C={channels}, Y={y_dim}, X={x_dim}"
+            )
 
-            # Populate the array
-            missing_frames = 0
-            for t in range(timepoints):
-                for z in range(z_stacks):
-                    for c in range(channels):
-                        frame = image.get_frame(z=z, t=t, c=c)
-                        if frame:
-                            series_data[t, z, c, :, :] = np.array(frame)
-                        else:
-                            missing_frames += 1
+            # Calculate memory requirements
+            total_frames = timepoints * z_stacks * channels
+            estimated_size_gb = (total_frames * x_dim * y_dim * 2) / (
+                1024**3
+            )  # Assuming 16-bit
 
-            if missing_frames > 0:
-                print(
-                    f"Warning: {missing_frames} frames were missing and filled with zeros."
+            print(
+                f"Estimated memory: {estimated_size_gb:.2f} GB for {total_frames} frames"
+            )
+
+            # Choose loading strategy based on size
+            if estimated_size_gb > 4.0:
+                print("Large dataset detected, using Dask lazy loading")
+                return LIFLoader._load_as_dask(
+                    image, timepoints, z_stacks, channels, y_dim, x_dim
+                )
+            elif estimated_size_gb > 1.0:
+                print("Medium dataset, using chunked numpy loading")
+                return LIFLoader._load_chunked_numpy(
+                    image, timepoints, z_stacks, channels, y_dim, x_dim
+                )
+            else:
+                print("Small dataset, using standard numpy loading")
+                return LIFLoader._load_numpy(
+                    image, timepoints, z_stacks, channels, y_dim, x_dim
                 )
 
-            return series_data
-
         except (OSError, IndexError, ValueError, AttributeError) as e:
+            print("Full error traceback for LIF loading:")
+            traceback.print_exc()
             raise FileFormatError(
                 f"Failed to load LIF series {series_index}: {str(e)}"
             ) from e
+        finally:
+            # Cleanup
+            if lif_file is not None:
+                with contextlib.suppress(Exception):
+                    # readlif doesn't have explicit close, but we can delete the reference
+                    del lif_file
+            gc.collect()
+
+    @staticmethod
+    def _load_numpy(
+        image,
+        timepoints: int,
+        z_stacks: int,
+        channels: int,
+        y_dim: int,
+        x_dim: int,
+    ) -> np.ndarray:
+        """Load small datasets directly into numpy array"""
+
+        # Determine data type from first available frame
+        dtype = np.uint16  # Default
+        test_frame = None
+        for t in range(min(1, timepoints)):
+            for z in range(min(1, z_stacks)):
+                for c in range(min(1, channels)):
+                    try:
+                        test_frame = image.get_frame(z=z, t=t, c=c)
+                        if test_frame is not None:
+                            dtype = np.array(test_frame).dtype
+                            break
+                    except (OSError, ValueError, AttributeError):
+                        continue
+                if test_frame is not None:
+                    break
+            if test_frame is not None:
+                break
+
+        # Pre-allocate array
+        series_shape = (timepoints, z_stacks, channels, y_dim, x_dim)
+        series_data = np.zeros(series_shape, dtype=dtype)
+
+        # Load frames with better error handling
+        missing_frames = 0
+        loaded_frames = 0
+
+        for t in range(timepoints):
+            for z in range(z_stacks):
+                for c in range(channels):
+                    try:
+                        frame = image.get_frame(z=z, t=t, c=c)
+                        if frame is not None:
+                            frame_array = np.array(frame, dtype=dtype)
+                            # Ensure correct dimensions
+                            if frame_array.shape == (y_dim, x_dim):
+                                series_data[t, z, c, :, :] = frame_array
+                                loaded_frames += 1
+                            else:
+                                print(
+                                    f"Warning: Frame shape mismatch at T={t}, Z={z}, C={c}: "
+                                    f"expected {(y_dim, x_dim)}, got {frame_array.shape}"
+                                )
+                                missing_frames += 1
+                        else:
+                            missing_frames += 1
+                    except (OSError, ValueError, AttributeError) as e:
+                        print(f"Error loading frame T={t}, Z={z}, C={c}: {e}")
+                        missing_frames += 1
+
+            # Progress feedback for large datasets
+            if timepoints > 10 and (t + 1) % max(1, timepoints // 10) == 0:
+                print(f"Loaded {t + 1}/{timepoints} timepoints")
+
+        print(
+            f"Loading complete: {loaded_frames} frames loaded, {missing_frames} frames missing"
+        )
+
+        if loaded_frames == 0:
+            raise FileFormatError(
+                "No valid frames could be loaded from LIF file"
+            )
+
+        return series_data
+
+    @staticmethod
+    def _load_chunked_numpy(
+        image,
+        timepoints: int,
+        z_stacks: int,
+        channels: int,
+        y_dim: int,
+        x_dim: int,
+    ) -> np.ndarray:
+        """Load medium datasets with memory management"""
+
+        print("Using chunked loading strategy")
+
+        # Load in chunks to manage memory
+        chunk_size = max(
+            1, min(10, timepoints // 2)
+        )  # Process multiple timepoints at once
+
+        # Determine data type
+        dtype = np.uint16
+        for t in range(min(1, timepoints)):
+            for z in range(min(1, z_stacks)):
+                for c in range(min(1, channels)):
+                    try:
+                        frame = image.get_frame(z=z, t=t, c=c)
+                        if frame is not None:
+                            dtype = np.array(frame).dtype
+                            break
+                    except (OSError, ValueError, AttributeError):
+                        continue
+
+        # Pre-allocate final array
+        series_shape = (timepoints, z_stacks, channels, y_dim, x_dim)
+        series_data = np.zeros(series_shape, dtype=dtype)
+
+        missing_frames = 0
+
+        for t_start in range(0, timepoints, chunk_size):
+            t_end = min(t_start + chunk_size, timepoints)
+            print(f"Loading timepoints {t_start} to {t_end-1}")
+
+            for t in range(t_start, t_end):
+                for z in range(z_stacks):
+                    for c in range(channels):
+                        try:
+                            frame = image.get_frame(z=z, t=t, c=c)
+                            if frame is not None:
+                                frame_array = np.array(frame, dtype=dtype)
+                                if frame_array.shape == (y_dim, x_dim):
+                                    series_data[t, z, c, :, :] = frame_array
+                                else:
+                                    missing_frames += 1
+                            else:
+                                missing_frames += 1
+                        except (OSError, ValueError, AttributeError):
+                            missing_frames += 1
+
+            # Force garbage collection after each chunk
+            gc.collect()
+
+        if missing_frames > 0:
+            print(
+                f"Warning: {missing_frames} frames were missing and filled with zeros"
+            )
+
+        return series_data
+
+    @staticmethod
+    def _load_as_dask(
+        image,
+        timepoints: int,
+        z_stacks: int,
+        channels: int,
+        y_dim: int,
+        x_dim: int,
+    ) -> da.Array:
+        """Load large datasets as dask arrays for lazy evaluation"""
+
+        print("Creating Dask array for lazy loading")
+
+        # Determine data type
+        dtype = np.uint16
+        for t in range(min(1, timepoints)):
+            for z in range(min(1, z_stacks)):
+                for c in range(min(1, channels)):
+                    try:
+                        frame = image.get_frame(z=z, t=t, c=c)
+                        if frame is not None:
+                            dtype = np.array(frame).dtype
+                            break
+                    except (OSError, ValueError, AttributeError):
+                        continue
+
+        # Define chunk size for dask array
+        # Chunk by timepoints to make it memory efficient
+        time_chunk = (
+            max(1, min(5, timepoints // 4)) if timepoints > 4 else timepoints
+        )
+
+        def load_chunk(block_id):
+            """Load a specific chunk of the data"""
+            t_start = block_id[0] * time_chunk
+            t_end = min(t_start + time_chunk, timepoints)
+
+            chunk_shape = (t_end - t_start, z_stacks, channels, y_dim, x_dim)
+            chunk_data = np.zeros(chunk_shape, dtype=dtype)
+
+            for t_idx, t in enumerate(range(t_start, t_end)):
+                for z in range(z_stacks):
+                    for c in range(channels):
+                        try:
+                            frame = image.get_frame(z=z, t=t, c=c)
+                            if frame is not None:
+                                frame_array = np.array(frame, dtype=dtype)
+                                if frame_array.shape == (y_dim, x_dim):
+                                    chunk_data[t_idx, z, c, :, :] = frame_array
+                        except (OSError, ValueError, AttributeError) as e:
+                            print(
+                                f"Error in chunk loading T={t}, Z={z}, C={c}: {e}"
+                            )
+
+            return chunk_data
+
+        # Use da.from_delayed for custom loading function
+        from dask import delayed
+
+        # Create delayed objects for each chunk
+        delayed_chunks = []
+        for t_chunk_idx in range((timepoints + time_chunk - 1) // time_chunk):
+            delayed_chunk = delayed(load_chunk)((t_chunk_idx,))
+            delayed_chunks.append(delayed_chunk)
+
+        # Convert to dask arrays and concatenate
+        dask_chunks = []
+        for i, delayed_chunk in enumerate(delayed_chunks):
+            t_start = i * time_chunk
+            t_end = min(t_start + time_chunk, timepoints)
+            chunk_shape = (t_end - t_start, z_stacks, channels, y_dim, x_dim)
+
+            dask_chunk = da.from_delayed(
+                delayed_chunk, shape=chunk_shape, dtype=dtype
+            )
+            dask_chunks.append(dask_chunk)
+
+        # Concatenate along time axis
+        if len(dask_chunks) == 1:
+            return dask_chunks[0]
+        else:
+            return da.concatenate(dask_chunks, axis=0)
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
+        """Extract metadata with better error handling"""
         try:
             lif_file = LifFile(filepath)
-            image = lif_file.get_image(series_index)
+            images = list(lif_file.get_iter_image())
+
+            if series_index >= len(images):
+                return {}
+
+            image = images[series_index]
 
             metadata = {
-                "axes": "TZCYX",
+                "axes": "TZCYX",  # Standard microscopy order
                 "unit": "um",
-                "resolution": image.scale[:2],
             }
-            if image.scale[2] is not None:
-                metadata["spacing"] = image.scale[2]
+
+            # Try to get resolution information
+            try:
+                if hasattr(image, "scale") and image.scale:
+                    # scale is typically [x_res, y_res, z_res] in micrometers per pixel
+                    if len(image.scale) >= 2:
+                        x_scale, y_scale = image.scale[0], image.scale[1]
+                        if x_scale and y_scale and x_scale > 0 and y_scale > 0:
+                            metadata["resolution"] = (
+                                1.0 / x_scale,
+                                1.0 / y_scale,
+                            )  # Convert to pixels per micrometer
+
+                    if (
+                        len(image.scale) >= 3
+                        and image.scale[2]
+                        and image.scale[2] > 0
+                    ):
+                        metadata["spacing"] = image.scale[
+                            2
+                        ]  # Z spacing in micrometers
+            except (AttributeError, TypeError, IndexError):
+                pass
+
+            # Add image dimensions info
+            with contextlib.suppress(AttributeError, IndexError):
+                metadata.update(
+                    {
+                        "timepoints": image.nt,
+                        "z_stacks": image.nz,
+                        "channels": image.channels,
+                        "width": image.dims[0],
+                        "height": image.dims[1],
+                    }
+                )
+
             return metadata
-        except (OSError, IndexError, AttributeError):
+
+        except (OSError, IndexError, AttributeError, ImportError) as e:
+            print(f"Warning: Could not extract metadata from {filepath}: {e}")
             return {}
 
 
 class ND2Loader(FormatLoader):
     """
-    WORKING loader for Nikon ND2 files with proper handling of ResourceBackedDaskArray
-
-    Key fixes:
-    1. Use standard array slicing instead of .take() method
-    2. Handle ResourceBackedDaskArray properly
-    3. Keep the ND2File open during dask operations
-    4. Proper memory management and error handling
+    Loader for Nikon ND2 files based on nd2 API
     """
 
     @staticmethod
@@ -429,9 +747,7 @@ class ND2Loader(FormatLoader):
         filepath: str, series_index: int
     ) -> Union[np.ndarray, da.Array]:
         """
-        Load a specific series from ND2 file - CORRECTED VERSION
-
-        This fixes the ResourceBackedDaskArray issue by using proper indexing
+        Load a specific series from ND2 file
         """
         try:
             # First, get basic info about the file
