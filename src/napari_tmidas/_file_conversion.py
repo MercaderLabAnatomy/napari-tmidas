@@ -938,10 +938,10 @@ class AcquiferLoader(FormatLoader):
                         match = pattern.search(sample_file)
                         if match:
                             pixel_size = float(match.group(1)) * 10**-4
-
-                        resolution = (pixel_size, pixel_size)
+                            resolution = (pixel_size, pixel_size)
                     except (ValueError, FileNotFoundError) as e:
                         print(f"Warning: Could not get pixel size: {e}")
+                        resolution = (1.0, 1.0)
             else:
                 # If no Well dimension, use dimensions from the dataset
                 dims = list(dataset.dims)
@@ -1168,7 +1168,7 @@ class ConversionWorker(QThread):
 
         # Handle Dask arrays for smaller files
         if hasattr(image_data, "compute"):
-            if file_size_GB > 16:  # Still too large even for standard method
+            if file_size_GB > 8:  # Reject very large files for standard method
                 raise ValueError(
                     f"File size ({file_size_GB:.2f}GB) too large for TIF format. Use ZARR instead."
                 )
@@ -1230,19 +1230,28 @@ class ConversionWorker(QThread):
             f"Estimated file size: {file_size_GB:.2f}GB, using BigTIFF: {use_bigtiff}"
         )
 
+        # For very large files (>8GB), don't attempt TIF at all
+        if file_size_GB > 8:
+            raise ValueError(
+                f"File size ({file_size_GB:.2f}GB) too large for TIF format. Use ZARR instead."
+            )
+
         # For Dask arrays, we can write chunks directly without computing the whole array
         if hasattr(image_data, "dask") and hasattr(image_data, "chunks"):
+            print("Detected Dask array with chunks")
             return self._save_dask_tif_chunked(
                 image_data, output_path, metadata, use_bigtiff
             )
 
         # For regular numpy arrays that are large, use memory mapping
-        if file_size_GB > 8:  # Use memory mapping for very large files
+        if file_size_GB > 4:  # Use memory mapping for files >4GB
+            print("Using memory mapping for large numpy array")
             return self._save_numpy_tif_memmap(
                 image_data, output_path, metadata, use_bigtiff
             )
 
         # For smaller files or if chunked methods fail, fall back to standard method
+        print("Using standard saving method")
         return self._save_tif_standard(
             image_data, output_path, metadata, use_bigtiff
         )
@@ -1255,116 +1264,140 @@ class ConversionWorker(QThread):
 
         print("Using Dask chunked writing strategy")
 
+        # Get array info
+        shape = dask_array.shape
+        dtype = dask_array.dtype
+        chunks = dask_array.chunks
+
+        print(f"Dask array: shape={shape}, dtype={dtype}, chunks={chunks}")
+
+        # For very large files, use the safest approach: compute timepoints individually
+        if len(shape) >= 4:  # Multi-dimensional data
+            return self._write_multidim_safe(
+                dask_array, output_path, use_bigtiff
+            )
+
+        # For smaller/simpler arrays, try direct writing
         try:
-            # Method 1: Use tifffile's built-in support for dask arrays (if available)
-            try:
-                # Recent versions of tifffile can handle dask arrays directly
+            print("Attempting direct tifffile write of dask array")
+            tifffile.imwrite(
+                output_path,
+                dask_array,
+                bigtiff=use_bigtiff,
+                compression="zlib",
+            )
+            print("Successfully saved using direct dask write")
+            return True
+        except (
+            TypeError,
+            ValueError,
+            OSError,
+            RuntimeError,
+            MemoryError,
+        ) as e:
+            print(f"Direct dask write failed: {e}")
+            # Fallback to safe method
+            return self._write_multidim_safe(
+                dask_array, output_path, use_bigtiff
+            )
+
+    def _write_multidim_safe(
+        self, dask_array, output_path: str, use_bigtiff: bool
+    ):
+        """Safely write multi-dimensional dask array by computing one slice at a time"""
+        import tifffile
+
+        shape = dask_array.shape
+        print(f"Using safe multi-dimensional writing for shape {shape}")
+
+        try:
+            # For 5D arrays (T,Z,C,Y,X), write one timepoint at a time
+            if len(shape) == 5:
+                T, Z, C, Y, X = shape
+                print(f"Writing 5D array: T={T}, Z={Z}, C={C}, Y={Y}, X={X}")
+
+                # Write timepoints one by one using TiffWriter
+                with tifffile.TiffWriter(
+                    output_path, bigtiff=use_bigtiff
+                ) as writer:
+                    for t in range(T):
+                        print(f"Computing and writing timepoint {t+1}/{T}")
+                        try:
+                            # Compute one timepoint at a time
+                            timepoint_data = dask_array[t].compute()
+                            print(
+                                f"  Timepoint {t} shape: {timepoint_data.shape}"
+                            )
+
+                            # Write timepoint with proper metadata
+                            writer.write(
+                                timepoint_data,
+                                compression="zlib",
+                                # Remove contiguous=True as it conflicts with compression
+                            )
+                        except Exception as e:
+                            print(f"Error writing timepoint {t}: {e}")
+                            raise
+
+                print(f"Successfully wrote all {T} timepoints")
+                return True
+
+            # For 4D arrays, assume first dimension is time or similar
+            elif len(shape) == 4:
+                dim0, dim1, dim2, dim3 = shape
+                print(f"Writing 4D array: {dim0}x{dim1}x{dim2}x{dim3}")
+
+                with tifffile.TiffWriter(
+                    output_path, bigtiff=use_bigtiff
+                ) as writer:
+                    for i in range(dim0):
+                        print(f"Computing and writing slice {i+1}/{dim0}")
+                        try:
+                            slice_data = dask_array[i].compute()
+                            writer.write(
+                                slice_data,
+                                compression="zlib",
+                                # Remove contiguous=True as it conflicts with compression
+                            )
+                        except Exception as e:
+                            print(f"Error writing slice {i}: {e}")
+                            raise
+
+                return True
+
+            # For 3D or lower, compute all at once (should be smaller)
+            else:
+                print(f"Computing entire {len(shape)}D array")
+                computed_data = dask_array.compute()
                 tifffile.imwrite(
                     output_path,
-                    dask_array,
+                    computed_data,
                     bigtiff=use_bigtiff,
                     compression="zlib",
                 )
-                print("Successfully saved using tifffile's dask support")
                 return True
-            except (TypeError, AttributeError):
-                # Fallback to manual chunked writing
-                pass
 
-            # Method 2: Manual chunked writing
-            print("Using manual chunked writing")
-
-            # Determine chunk strategy based on array dimensions
-            shape = dask_array.shape
-            chunks = dask_array.chunks
-
-            print(f"Dask chunks: {chunks}")
-
-            # For 5D data (T,Z,C,Y,X), write one timepoint at a time
-            if len(shape) == 5:
-                return self._write_5d_chunked(
-                    dask_array, output_path, use_bigtiff
-                )
-            # For 4D data, write in Z-slices or timepoints
-            elif len(shape) == 4:
-                return self._write_4d_chunked(
-                    dask_array, output_path, use_bigtiff
-                )
-            else:
-                # For other dimensions, compute in memory (should be smaller)
-                computed_array = dask_array.compute()
-                return self._save_tif_standard(
-                    computed_array, output_path, {}, use_bigtiff
-                )
-
-        except (ValueError, OSError, RuntimeError) as e:
-            print(f"Chunked writing failed: {e}")
-            # Final fallback - compute smaller chunks
-            try:
-                # Rechunk to smaller pieces and compute
-                rechunked = dask_array.rechunk(
-                    (1, -1, -1, -1, -1)
-                )  # One timepoint at a time
-                computed = rechunked.compute()
-                return self._save_tif_standard(
-                    computed, output_path, {}, use_bigtiff
-                )
-            except MemoryError as e:
-                print(
-                    "Cannot save this file as TIF - too large for available memory"
-                )
-                raise ValueError(
-                    "File too large for TIF format - use ZARR instead"
-                ) from e
+        except Exception as e:
+            print(f"Safe multi-dimensional writing failed: {e}")
+            raise
 
     def _write_5d_chunked(
         self, dask_array, output_path: str, use_bigtiff: bool
     ):
-        """Write 5D array (T,Z,C,Y,X) one timepoint at a time"""
-        import tifffile
-
-        shape = dask_array.shape
-        T, Z, C, Y, X = shape
-
-        print(f"Writing 5D array {shape} one timepoint at a time")
-
-        # Create the TIF file and write timepoints sequentially
-        with tifffile.TiffWriter(output_path, bigtiff=use_bigtiff) as tif:
-            for t in range(T):
-                print(f"Writing timepoint {t+1}/{T}")
-
-                # Extract one timepoint (this should fit in memory)
-                timepoint_data = dask_array[t].compute()  # Shape: (Z,C,Y,X)
-
-                # Write this timepoint
-                tif.write(
-                    timepoint_data,
-                    compression="zlib",
-                )
-
-        print(f"Successfully wrote {T} timepoints to {output_path}")
-        return True
+        """Write 5D array (T,Z,C,Y,X) one timepoint at a time - DEPRECATED, use _write_multidim_safe instead"""
+        print(
+            "Note: _write_5d_chunked is deprecated, redirecting to safer method"
+        )
+        return self._write_multidim_safe(dask_array, output_path, use_bigtiff)
 
     def _write_4d_chunked(
         self, dask_array, output_path: str, use_bigtiff: bool
     ):
-        """Write 4D array in chunks"""
-        import tifffile
-
-        shape = dask_array.shape
-        print(f"Writing 4D array {shape} in chunks")
-
-        # For 4D, assume first dimension can be chunked
-        with tifffile.TiffWriter(output_path, bigtiff=use_bigtiff) as tif:
-            for i in range(shape[0]):
-                print(f"Writing slice {i+1}/{shape[0]}")
-
-                # Extract one slice
-                slice_data = dask_array[i].compute()
-
-                tif.write(slice_data, compression="zlib")
-
-        return True
+        """Write 4D array in chunks - DEPRECATED, use _write_multidim_safe instead"""
+        print(
+            "Note: _write_4d_chunked is deprecated, redirecting to safer method"
+        )
+        return self._write_multidim_safe(dask_array, output_path, use_bigtiff)
 
     def _save_numpy_tif_memmap(
         self, numpy_array, output_path: str, metadata: dict, use_bigtiff: bool
@@ -1599,7 +1632,7 @@ class MicroscopyImageConverterWidget(QWidget):
         # Output format selection
         format_layout = QHBoxLayout()
         format_label = QLabel("Output Format:")
-        self.tif_radio = QCheckBox("TIF (Memory-efficient for large files)")
+        self.tif_radio = QCheckBox("TIF")
         self.tif_radio.setChecked(True)
         self.zarr_radio = QCheckBox("ZARR (Recommended for >4GB)")
 
