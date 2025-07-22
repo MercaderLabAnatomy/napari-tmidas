@@ -1,23 +1,21 @@
 """
-Batch Microscopy Image File Conversion
-=======================================
-This module provides a GUI for batch conversion of microscopy image files to a common format.
-The user can select a folder containing microscopy image files, preview the images, and convert them to an open format for image processing.
-The supported input formats include Leica LIF, Nikon ND2, Zeiss CZI, and TIFF-based whole slide images (NDPI, etc.).
+Enhanced Batch Microscopy Image File Conversion
+===============================================
+This module provides batch conversion of microscopy image files to a common format.
 
+Supported formats: Leica LIF, Nikon ND2, Zeiss CZI, TIFF-based whole slide images (NDPI), Acquifer datasets
 """
 
 import concurrent.futures
 import os
 import re
 import shutil
-import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import dask.array as da
 import napari
-import nd2  # https://github.com/tlambert03/nd2
+import nd2
 import numpy as np
 import tifffile
 import zarr
@@ -25,7 +23,7 @@ from dask.diagnostics import ProgressBar
 from magicgui import magicgui
 from ome_zarr.io import parse_url
 from ome_zarr.writer import write_image
-from pylibCZIrw import czi  # https://github.com/ZEISS/pylibczirw
+from pylibCZIrw import czi
 from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
     QApplication,
@@ -44,38 +42,37 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from readlif.reader import LifFile
+from tiffslide import TiffSlide
 
-# Format-specific readers
-from readlif.reader import (
-    LifFile,  # https://github.com/Arcadia-Science/readlif
-)
-from tiffslide import TiffSlide  # https://github.com/Bayer-Group/tiffslide
+
+# Custom exceptions for better error handling
+class FileFormatError(Exception):
+    """Raised when file format is not supported or corrupted"""
+
+
+class SeriesIndexError(Exception):
+    """Raised when series index is out of range"""
+
+
+class ConversionError(Exception):
+    """Raised when file conversion fails"""
 
 
 class SeriesTableWidget(QTableWidget):
-    """
-    Custom table widget to display original files and their series
-    """
+    """Custom table widget to display original files and their series"""
 
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
         self.viewer = viewer
-
-        # Configure table
         self.setColumnCount(2)
         self.setHorizontalHeaderLabels(["Original Files", "Series"])
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        # Track file mappings
-        self.file_data = (
-            {}
-        )  # {filepath: {type: file_type, series: [list_of_series]}}
-
-        # Currently loaded images
+        self.file_data = {}  # {filepath: {type, series_count, row}}
         self.current_file = None
         self.current_series = None
 
-        # Connect selection signals
         self.cellClicked.connect(self.handle_cell_click)
 
     def add_file(self, filepath: str, file_type: str, series_count: int):
@@ -90,9 +87,7 @@ class SeriesTableWidget(QTableWidget):
 
         # Series info
         series_info = (
-            f"{series_count} series"
-            if series_count >= 0
-            else "Not a series file"
+            f"{series_count} series" if series_count > 0 else "Single image"
         )
         series_item = QTableWidgetItem(series_info)
         self.setItem(row, 1, series_item)
@@ -107,23 +102,16 @@ class SeriesTableWidget(QTableWidget):
     def handle_cell_click(self, row: int, column: int):
         """Handle cell click to show series details or load image"""
         if column == 0:
-            # Get filepath from the clicked cell
             item = self.item(row, 0)
             if item:
                 filepath = item.data(Qt.UserRole)
                 file_info = self.file_data.get(filepath)
 
                 if file_info and file_info["series_count"] > 0:
-                    # Update the current file
                     self.current_file = filepath
-
-                    # IMPORTANT: Set default selection for this file
                     self.parent().set_selected_series(filepath, 0)
-
-                    # Signal to show series details
                     self.parent().show_series_details(filepath)
                 else:
-                    # Not a series file, just load the image and set selection
                     self.parent().set_selected_series(filepath, 0)
                     self.parent().load_image(filepath)
 
@@ -138,237 +126,180 @@ class SeriesDetailWidget(QWidget):
         self.current_file = None
         self.max_series = 0
 
-        # Create layout
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        # Series selection widgets
+        # Series selection
         self.series_label = QLabel("Select Series:")
         layout.addWidget(self.series_label)
 
         self.series_selector = QComboBox()
         layout.addWidget(self.series_selector)
 
-        # Add "Export All Series" checkbox
+        # Export all series option
         self.export_all_checkbox = QCheckBox("Export All Series")
         self.export_all_checkbox.toggled.connect(self.toggle_export_all)
         layout.addWidget(self.export_all_checkbox)
 
-        # Connect series selector
         self.series_selector.currentIndexChanged.connect(self.series_selected)
 
-        # Add preview button
+        # Preview button
         preview_button = QPushButton("Preview Selected Series")
         preview_button.clicked.connect(self.preview_series)
         layout.addWidget(preview_button)
 
-        # Add info label
+        # Info label
         self.info_label = QLabel("")
         layout.addWidget(self.info_label)
 
     def toggle_export_all(self, checked):
         """Handle toggle of export all checkbox"""
-        if self.current_file and checked:
-            # Disable series selector when exporting all
+        if self.current_file:
             self.series_selector.setEnabled(not checked)
-            # Update parent with export all setting
             self.parent.set_export_all_series(self.current_file, checked)
-        elif self.current_file:
-            # Re-enable series selector
-            self.series_selector.setEnabled(True)
-            # Update parent with currently selected series only
-            self.series_selected(self.series_selector.currentIndex())
-            # Update parent to not export all
-            self.parent.set_export_all_series(self.current_file, False)
+            if not checked:
+                self.series_selected(self.series_selector.currentIndex())
 
     def set_file(self, filepath: str):
         """Set the current file and update series list"""
         self.current_file = filepath
         self.series_selector.clear()
-
-        # Reset export all checkbox
         self.export_all_checkbox.setChecked(False)
         self.series_selector.setEnabled(True)
 
-        # Try to get series information
-        file_loader = self.parent.get_file_loader(filepath)
-        if file_loader:
+        try:
+            file_loader = self.parent.get_file_loader(filepath)
+            if not file_loader:
+                raise FileFormatError(f"No loader available for {filepath}")
+
+            series_count = file_loader.get_series_count(filepath)
+            self.max_series = series_count
+
+            for i in range(series_count):
+                self.series_selector.addItem(f"Series {i}", i)
+
+            # Estimate file size for format recommendation
+            if series_count > 0:
+                try:
+                    size_gb = self._estimate_file_size(filepath, file_loader)
+                    self.info_label.setText(
+                        f"File contains {series_count} series (estimated size: {size_gb:.2f}GB)"
+                    )
+                    self.parent.update_format_buttons(size_gb > 4)
+                except (MemoryError, OverflowError, OSError) as e:
+                    self.info_label.setText(
+                        f"File contains {series_count} series"
+                    )
+                    print(f"Size estimation failed: {e}")
+
+        except (FileNotFoundError, PermissionError, FileFormatError) as e:
+            self.info_label.setText(f"Error: {str(e)}")
+
+    def _estimate_file_size(self, filepath: str, file_loader) -> float:
+        """Estimate file size in GB"""
+        file_type = self.parent.get_file_type(filepath)
+
+        if file_type == "ND2":
             try:
-                series_count = file_loader.get_series_count(filepath)
-                self.max_series = series_count
-                for i in range(series_count):
-                    self.series_selector.addItem(f"Series {i}", i)
+                with nd2.ND2File(filepath) as nd2_file:
+                    dims = dict(nd2_file.sizes)
+                    pixel_size = nd2_file.dtype.itemsize
+                    total_elements = np.prod([dims[dim] for dim in dims])
+                    return (total_elements * pixel_size) / (1024**3)
+            except (OSError, AttributeError, ValueError):
+                pass
 
-                # Set info text
-                if series_count > 0:
-                    # Estimate file size and set appropriate format radio button
-                    file_type = self.parent.get_file_type(filepath)
-                    if file_type == "ND2":
-                        try:
-                            with nd2.ND2File(filepath) as nd2_file:
-                                dims = dict(nd2_file.sizes)
-                                pixel_size = nd2_file.dtype.itemsize
-                                total_elements = np.prod(
-                                    [dims[dim] for dim in dims]
-                                )
-                                size_GB = (total_elements * pixel_size) / (
-                                    1024**3
-                                )
-
-                                self.info_label.setText(
-                                    f"File contains {series_count} series (size: {size_GB:.2f}GB)"
-                                )
-
-                                # Update format buttons
-                                self.parent.update_format_buttons(size_GB > 4)
-                        except (ValueError, FileNotFoundError) as e:
-                            print(f"Error estimating file size: {e}")
-            except FileNotFoundError:
-                self.info_label.setText("File not found.")
-            except PermissionError:
-                self.info_label.setText(
-                    "Permission denied when accessing the file."
-                )
-            except ValueError as e:
-                self.info_label.setText(f"Invalid data in file: {str(e)}")
-            except OSError as e:
-                self.info_label.setText(f"I/O error occurred: {str(e)}")
+        # Fallback estimation based on file size
+        try:
+            file_size = os.path.getsize(filepath)
+            return file_size / (1024**3)
+        except OSError:
+            return 0.0
 
     def series_selected(self, index: int):
         """Handle series selection"""
         if index >= 0 and self.current_file:
             series_index = self.series_selector.itemData(index)
 
-            # Validate series index
             if series_index >= self.max_series:
-                self.info_label.setText(
-                    f"Error: Series index {series_index} out of range (max: {self.max_series-1})"
+                raise SeriesIndexError(
+                    f"Series index {series_index} out of range (max: {self.max_series-1})"
                 )
-                return
 
-            # Update parent with selected series
             self.parent.set_selected_series(self.current_file, series_index)
-
-            # Automatically set the appropriate format radio button based on file size
-            file_loader = self.parent.get_file_loader(self.current_file)
-            if file_loader:
-                try:
-                    # For ND2 files, we can directly check the size
-                    if self.parent.get_file_type(self.current_file) == "ND2":
-                        with nd2.ND2File(self.current_file) as nd2_file:
-                            dims = dict(nd2_file.sizes)
-                            pixel_size = nd2_file.dtype.itemsize
-                            total_elements = np.prod(
-                                [dims[dim] for dim in dims]
-                            )
-                            size_GB = (total_elements * pixel_size) / (1024**3)
-
-                            # Automatically set the appropriate radio button based on size
-                            self.parent.update_format_buttons(size_GB > 4)
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Error estimating file size: {e}")
 
     def preview_series(self):
         """Preview the selected series in Napari"""
-        if self.current_file and self.series_selector.currentIndex() >= 0:
-            series_index = self.series_selector.itemData(
-                self.series_selector.currentIndex()
+        if not self.current_file or self.series_selector.currentIndex() < 0:
+            return
+
+        series_index = self.series_selector.itemData(
+            self.series_selector.currentIndex()
+        )
+
+        if series_index >= self.max_series:
+            self.info_label.setText("Error: Series index out of range")
+            return
+
+        try:
+            file_loader = self.parent.get_file_loader(self.current_file)
+            metadata = file_loader.get_metadata(
+                self.current_file, series_index
+            )
+            image_data = file_loader.load_series(
+                self.current_file, series_index
             )
 
-            # Validate series index
-            if series_index >= self.max_series:
-                self.info_label.setText(
-                    f"Error: Series index {series_index} out of range (max: {self.max_series-1})"
-                )
-                return
-
-            file_loader = self.parent.get_file_loader(self.current_file)
-
-            try:
-                # First get metadata to understand dimensions
-                metadata = file_loader.get_metadata(
-                    self.current_file, series_index
+            # Reorder dimensions for Napari if needed
+            if metadata and "axes" in metadata:
+                napari_order = "CTZYX"[: len(image_data.shape)]
+                image_data = self._reorder_dimensions(
+                    image_data, metadata, napari_order
                 )
 
-                # Load the series
-                image_data = file_loader.load_series(
-                    self.current_file, series_index
-                )
+            self.viewer.layers.clear()
+            layer_name = (
+                f"{Path(self.current_file).stem}_series_{series_index}"
+            )
+            self.viewer.add_image(image_data, name=layer_name)
+            self.viewer.status = f"Previewing {layer_name}"
 
-                # Reorder dimensions for Napari based on metadata
-                if metadata and "axes" in metadata:
-                    print(f"File has dimension order: {metadata['axes']}")
-                    # Target dimension order for Napari
-                    napari_order = "CTZYX"[: len(image_data.shape)]
-                    image_data = self._reorder_dimensions(
-                        image_data, metadata, napari_order
-                    )
-
-                # Clear existing layers and display the image
-                self.viewer.layers.clear()
-                self.viewer.add_image(
-                    image_data,
-                    name=f"{Path(self.current_file).stem} - Series {series_index}",
-                )
-
-                # Update status
-                self.viewer.status = f"Previewing {Path(self.current_file).name} - Series {series_index}"
-            except (ValueError, FileNotFoundError) as e:
-                self.viewer.status = f"Error loading series: {str(e)}"
-                QMessageBox.warning(
-                    self, "Error", f"Could not load series: {str(e)}"
-                )
+        except (
+            FileNotFoundError,
+            SeriesIndexError,
+            MemoryError,
+            FileFormatError,
+        ) as e:
+            error_msg = f"Error loading series: {str(e)}"
+            self.viewer.status = error_msg
+            QMessageBox.warning(self, "Preview Error", error_msg)
 
     def _reorder_dimensions(self, image_data, metadata, target_order="YXZTC"):
         """Reorder dimensions based on metadata axes information"""
-        # Early exit if no metadata or no axes information
         if not metadata or "axes" not in metadata:
-            print("No axes information in metadata - returning original")
             return image_data
 
-        # Get source order from metadata
         source_order = metadata["axes"]
-
-        # Ensure dimensions match
         ndim = len(image_data.shape)
-        if len(source_order) != ndim:
-            print(
-                f"Dimension mismatch - array has {ndim} dims but axes metadata indicates {len(source_order)}"
-            )
+
+        if len(source_order) != ndim or len(target_order) != ndim:
             return image_data
 
-        # Ensure target order has the same number of dimensions
-        if len(target_order) != ndim:
-            print(
-                f"Target order {target_order} doesn't match array dimensions {ndim}"
-            )
-            return image_data
-
-        # Create reordering index list
-        reorder_indices = []
-        for axis in target_order:
-            if axis in source_order:
-                reorder_indices.append(source_order.index(axis))
-            else:
-                print(f"Axis {axis} not found in source order {source_order}")
-                return image_data
-
-        # Reorder the array using appropriate method
         try:
-            print(f"Reordering from {source_order} to {target_order}")
+            reorder_indices = []
+            for axis in target_order:
+                if axis in source_order:
+                    reorder_indices.append(source_order.index(axis))
+                else:
+                    return image_data
 
-            # Check if using Dask array
             if hasattr(image_data, "dask"):
-                # Use Dask's transpose to preserve lazy computation
-                reordered = image_data.transpose(reorder_indices)
+                return image_data.transpose(reorder_indices)
             else:
-                # Use numpy transpose
-                reordered = np.transpose(image_data, reorder_indices)
+                return np.transpose(image_data, reorder_indices)
 
-            print(f"Reordered shape: {reordered.shape}")
-            return reordered
         except (ValueError, IndexError) as e:
-            print(f"Error reordering dimensions: {e}")
+            print(f"Dimension reordering failed: {e}")
             return image_data
 
 
@@ -384,7 +315,9 @@ class FormatLoader:
         raise NotImplementedError()
 
     @staticmethod
-    def load_series(filepath: str, series_index: int) -> np.ndarray:
+    def load_series(
+        filepath: str, series_index: int
+    ) -> Union[np.ndarray, da.Array]:
         raise NotImplementedError()
 
     @staticmethod
@@ -403,64 +336,53 @@ class LIFLoader(FormatLoader):
     def get_series_count(filepath: str) -> int:
         try:
             lif_file = LifFile(filepath)
-            # Directly use the iterator, no need to load all images into a list
             return sum(1 for _ in lif_file.get_iter_image())
-        except (ValueError, FileNotFoundError):
+        except (OSError, ValueError, ImportError):
             return 0
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
-        lif_file = LifFile(filepath)
-        image = lif_file.get_image(series_index)
+        try:
+            lif_file = LifFile(filepath)
+            image = lif_file.get_image(series_index)
 
-        # Extract dimensions
-        channels = image.channels
-        z_stacks = image.nz
-        timepoints = image.nt
-        x_dim, y_dim = image.dims[0], image.dims[1]
+            # Extract dimensions
+            channels = image.channels
+            z_stacks = image.nz
+            timepoints = image.nt
+            x_dim, y_dim = image.dims[0], image.dims[1]
 
-        # Create an array to hold the entire series
-        series_shape = (
-            timepoints,
-            z_stacks,
-            channels,
-            y_dim,
-            x_dim,
-        )  # Corrected shape
-        series_data = np.zeros(series_shape, dtype=np.uint16)
+            series_shape = (timepoints, z_stacks, channels, y_dim, x_dim)
+            series_data = np.zeros(series_shape, dtype=np.uint16)
 
-        # Populate the array
-        missing_frames = 0
-        for t in range(timepoints):
-            for z in range(z_stacks):
-                for c in range(channels):
-                    # Get the frame and convert to numpy array
-                    frame = image.get_frame(z=z, t=t, c=c)
-                    if frame:
-                        series_data[t, z, c, :, :] = np.array(frame)
-                    else:
-                        missing_frames += 1
-                        series_data[t, z, c, :, :] = np.zeros(
-                            (y_dim, x_dim), dtype=np.uint16
-                        )
+            # Populate the array
+            missing_frames = 0
+            for t in range(timepoints):
+                for z in range(z_stacks):
+                    for c in range(channels):
+                        frame = image.get_frame(z=z, t=t, c=c)
+                        if frame:
+                            series_data[t, z, c, :, :] = np.array(frame)
+                        else:
+                            missing_frames += 1
 
-        if missing_frames > 0:
-            print(
-                f"Warning: {missing_frames} frames were missing and filled with zeros."
-            )
+            if missing_frames > 0:
+                print(
+                    f"Warning: {missing_frames} frames were missing and filled with zeros."
+                )
 
-        return series_data
+            return series_data
+
+        except (OSError, IndexError, ValueError, AttributeError) as e:
+            raise FileFormatError(
+                f"Failed to load LIF series {series_index}: {str(e)}"
+            ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         try:
             lif_file = LifFile(filepath)
             image = lif_file.get_image(series_index)
-            axes = "".join(image.dims._fields).upper()
-            channels = image.channels
-            if channels > 1:
-                # add C to end of string
-                axes += "C"
 
             metadata = {
                 "axes": "TZCYX",
@@ -470,12 +392,12 @@ class LIFLoader(FormatLoader):
             if image.scale[2] is not None:
                 metadata["spacing"] = image.scale[2]
             return metadata
-        except (ValueError, FileNotFoundError):
+        except (OSError, IndexError, AttributeError):
             return {}
 
 
 class ND2Loader(FormatLoader):
-    """Loader for Nikon ND2 files"""
+    """Loader for Nikon ND2 files with improved Dask handling"""
 
     @staticmethod
     def can_load(filepath: str) -> bool:
@@ -485,133 +407,102 @@ class ND2Loader(FormatLoader):
     def get_series_count(filepath: str) -> int:
         try:
             with nd2.ND2File(filepath) as nd2_file:
-                # Check if file has P (Position) dimension which represents series
-                if "P" in nd2_file.sizes:
-                    return nd2_file.sizes["P"]
-                else:
-                    # Single series file
-                    return 1
-        except (ValueError, FileNotFoundError):
+                return nd2_file.sizes.get("P", 1)
+        except (OSError, ValueError, ImportError):
             return 0
 
     @staticmethod
-    def load_series(filepath: str, series_index: int) -> np.ndarray:
-        with nd2.ND2File(filepath) as nd2_file:
-            # Check if file has P dimension
-            if "P" in nd2_file.sizes:
-                max_series = nd2_file.sizes["P"]
-                if series_index < 0 or series_index >= max_series:
-                    raise ValueError(
+    def load_series(
+        filepath: str, series_index: int
+    ) -> Union[np.ndarray, da.Array]:
+        try:
+            with nd2.ND2File(filepath) as nd2_file:
+                # Validate series index
+                max_series = nd2_file.sizes.get("P", 1)
+                if series_index >= max_series:
+                    raise SeriesIndexError(
                         f"Series index {series_index} out of range (0-{max_series-1})"
                     )
-            elif series_index != 0:
-                raise ValueError(
-                    "ND2 files without P dimension only support series index 0"
+
+                # Calculate file size
+                dims_without_p = {
+                    k: v for k, v in nd2_file.sizes.items() if k != "P"
+                }
+                single_series_size = np.prod(
+                    [dims_without_p[dim] for dim in dims_without_p]
                 )
+                pixel_size = nd2_file.dtype.itemsize
+                size_gb = (single_series_size * pixel_size) / (1024**3)
 
-            # Calculate single series size (without P dimension)
-            dims_without_p = {
-                k: v for k, v in nd2_file.sizes.items() if k != "P"
-            }
-            single_series_size = np.prod(
-                [dims_without_p[dim] for dim in dims_without_p]
-            )
-            pixel_size = nd2_file.dtype.itemsize
-            size_GB = (single_series_size * pixel_size) / (1024**3)
+                print(f"ND2 file dimensions: {nd2_file.sizes}")
+                print(f"Single series size: {size_gb:.2f} GB")
 
-            print(f"ND2 file dimensions: {nd2_file.sizes}")
-            print(f"Single series size: {size_GB:.2f} GB")
+                # Use Dask for files > 2GB to avoid memory issues
+                use_dask = size_gb > 2.0
 
-            # Load specific series/position
-            if "P" in nd2_file.sizes:
-                # Find P dimension index in the axes order
-                axes_order = "".join(nd2_file.sizes.keys())
-                p_index = axes_order.index("P")
+                if "P" in nd2_file.sizes:
+                    axes_order = "".join(nd2_file.sizes.keys())
+                    p_index = axes_order.index("P")
+
+                    data = nd2.imread(filepath, dask=use_dask)
+
+                    # Extract the specific series using advanced indexing
+                    slices = [slice(None)] * len(data.shape)
+                    slices[p_index] = series_index
+                    data = data[tuple(slices)]
+                else:
+                    if series_index != 0:
+                        raise SeriesIndexError(
+                            "ND2 files without P dimension only support series index 0"
+                        )
+                    data = nd2.imread(filepath, dask=use_dask)
+
                 print(
-                    f"P dimension is at index {p_index} in axes order {axes_order}"
+                    f"Loaded series shape: {data.shape}, using Dask: {use_dask}"
                 )
+                return data
 
-                if size_GB > 4:
-                    print(f"Using Dask for large series {series_index}")
-                    data = nd2.imread(filepath, dask=True)
-                    # Use slice indexing to select P dimension
-                    if p_index == 0:
-                        data = data[series_index]
-                    elif p_index == 1:
-                        data = data[:, series_index]
-                    elif p_index == 2:
-                        data = data[:, :, series_index]
-                    elif p_index == 3:
-                        data = data[:, :, :, series_index]
-                    elif p_index == 4:
-                        data = data[:, :, :, :, series_index]
-                    else:
-                        data = data[:, :, :, :, :, series_index]
-                else:
-                    print(f"Direct loading series {series_index}")
-                    data = nd2.imread(filepath)
-                    # Same indexing for numpy arrays
-                    if p_index == 0:
-                        data = data[series_index]
-                    elif p_index == 1:
-                        data = data[:, series_index]
-                    elif p_index == 2:
-                        data = data[:, :, series_index]
-                    elif p_index == 3:
-                        data = data[:, :, :, series_index]
-                    elif p_index == 4:
-                        data = data[:, :, :, :, series_index]
-                    else:
-                        data = data[:, :, :, :, :, series_index]
-            else:
-                # No P dimension, load entire file
-                if size_GB > 4:
-                    data = nd2.imread(filepath, dask=True)
-                else:
-                    data = nd2.imread(filepath)
-
-            print(f"Loaded series shape: {data.shape}")
-            return data
+        except (FileNotFoundError, PermissionError) as e:
+            raise FileFormatError(
+                f"Cannot access ND2 file {filepath}: {str(e)}"
+            ) from e
+        except (OSError, ValueError, AttributeError, ImportError) as e:
+            raise FileFormatError(
+                f"Failed to load ND2 series {series_index}: {str(e)}"
+            ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
-        with nd2.ND2File(filepath) as nd2_file:
-            dims = dict(nd2_file.sizes)
+        try:
+            with nd2.ND2File(filepath) as nd2_file:
+                dims = dict(nd2_file.sizes)
 
-            # If file has P dimension, exclude it from metadata since we're loading single series
-            if "P" in dims:
-                dims_single_series = {
-                    k: v for k, v in dims.items() if k != "P"
+                if "P" in dims:
+                    dims_single_series = {
+                        k: v for k, v in dims.items() if k != "P"
+                    }
+                    axes = "".join(dims_single_series.keys())
+                else:
+                    if series_index != 0:
+                        return {}
+                    axes = "".join(dims.keys())
+
+                try:
+                    voxel = nd2_file.voxel_size()
+                    x_res = 1 / voxel.x if voxel.x > 0 else 1.0
+                    y_res = 1 / voxel.y if voxel.y > 0 else 1.0
+                    z_spacing = 1 / voxel.z if voxel.z > 0 else 1.0
+                except (AttributeError, ZeroDivisionError, ValueError):
+                    x_res, y_res, z_spacing = 1.0, 1.0, 1.0
+
+                return {
+                    "axes": axes,
+                    "resolution": (x_res, y_res),
+                    "unit": "um",
+                    "spacing": z_spacing,
                 }
-                axes = "".join(dims_single_series.keys())
-            else:
-                # Single series file
-                if series_index != 0:
-                    return {}
-                axes = "".join(dims.keys())
-
-            print(f"ND2 metadata for series {series_index} - dims: {dims}")
-            print(f"Single series axes: {axes}")
-
-            # Get spatial resolution
-            try:
-                voxel = nd2_file.voxel_size()
-                x_res = 1 / voxel.x if voxel.x > 0 else 1.0
-                y_res = 1 / voxel.y if voxel.y > 0 else 1.0
-                z_spacing = 1 / voxel.z if voxel.z > 0 else 1.0
-            except (ValueError, AttributeError) as e:
-                print(f"Error getting voxel size: {e}")
-                x_res, y_res, z_spacing = 1.0, 1.0, 1.0
-
-            # Build metadata for single series
-            metadata = {
-                "axes": axes,
-                "resolution": (x_res, y_res),
-                "unit": "um",
-                "spacing": z_spacing,
-            }
-
-            return metadata
+        except (OSError, AttributeError, ImportError):
+            return {}
 
 
 class TIFFSlideLoader(FormatLoader):
@@ -619,80 +510,65 @@ class TIFFSlideLoader(FormatLoader):
 
     @staticmethod
     def can_load(filepath: str) -> bool:
-        ext = filepath.lower()
-        return ext.endswith(".ndpi")
+        return filepath.lower().endswith((".ndpi", ".svs"))
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
         try:
             with TiffSlide(filepath) as slide:
-                # NDPI typically has a main image and several levels (pyramid)
                 return len(slide.level_dimensions)
-        except (ValueError, FileNotFoundError):
-            # Try standard tifffile if TiffSlide fails
+        except (OSError, ImportError, ValueError):
             try:
                 with tifffile.TiffFile(filepath) as tif:
                     return len(tif.series)
-            except (ValueError, FileNotFoundError):
+            except (OSError, ValueError, ImportError):
                 return 0
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
         try:
-            # First try TiffSlide for whole slide images
             with TiffSlide(filepath) as slide:
-                if series_index < 0 or series_index >= len(
-                    slide.level_dimensions
-                ):
-                    raise ValueError(
+                if series_index >= len(slide.level_dimensions):
+                    raise SeriesIndexError(
                         f"Series index {series_index} out of range"
                     )
 
-                # Get dimensions for the level
                 width, height = slide.level_dimensions[series_index]
-                # Read the entire level
                 return np.array(
                     slide.read_region((0, 0), series_index, (width, height))
                 )
-        except (ValueError, FileNotFoundError):
-            # Fall back to tifffile
-            with tifffile.TiffFile(filepath) as tif:
-                if series_index < 0 or series_index >= len(tif.series):
-                    raise ValueError(
-                        f"Series index {series_index} out of range"
-                    ) from None
-
-                return tif.series[series_index].asarray()
+        except (OSError, ImportError, AttributeError):
+            try:
+                with tifffile.TiffFile(filepath) as tif:
+                    if series_index >= len(tif.series):
+                        raise SeriesIndexError(
+                            f"Series index {series_index} out of range"
+                        )
+                    return tif.series[series_index].asarray()
+            except (OSError, IndexError, ValueError, ImportError) as e:
+                raise FileFormatError(
+                    f"Failed to load TIFF slide series {series_index}: {str(e)}"
+                ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         try:
             with TiffSlide(filepath) as slide:
-                if series_index < 0 or series_index >= len(
-                    slide.level_dimensions
-                ):
+                if series_index >= len(slide.level_dimensions):
                     return {}
 
                 return {
-                    "axes": slide.properties["tiffslide.series-axes"],
+                    "axes": slide.properties.get(
+                        "tiffslide.series-axes", "YX"
+                    ),
                     "resolution": (
-                        slide.properties["tiffslide.mpp-x"],
-                        slide.properties["tiffslide.mpp-y"],
+                        float(slide.properties.get("tiffslide.mpp-x", 1.0)),
+                        float(slide.properties.get("tiffslide.mpp-y", 1.0)),
                     ),
                     "unit": "um",
                 }
-        except (ValueError, FileNotFoundError):
-            # Fall back to tifffile
-            with tifffile.TiffFile(filepath) as tif:
-                if series_index < 0 or series_index >= len(tif.series):
-                    return {}
-
-                series = tif.series[series_index]
-                return {
-                    "shape": series.shape,
-                    "dtype": str(series.dtype),
-                    "axes": series.axes,
-                }
+        except (OSError, ImportError, ValueError, KeyError):
+            return {}
 
 
 class CZILoader(FormatLoader):
@@ -706,9 +582,8 @@ class CZILoader(FormatLoader):
     def get_series_count(filepath: str) -> int:
         try:
             with czi.open_czi(filepath) as czi_file:
-                scenes = czi_file.scenes_bounding_rectangle
-                return len(scenes)
-        except (ValueError, FileNotFoundError):
+                return len(czi_file.scenes_bounding_rectangle)
+        except (OSError, ImportError, ValueError, AttributeError):
             return 0
 
     @staticmethod
@@ -717,118 +592,126 @@ class CZILoader(FormatLoader):
             with czi.open_czi(filepath) as czi_file:
                 scenes = czi_file.scenes_bounding_rectangle
 
-                if series_index < 0 or series_index >= len(scenes):
-                    raise ValueError(
+                if series_index >= len(scenes):
+                    raise SeriesIndexError(
                         f"Scene index {series_index} out of range"
                     )
 
                 scene_keys = list(scenes.keys())
                 scene_index = scene_keys[series_index]
+                return czi_file.read(scene=scene_index)
 
-                image = czi_file.read(scene=scene_index)
-                return image
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error loading series: {e}")
-            raise
-
-    @staticmethod
-    def get_scales(metadata_xml, dim):
-        pattern = re.compile(
-            r'<Distance[^>]*Id="'
-            + re.escape(dim)
-            + r'"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
-            re.DOTALL,
-        )
-        match = pattern.search(metadata_xml)
-
-        if match:
-            scale = float(match.group(1))
-            # convert to microns
-            scale = scale * 1e6
-            return scale
-        else:
-            return None
+        except (OSError, ImportError, AttributeError, ValueError) as e:
+            raise FileFormatError(
+                f"Failed to load CZI series {series_index}: {str(e)}"
+            ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         try:
             with czi.open_czi(filepath) as czi_file:
                 scenes = czi_file.scenes_bounding_rectangle
-
-                if series_index < 0 or series_index >= len(scenes):
+                if series_index >= len(scenes):
                     return {}
 
                 dims = czi_file.total_bounding_box
-
-                # Extract the raw metadata as an XML string
                 metadata_xml = czi_file.raw_metadata
 
-                # Initialize metadata with default values
+                # Extract scales
                 try:
-                    # scales are in meters, convert to microns
-                    scale_x = CZILoader.get_scales(metadata_xml, "X") * 1e6
-                    scale_y = CZILoader.get_scales(metadata_xml, "Y") * 1e6
+                    scale_x = CZILoader._get_scales(metadata_xml, "X")
+                    scale_y = CZILoader._get_scales(metadata_xml, "Y")
 
                     filtered_dims = {
                         k: v for k, v in dims.items() if v != (0, 1)
                     }
                     axes = "".join(filtered_dims.keys())
+
                     metadata = {
                         "axes": axes,
                         "resolution": (scale_x, scale_y),
                         "unit": "um",
                     }
 
-                    if dims["Z"] != (0, 1):
-                        scale_z = CZILoader.get_scales(metadata_xml, "Z")
-                        metadata["spacing"] = scale_z
-                except ValueError as e:
-                    print(f"Error getting scale metadata: {e}")
+                    if dims.get("Z") != (0, 1):
+                        scale_z = CZILoader._get_scales(metadata_xml, "Z")
+                        if scale_z:
+                            metadata["spacing"] = scale_z
 
-                return metadata
-
-        except (ValueError, FileNotFoundError, RuntimeError) as e:
-            print(f"Error getting metadata: {e}")
+                    return metadata
+                except (ValueError, TypeError, AttributeError):
+                    return {"axes": "YX"}
+        except (OSError, ImportError, AttributeError):
             return {}
+
+    @staticmethod
+    def _get_scales(metadata_xml, dim):
+        """Extract scale information from CZI metadata"""
+        try:
+            pattern = re.compile(
+                r'<Distance[^>]*Id="'
+                + re.escape(dim)
+                + r'"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
+                re.DOTALL,
+            )
+            match = pattern.search(metadata_xml)
+            if match:
+                return float(match.group(1)) * 1e6  # Convert to microns
+            return 1.0
+        except (ValueError, TypeError, AttributeError):
+            return 1.0
 
 
 class AcquiferLoader(FormatLoader):
-    """Loader for Acquifer datasets using the acquifer_napari_plugin utility"""
+    """Enhanced loader for Acquifer datasets with better detection"""
 
-    # Cache for loaded datasets to avoid reloading the same directory multiple times
-    _dataset_cache = {}  # {directory_path: xarray_dataset}
+    _dataset_cache = {}
 
     @staticmethod
     def can_load(filepath: str) -> bool:
-        """Check if this is a directory that can be loaded as an Acquifer dataset"""
+        """Check if directory contains Acquifer-specific patterns"""
         if not os.path.isdir(filepath):
             return False
 
         try:
-            # Check if directory contains files
+            dir_contents = os.listdir(filepath)
+
+            # Check for Acquifer-specific indicators
+            acquifer_indicators = [
+                "PlateLayout" in dir_contents,
+                any(f.startswith("Image") for f in dir_contents),
+                any("--PX" in f for f in dir_contents),
+                any(f.endswith("_metadata.txt") for f in dir_contents),
+                "Well" in str(dir_contents).upper(),
+            ]
+
+            if not any(acquifer_indicators):
+                return False
+
+            # Verify it contains image files
             image_files = []
-            for root, _, files in os.walk(filepath):
+            for _root, _, files in os.walk(filepath):
                 for file in files:
                     if file.lower().endswith(
                         (".tif", ".tiff", ".png", ".jpg", ".jpeg")
                     ):
-                        image_files.append(os.path.join(root, file))
+                        image_files.append(file)
 
-            return bool(image_files)
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error checking Acquifer dataset: {e}")
+            return len(image_files) > 0
+
+        except (OSError, PermissionError):
             return False
 
     @staticmethod
     def _load_dataset(directory):
-        """Load the dataset using array_from_directory and cache it"""
+        """Load and cache Acquifer dataset"""
         if directory in AcquiferLoader._dataset_cache:
             return AcquiferLoader._dataset_cache[directory]
 
         try:
             from acquifer_napari_plugin.utils import array_from_directory
 
-            # Check if directory contains files before trying to load
+            # Verify image files exist
             image_files = []
             for root, _, files in os.walk(directory):
                 for file in files:
@@ -838,139 +721,108 @@ class AcquiferLoader(FormatLoader):
                         image_files.append(os.path.join(root, file))
 
             if not image_files:
-                raise ValueError(
-                    f"No image files found in directory: {directory}"
+                raise FileFormatError(
+                    f"No image files found in Acquifer directory: {directory}"
                 )
 
             dataset = array_from_directory(directory)
             AcquiferLoader._dataset_cache[directory] = dataset
             return dataset
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error loading Acquifer dataset: {e}")
-            raise ValueError(f"Failed to load Acquifer dataset: {e}") from e
+
+        except ImportError as e:
+            raise FileFormatError(
+                f"Acquifer plugin not available: {str(e)}"
+            ) from e
+        except (OSError, ValueError, AttributeError) as e:
+            raise FileFormatError(
+                f"Failed to load Acquifer dataset: {str(e)}"
+            ) from e
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
-        """Return the number of wells as series count"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
-
-            # Check for Well dimension
-            if "Well" in dataset.dims:
-                return len(dataset.coords["Well"])
-            else:
-                # Single series for the whole dataset
-                return 1
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error getting series count: {e}")
+            return len(dataset.coords.get("Well", [1]))
+        except (FileFormatError, AttributeError, KeyError):
             return 0
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
-        """Load a specific well as a series"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
-            # If the dataset has a Well dimension, select the specific well
             if "Well" in dataset.dims:
-                if series_index < 0 or series_index >= len(
-                    dataset.coords["Well"]
-                ):
-                    raise ValueError(
+                if series_index >= len(dataset.coords["Well"]):
+                    raise SeriesIndexError(
                         f"Series index {series_index} out of range"
                     )
 
-                # Get the well value at this index
                 well_value = dataset.coords["Well"].values[series_index]
-
-                # Select the data for this well
-                well_data = dataset.sel(Well=well_value)
-                # squeeze out singleton dimensions
-                well_data = well_data.squeeze()
-                # Convert to numpy array and return
+                well_data = dataset.sel(Well=well_value).squeeze()
                 return well_data.values
             else:
-                # No Well dimension, return the entire dataset
+                if series_index != 0:
+                    raise SeriesIndexError(
+                        "Single well dataset only supports series index 0"
+                    )
                 return dataset.values
 
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error loading series: {e}")
-            import traceback
-
-            traceback.print_exc()
-            raise ValueError(f"Failed to load series: {e}") from e
+        except (AttributeError, KeyError, IndexError) as e:
+            raise FileFormatError(
+                f"Failed to load Acquifer series {series_index}: {str(e)}"
+            ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
-        """Extract metadata for a specific well"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
-            # Initialize with default values
-            axes = ""
-            resolution = (1.0, 1.0)  # Default resolution
-
             if "Well" in dataset.dims:
                 well_value = dataset.coords["Well"].values[series_index]
-                well_data = dataset.sel(Well=well_value)
-                well_data = well_data.squeeze()  # remove singleton dimensions
-
-                # Get dimensions
+                well_data = dataset.sel(Well=well_value).squeeze()
                 dims = list(well_data.dims)
-                dims = [
-                    item.replace("Channel", "C").replace("Time", "T")
-                    for item in dims
-                ]
-                axes = "".join(dims)
+            else:
+                dims = list(dataset.dims)
 
-                # Try to get the first image file in the directory for metadata
-                image_files = []
-                for root, _, files in os.walk(filepath):
+            # Normalize dimension names
+            dims = [
+                dim.replace("Channel", "C").replace("Time", "T")
+                for dim in dims
+            ]
+            axes = "".join(dims)
+
+            # Try to extract pixel size from filenames
+            resolution = (1.0, 1.0)
+            try:
+                for _root, _, files in os.walk(filepath):
                     for file in files:
                         if file.lower().endswith((".tif", ".tiff")):
-                            image_files.append(os.path.join(root, file))
+                            match = re.search(r"--PX(\d+)", file)
+                            if match:
+                                pixel_size = float(match.group(1)) * 1e-4
+                                resolution = (pixel_size, pixel_size)
+                                break
+                    if resolution != (1.0, 1.0):
+                        break
+            except (OSError, ValueError, TypeError):
+                pass
 
-                if image_files:
-                    sample_file = image_files[0]
-                    try:
-                        # Get values after --PX in filename
-                        pattern = re.compile(r"--PX(\d+)")
-                        match = pattern.search(sample_file)
-                        if match:
-                            pixel_size = float(match.group(1)) * 10**-4
-                            resolution = (pixel_size, pixel_size)
-                    except (ValueError, FileNotFoundError) as e:
-                        print(f"Warning: Could not get pixel size: {e}")
-                        resolution = (1.0, 1.0)
-            else:
-                # If no Well dimension, use dimensions from the dataset
-                dims = list(dataset.dims)
-                dims = [
-                    item.replace("Channel", "C").replace("Time", "T")
-                    for item in dims
-                ]
-                axes = "".join(dims)
-
-            metadata = {
+            return {
                 "axes": axes,
                 "resolution": resolution,
                 "unit": "um",
                 "filepath": filepath,
             }
-            print(f"Extracted metadata: {metadata}")
-            return metadata
-
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error getting metadata: {e}")
+        except (FileFormatError, AttributeError, KeyError):
             return {}
 
 
 class ScanFolderWorker(QThread):
     """Worker thread for scanning folders"""
 
-    progress = Signal(int, int)  # current, total
-    finished = Signal(list)  # list of found files
-    error = Signal(str)  # error message
+    progress = Signal(int, int)
+    finished = Signal(list)
+    error = Signal(str)
 
     def __init__(self, folder: str, filters: List[str]):
         super().__init__()
@@ -982,13 +834,11 @@ class ScanFolderWorker(QThread):
             found_files = []
             all_items = []
 
-            # Get both files and potential Acquifer directories
-            include_directories = "acquifer" in [
-                f.lower() for f in self.filters
-            ]
+            include_acquifer = "acquifer" in [f.lower() for f in self.filters]
 
-            # Count items to scan
+            # Collect files and directories
             for root, dirs, files in os.walk(self.folder):
+                # Add matching files
                 for file in files:
                     if any(
                         file.lower().endswith(f)
@@ -997,32 +847,32 @@ class ScanFolderWorker(QThread):
                     ):
                         all_items.append(os.path.join(root, file))
 
-                # Add potential Acquifer directories
-                if include_directories:
+                # Add Acquifer directories
+                if include_acquifer:
                     for dir_name in dirs:
                         dir_path = os.path.join(root, dir_name)
                         if AcquiferLoader.can_load(dir_path):
                             all_items.append(dir_path)
 
-            # Scan all items
+            # Process items
             total_items = len(all_items)
             for i, item_path in enumerate(all_items):
                 if i % 10 == 0:
                     self.progress.emit(i, total_items)
-
                 found_files.append(item_path)
 
             self.finished.emit(found_files)
-        except (ValueError, FileNotFoundError) as e:
-            self.error.emit(str(e))
+
+        except (OSError, PermissionError) as e:
+            self.error.emit(f"Scan failed: {str(e)}")
 
 
 class ConversionWorker(QThread):
-    """Worker thread for file conversion"""
+    """Enhanced worker thread for file conversion"""
 
-    progress = Signal(int, int, str)  # current, total, filename
-    file_done = Signal(str, bool, str)  # filepath, success, error message
-    finished = Signal(int)  # number of successfully converted files
+    progress = Signal(int, int, str)
+    file_done = Signal(str, bool, str)
+    finished = Signal(int)
 
     def __init__(
         self,
@@ -1040,93 +890,35 @@ class ConversionWorker(QThread):
 
     def run(self):
         success_count = 0
+
         for i, (filepath, series_index) in enumerate(self.files_to_convert):
             if not self.running:
                 break
 
-            # Update progress
-            self.progress.emit(
-                i + 1, len(self.files_to_convert), Path(filepath).name
-            )
+            filename = Path(filepath).name
+            self.progress.emit(i + 1, len(self.files_to_convert), filename)
 
             try:
-                # Get loader
-                loader = self.get_file_loader(filepath)
-                if not loader:
+                # Load and convert file
+                success = self._convert_single_file(filepath, series_index)
+                if success:
+                    success_count += 1
                     self.file_done.emit(
-                        filepath, False, "Unsupported file format"
-                    )
-                    continue
-
-                # Load series - this is the critical part that must succeed
-                try:
-                    image_data = loader.load_series(filepath, series_index)
-                except (ValueError, FileNotFoundError) as e:
-                    self.file_done.emit(
-                        filepath, False, f"Failed to load image: {str(e)}"
-                    )
-                    continue
-
-                # Try to extract metadata - but don't fail if this doesn't work
-                metadata = None
-                try:
-                    metadata = (
-                        loader.get_metadata(filepath, series_index) or {}
-                    )
-                    print(f"Extracted metadata keys: {list(metadata.keys())}")
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Warning: Failed to extract metadata: {str(e)}")
-                    metadata = {}
-
-                # Generate output filename
-                base_name = Path(filepath).stem
-
-                # Determine format
-                use_zarr = self.use_zarr
-
-                # Set up the output path
-                if use_zarr:
-                    output_path = os.path.join(
-                        self.output_folder,
-                        f"{base_name}_series{series_index}.zarr",
+                        filepath, True, "Conversion successful"
                     )
                 else:
-                    output_path = os.path.join(
-                        self.output_folder,
-                        f"{base_name}_series{series_index}.tif",
-                    )
+                    self.file_done.emit(filepath, False, "Conversion failed")
 
-                # The crucial part - save the file with separate try/except for each save method
-                save_success = False
-                error_message = ""
-
-                try:
-                    if use_zarr:
-                        save_success = self._save_zarr(
-                            image_data, output_path, metadata
-                        )
-                    else:
-                        self._save_tif(image_data, output_path, metadata)
-                        save_success = os.path.exists(output_path)
-
-                    if save_success:
-                        success_count += 1
-                        self.file_done.emit(
-                            filepath, True, f"Saved to {output_path}"
-                        )
-                    else:
-                        error_message = "Failed to save file - unknown error"
-                        self.file_done.emit(filepath, False, error_message)
-
-                except (ValueError, FileNotFoundError) as e:
-                    error_message = f"Failed to save file: {str(e)}"
-                    print(f"Error in save operation: {error_message}")
-                    self.file_done.emit(filepath, False, error_message)
-
-            except (ValueError, FileNotFoundError) as e:
-                print(f"Unexpected error during conversion: {str(e)}")
+            except (
+                FileFormatError,
+                SeriesIndexError,
+                ConversionError,
+                MemoryError,
+            ) as e:
+                self.file_done.emit(filepath, False, str(e))
+            except (OSError, PermissionError) as e:
                 self.file_done.emit(
-                    filepath, False, f"Unexpected error: {str(e)}"
+                    filepath, False, f"File access error: {str(e)}"
                 )
 
         self.finished.emit(success_count)
@@ -1134,240 +926,129 @@ class ConversionWorker(QThread):
     def stop(self):
         self.running = False
 
-    def _save_tif(
-        self, image_data: np.ndarray, output_path: str, metadata: dict = None
-    ):
-        """Enhanced TIF saving with chunked writing options for large files"""
-        import tifffile
-
-        print(f"Saving TIF file: {output_path}")
-        print(f"Image data shape: {image_data.shape}")
-
-        # Check if this is a large file that needs BigTIFF
-        estimated_size_bytes = np.prod(image_data.shape) * image_data.itemsize
-        file_size_GB = estimated_size_bytes / (1024**3)
-
-        print(f"Estimated file size: {file_size_GB:.2f}GB")
-
-        # Choose saving strategy based on file size and data type
-        if file_size_GB > 4:  # Use chunked methods for large files
-            try:
-                print("Using chunked saving for large file")
-                return self._save_tif_chunked(
-                    image_data, output_path, metadata
-                )
-            except (ValueError, OSError, RuntimeError) as e:
-                print(f"Chunked saving failed: {e}")
-                print("Falling back to standard method...")
-
-        # Standard method for smaller files
-        use_bigtiff = file_size_GB > 4
-
-        if metadata:
-            print(f"Metadata keys: {list(metadata.keys())}")
-
-        # Handle Dask arrays for smaller files
-        if hasattr(image_data, "compute"):
-            if file_size_GB > 8:  # Reject very large files for standard method
-                raise ValueError(
-                    f"File size ({file_size_GB:.2f}GB) too large for TIF format. Use ZARR instead."
-                )
-
-            print("Computing Dask array for standard save")
-            try:
-                image_data = image_data.compute()
-            except MemoryError as e:
-                raise ValueError(
-                    "Not enough memory to save as TIF. Use ZARR format instead."
-                ) from e
-
-        # Simple save with minimal metadata for compatibility
+    def _convert_single_file(self, filepath: str, series_index: int) -> bool:
+        """Convert a single file to the target format"""
+        image_data = None
         try:
-            imagej_kwargs = {}
+            # Get loader and load data
+            loader = self.get_file_loader(filepath)
+            if not loader:
+                raise FileFormatError("Unsupported file format")
 
-            # Only add ImageJ metadata for multi-dimensional arrays
+            image_data = loader.load_series(filepath, series_index)
+            metadata = loader.get_metadata(filepath, series_index) or {}
+
+            # Generate output path
+            base_name = Path(filepath).stem
+            if self.use_zarr:
+                output_path = os.path.join(
+                    self.output_folder,
+                    f"{base_name}_series{series_index}.zarr",
+                )
+                result = self._save_zarr(
+                    image_data, output_path, metadata, base_name, series_index
+                )
+            else:
+                output_path = os.path.join(
+                    self.output_folder, f"{base_name}_series{series_index}.tif"
+                )
+                result = self._save_tif(image_data, output_path, metadata)
+
+            return result
+
+        except (FileFormatError, SeriesIndexError, MemoryError) as e:
+            raise ConversionError(f"Conversion failed: {str(e)}") from e
+        finally:
+            # Free up memory after conversion
+            if image_data is not None:
+                del image_data
+            import gc
+
+            gc.collect()
+
+    def _save_tif(
+        self,
+        image_data: Union[np.ndarray, da.Array],
+        output_path: str,
+        metadata: dict,
+    ) -> bool:
+        """Save image data as TIF with memory-efficient handling"""
+        try:
+            # Estimate file size
+            if hasattr(image_data, "nbytes"):
+                size_gb = image_data.nbytes / (1024**3)
+            else:
+                size_gb = (
+                    np.prod(image_data.shape)
+                    * getattr(image_data, "itemsize", 8)
+                ) / (1024**3)
+
+            print(
+                f"Saving TIF: {output_path}, estimated size: {size_gb:.2f}GB"
+            )
+
+            # For very large files, reject TIF format
+            if size_gb > 8:
+                raise MemoryError(
+                    "File too large for TIF format. Use ZARR instead."
+                )
+
+            use_bigtiff = size_gb > 4
+
+            # Handle Dask arrays efficiently
+            if hasattr(image_data, "dask"):
+                if size_gb > 6:  # Conservative threshold for Dask->TIF
+                    raise MemoryError(
+                        "Dask array too large for TIF. Use ZARR instead."
+                    )
+
+                # For large Dask arrays, use chunked writing
+                if len(image_data.shape) > 3:
+                    return self._save_tif_chunked_dask(
+                        image_data, output_path, use_bigtiff
+                    )
+                else:
+                    # Compute smaller arrays
+                    image_data = image_data.compute()
+
+            # Standard TIF saving
+            save_kwargs = {"bigtiff": use_bigtiff, "compression": "zlib"}
+
             if len(image_data.shape) > 2:
-                imagej_kwargs["imagej"] = True
+                save_kwargs["imagej"] = True
 
-            # Add resolution if available
-            if metadata and "resolution" in metadata:
+            if metadata.get("resolution"):
                 try:
                     res_x, res_y = metadata["resolution"]
-                    imagej_kwargs["resolution"] = (float(res_x), float(res_y))
+                    save_kwargs["resolution"] = (float(res_x), float(res_y))
                 except (ValueError, TypeError):
                     pass
 
-            tifffile.imwrite(
-                output_path,
-                image_data,
-                bigtiff=use_bigtiff,
-                compression="zlib",
-                **imagej_kwargs,
-            )
+            tifffile.imwrite(output_path, image_data, **save_kwargs)
+            return os.path.exists(output_path)
 
-            print(f"Successfully saved TIF file: {output_path}")
+        except (OSError, PermissionError) as e:
+            raise ConversionError(f"TIF save failed: {str(e)}") from e
 
-        except (ValueError, OSError, RuntimeError) as e:
-            print(f"Error saving TIF file: {e}")
-            # Final fallback - basic save without metadata
-            tifffile.imwrite(output_path, image_data, bigtiff=use_bigtiff)
-            print("Saved with basic fallback method")
-
-    def _save_tif_chunked(
-        self, image_data: np.ndarray, output_path: str, metadata: dict = None
-    ):
-        """Chunked TIF saving using block-wise writing for large files"""
-
-        print(f"Saving TIF file (chunked): {output_path}")
-        print(f"Image data shape: {image_data.shape}")
-
-        # Check file size
-        estimated_size_bytes = np.prod(image_data.shape) * image_data.itemsize
-        file_size_GB = estimated_size_bytes / (1024**3)
-        use_bigtiff = file_size_GB > 4
-
-        print(
-            f"Estimated file size: {file_size_GB:.2f}GB, using BigTIFF: {use_bigtiff}"
-        )
-
-        # For very large files (>8GB), don't attempt TIF at all
-        if file_size_GB > 8:
-            raise ValueError(
-                f"File size ({file_size_GB:.2f}GB) too large for TIF format. Use ZARR instead."
-            )
-
-        # For Dask arrays, we can write chunks directly without computing the whole array
-        if hasattr(image_data, "dask") and hasattr(image_data, "chunks"):
-            print("Detected Dask array with chunks")
-            return self._save_dask_tif_chunked(
-                image_data, output_path, metadata, use_bigtiff
-            )
-
-        # For regular numpy arrays that are large, use memory mapping
-        if file_size_GB > 4:  # Use memory mapping for files >4GB
-            print("Using memory mapping for large numpy array")
-            return self._save_numpy_tif_memmap(
-                image_data, output_path, metadata, use_bigtiff
-            )
-
-        # For smaller files or if chunked methods fail, fall back to standard method
-        print("Using standard saving method")
-        return self._save_tif_standard(
-            image_data, output_path, metadata, use_bigtiff
-        )
-
-    def _save_dask_tif_chunked(
-        self, dask_array, output_path: str, metadata: dict, use_bigtiff: bool
-    ):
-        """Save Dask array to TIF using chunked writing"""
-        import tifffile
-
-        print("Using Dask chunked writing strategy")
-
-        # Get array info
-        shape = dask_array.shape
-        dtype = dask_array.dtype
-        chunks = dask_array.chunks
-
-        print(f"Dask array: shape={shape}, dtype={dtype}, chunks={chunks}")
-
-        # For very large files, use the safest approach: compute timepoints individually
-        if len(shape) >= 4:  # Multi-dimensional data
-            return self._write_multidim_safe(
-                dask_array, output_path, use_bigtiff
-            )
-
-        # For smaller/simpler arrays, try direct writing
+    def _save_tif_chunked_dask(
+        self, dask_array: da.Array, output_path: str, use_bigtiff: bool
+    ) -> bool:
+        """Save large Dask array to TIF using chunked writing"""
         try:
-            print("Attempting direct tifffile write of dask array")
-            tifffile.imwrite(
-                output_path,
-                dask_array,
-                bigtiff=use_bigtiff,
-                compression="zlib",
-            )
-            print("Successfully saved using direct dask write")
-            return True
-        except (
-            TypeError,
-            ValueError,
-            OSError,
-            RuntimeError,
-            MemoryError,
-        ) as e:
-            print(f"Direct dask write failed: {e}")
-            # Fallback to safe method
-            return self._write_multidim_safe(
-                dask_array, output_path, use_bigtiff
+            print(
+                f"Using chunked Dask TIF writing for shape {dask_array.shape}"
             )
 
-    def _write_multidim_safe(
-        self, dask_array, output_path: str, use_bigtiff: bool
-    ):
-        """Safely write multi-dimensional dask array by computing one slice at a time"""
-        import tifffile
-
-        shape = dask_array.shape
-        print(f"Using safe multi-dimensional writing for shape {shape}")
-
-        try:
-            # For 5D arrays (T,Z,C,Y,X), write one timepoint at a time
-            if len(shape) == 5:
-                T, Z, C, Y, X = shape
-                print(f"Writing 5D array: T={T}, Z={Z}, C={C}, Y={Y}, X={X}")
-
-                # Write timepoints one by one using TiffWriter
+            # Write timepoints/slices individually for multi-dimensional data
+            if len(dask_array.shape) >= 4:
                 with tifffile.TiffWriter(
                     output_path, bigtiff=use_bigtiff
                 ) as writer:
-                    for t in range(T):
-                        print(f"Computing and writing timepoint {t+1}/{T}")
-                        try:
-                            # Compute one timepoint at a time
-                            timepoint_data = dask_array[t].compute()
-                            print(
-                                f"  Timepoint {t} shape: {timepoint_data.shape}"
-                            )
-
-                            # Write timepoint with proper metadata
-                            writer.write(
-                                timepoint_data,
-                                compression="zlib",
-                                # Remove contiguous=True as it conflicts with compression
-                            )
-                        except Exception as e:
-                            print(f"Error writing timepoint {t}: {e}")
-                            raise
-
-                print(f"Successfully wrote all {T} timepoints")
-                return True
-
-            # For 4D arrays, assume first dimension is time or similar
-            elif len(shape) == 4:
-                dim0, dim1, dim2, dim3 = shape
-                print(f"Writing 4D array: {dim0}x{dim1}x{dim2}x{dim3}")
-
-                with tifffile.TiffWriter(
-                    output_path, bigtiff=use_bigtiff
-                ) as writer:
-                    for i in range(dim0):
-                        print(f"Computing and writing slice {i+1}/{dim0}")
-                        try:
-                            slice_data = dask_array[i].compute()
-                            writer.write(
-                                slice_data,
-                                compression="zlib",
-                                # Remove contiguous=True as it conflicts with compression
-                            )
-                        except Exception as e:
-                            print(f"Error writing slice {i}: {e}")
-                            raise
-
-                return True
-
-            # For 3D or lower, compute all at once (should be smaller)
+                    for i in range(dask_array.shape[0]):
+                        slice_data = dask_array[i].compute()
+                        writer.write(slice_data, compression="zlib")
             else:
-                print(f"Computing entire {len(shape)}D array")
+                # For 3D or smaller, compute and save normally
                 computed_data = dask_array.compute()
                 tifffile.imwrite(
                     output_path,
@@ -1375,226 +1056,96 @@ class ConversionWorker(QThread):
                     bigtiff=use_bigtiff,
                     compression="zlib",
                 )
-                return True
 
-        except Exception as e:
-            print(f"Safe multi-dimensional writing failed: {e}")
-            raise
-
-    def _write_5d_chunked(
-        self, dask_array, output_path: str, use_bigtiff: bool
-    ):
-        """Write 5D array (T,Z,C,Y,X) one timepoint at a time - DEPRECATED, use _write_multidim_safe instead"""
-        print(
-            "Note: _write_5d_chunked is deprecated, redirecting to safer method"
-        )
-        return self._write_multidim_safe(dask_array, output_path, use_bigtiff)
-
-    def _write_4d_chunked(
-        self, dask_array, output_path: str, use_bigtiff: bool
-    ):
-        """Write 4D array in chunks - DEPRECATED, use _write_multidim_safe instead"""
-        print(
-            "Note: _write_4d_chunked is deprecated, redirecting to safer method"
-        )
-        return self._write_multidim_safe(dask_array, output_path, use_bigtiff)
-
-    def _save_numpy_tif_memmap(
-        self, numpy_array, output_path: str, metadata: dict, use_bigtiff: bool
-    ):
-        """Save large numpy array using memory mapping"""
-        import tifffile
-
-        print("Using memory mapping strategy for large numpy array")
-
-        try:
-            # Create a temporary memory-mapped array
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                temp_path = temp_file.name
-
-            # Create memory-mapped copy
-            memmap_array = np.memmap(
-                temp_path,
-                dtype=numpy_array.dtype,
-                mode="w+",
-                shape=numpy_array.shape,
-            )
-
-            # Copy data in chunks
-            chunk_size = 1024 * 1024 * 100  # 100MB chunks
-            flat_array = numpy_array.flat
-            flat_memmap = memmap_array.flat
-
-            total_elements = numpy_array.size
-            for i in range(0, total_elements, chunk_size):
-                end_idx = min(i + chunk_size, total_elements)
-                flat_memmap[i:end_idx] = flat_array[i:end_idx]
-
-                if i % (chunk_size * 10) == 0:  # Progress every 1GB
-                    progress = (i / total_elements) * 100
-                    print(f"Copying to memory map: {progress:.1f}%")
-
-            # Now save from memory map
-            tifffile.imwrite(
-                output_path,
-                memmap_array,
-                bigtiff=use_bigtiff,
-                compression="zlib",
-            )
-
-            # Clean up temp file
-            import contextlib
-
-            with contextlib.suppress(OSError):
-                os.unlink(temp_path)
-
-            print("Successfully saved using memory mapping")
             return True
 
-        except Exception as e:
-            print(f"Memory mapping failed: {e}")
-            raise
-
-    def _save_tif_standard(
-        self, image_data, output_path: str, metadata: dict, use_bigtiff: bool
-    ):
-        """Standard TIF saving method (fallback)"""
-        import tifffile
-
-        print("Using standard TIF saving")
-
-        # Simple metadata handling
-        imagej_kwargs = {}
-        if len(image_data.shape) > 2:
-            imagej_kwargs["imagej"] = True
-
-        if metadata and "resolution" in metadata:
-            try:
-                res_x, res_y = metadata["resolution"]
-                imagej_kwargs["resolution"] = (float(res_x), float(res_y))
-            except (ValueError, TypeError):
-                pass
-
-        tifffile.imwrite(
-            output_path,
-            image_data,
-            bigtiff=use_bigtiff,
-            compression="zlib",
-            **imagej_kwargs,
-        )
-
-        return True
+        except (OSError, PermissionError, MemoryError) as e:
+            raise ConversionError(
+                f"Chunked TIF writing failed: {str(e)}"
+            ) from e
+        finally:
+            # Clean up temporary data
+            if "slice_data" in locals():
+                del slice_data
+            if "computed_data" in locals():
+                del computed_data
 
     def _save_zarr(
-        self, image_data: np.ndarray, output_path: str, metadata: dict = None
-    ):
-        print(f"Saving ZARR file: {output_path}")
-        print(f"Image data shape: {image_data.shape}")
-
-        metadata = metadata or {}
-
-        if os.path.exists(output_path):
-            print(f"Deleting existing Zarr directory: {output_path}")
-            shutil.rmtree(output_path)
-
-        store = parse_url(output_path, mode="w").store
-        ndim = len(image_data.shape)
-        axes = metadata.get("axes", "").lower() if metadata else None
-
-        # Standardize to czyx order (without t if not present)
-        has_time = "t" in axes if axes else False
-        target_axes = "tczyx" if has_time else "czyx"
-        target_axes = target_axes[:ndim]  # Trim to actual dimensions
-
-        if axes and axes != target_axes:
-            print(f"Reordering axes from {axes} to {target_axes}")
-            try:
-                # Create mapping and reorder
-                axes_map = {ax: i for i, ax in enumerate(axes)}
-                reorder_list = []
-                for target_ax in target_axes:
-                    if target_ax in axes_map:
-                        reorder_list.append(axes_map[target_ax])
-                    else:
-                        print(f"Warning: Axis {target_ax} not found in {axes}")
-
-                if len(reorder_list) == len(axes):
-                    image_data = np.moveaxis(
-                        image_data, range(len(axes)), reorder_list
-                    )
-                    axes = target_axes
-                    print(f"Successfully reordered to: {axes}")
-            except (ValueError, IndexError) as e:
-                print(f"Reordering failed, using original order: {e}")
-
-        # Convert to Dask array and save
-        if not hasattr(image_data, "dask"):
-            image_data = da.from_array(image_data, chunks="auto")
-
+        self,
+        image_data: Union[np.ndarray, da.Array],
+        output_path: str,
+        metadata: dict,
+        base_name: str,
+        series_index: int,
+    ) -> bool:
+        """Save image data as ZARR with proper OME-ZARR structure for napari-ome-zarr"""
         try:
+            print(f"Saving ZARR: {output_path}")
+
+            if os.path.exists(output_path):
+                shutil.rmtree(output_path)
+
+            store = parse_url(output_path, mode="w").store
+
+            # Convert to Dask array if needed
+            if not hasattr(image_data, "dask"):
+                image_data = da.from_array(image_data, chunks="auto")
+
+            # Handle axes reordering for proper OME-ZARR structure
+            axes = metadata.get("axes", "").lower()
+            if axes:
+                ndim = len(image_data.shape)
+                has_time = "t" in axes
+                target_axes = "tczyx" if has_time else "czyx"
+                target_axes = target_axes[:ndim]
+
+                if axes != target_axes and len(axes) == ndim:
+                    try:
+                        reorder_indices = [
+                            axes.index(ax) for ax in target_axes if ax in axes
+                        ]
+                        if len(reorder_indices) == len(axes):
+                            image_data = image_data.transpose(reorder_indices)
+                            axes = target_axes
+                    except (ValueError, IndexError):
+                        pass
+
+            # Create proper layer name for napari
+            layer_name = (
+                f"{base_name}_series_{series_index}"
+                if series_index > 0
+                else base_name
+            )
+
+            # Save with OME-ZARR - let napari-ome-zarr handle colormaps
             with ProgressBar():
                 root = zarr.group(store=store)
 
-                # Extract base filename for proper naming
-                base_name = Path(output_path).stem
+                # Set minimal metadata - let napari-ome-zarr reader handle the rest
+                root.attrs["name"] = layer_name
 
-                # Add metadata to the root group for proper layer naming
-                root.attrs["name"] = base_name
-
-                # Add OMERO metadata for proper channel naming in napari
-                # But only if we can determine the actual channel count correctly
-                if hasattr(image_data, "shape") and len(image_data.shape) >= 3:
-                    # Extract actual number of channels from the data
-                    if "axes" in metadata and "C" in metadata["axes"]:
-                        axes_str = metadata["axes"]
-                        c_index = axes_str.index("C")
-                        actual_channels = image_data.shape[c_index]
-                    else:
-                        # Assume last non-spatial dimension is channels if > 3D
-                        actual_channels = (
-                            image_data.shape[-3]
-                            if len(image_data.shape) > 3
-                            else 1
-                        )
-
-                    # Only create OMERO metadata if we have a reasonable number of channels
-                    if (
-                        actual_channels <= 10
-                    ):  # Reasonable limit for most microscopy
-                        channels = []
-                        for i in range(actual_channels):
-                            channels.append(
-                                {
-                                    "label": f"{base_name}_Ch{i}",
-                                    "color": "FFFFFF",  # White by default
-                                    "window": {"start": 0, "end": 65535},
-                                    "active": True,
-                                }
-                            )
-
-                        root.attrs["omero"] = {
-                            "name": base_name,
-                            "channels": channels,
-                        }
-                    else:
-                        # Too many channels, just set basic name
-                        root.attrs["omero"] = {"name": base_name}
-
+                # Write the image with proper OME-ZARR structure
                 write_image(
                     image_data,
                     group=root,
-                    axes=axes or "zyx",  # Fallback axes
+                    axes=axes or "zyx",
                     scaler=None,
                     storage_options={"compression": "zstd"},
                 )
+
             return True
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error during Zarr writing: {e}")
-            return False
+
+        except (OSError, PermissionError, ImportError) as e:
+            raise ConversionError(f"ZARR save failed: {str(e)}") from e
+        finally:
+            # Force cleanup of any large intermediate arrays
+            import gc
+
+            gc.collect()
 
 
 class MicroscopyImageConverterWidget(QWidget):
-    """Main widget for microscopy image conversion to TIF/ZARR"""
+    """Enhanced main widget for microscopy image conversion"""
 
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
@@ -1609,117 +1160,95 @@ class MicroscopyImageConverterWidget(QWidget):
             AcquiferLoader,
         ]
 
-        # Selected series for conversion
-        self.selected_series = {}  # {filepath: series_index}
-
-        # Track files that should export all series
-        self.export_all_series = {}  # {filepath: boolean}
-
-        # Working threads
+        # Conversion state
+        self.selected_series = {}
+        self.export_all_series = {}
         self.scan_worker = None
         self.conversion_worker = None
-
-        # Flag to prevent recursive radio button updates
         self.updating_format_buttons = False
 
-        # Create layout
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Set up the user interface"""
         main_layout = QVBoxLayout()
         self.setLayout(main_layout)
 
-        # File selection widgets
+        # Input folder selection
         folder_layout = QHBoxLayout()
-        folder_label = QLabel("Input Folder:")
+        folder_layout.addWidget(QLabel("Input Folder:"))
         self.folder_edit = QLineEdit()
         browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self.browse_folder)
 
-        folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_edit)
         folder_layout.addWidget(browse_button)
         main_layout.addLayout(folder_layout)
 
-        # File filter widgets
+        # File filters
         filter_layout = QHBoxLayout()
-        filter_label = QLabel("File Filter:")
+        filter_layout.addWidget(QLabel("File Filter:"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText(
-            ".lif, .nd2, .ndpi, .czi, acquifer (comma separated)"
+            ".lif, .nd2, .ndpi, .czi, acquifer"
         )
-        self.filter_edit.setText(".lif,.nd2,.ndpi,.czi, acquifer")
+        self.filter_edit.setText(".lif,.nd2,.ndpi,.czi,acquifer")
         scan_button = QPushButton("Scan Folder")
         scan_button.clicked.connect(self.scan_folder)
 
-        filter_layout.addWidget(filter_label)
         filter_layout.addWidget(self.filter_edit)
         filter_layout.addWidget(scan_button)
         main_layout.addLayout(filter_layout)
 
-        # Progress bar for scanning
+        # Progress bars
         self.scan_progress = QProgressBar()
         self.scan_progress.setVisible(False)
         main_layout.addWidget(self.scan_progress)
 
-        # Files and series tables
+        # Tables layout
         tables_layout = QHBoxLayout()
-
-        # Files table
-        self.files_table = SeriesTableWidget(viewer)
+        self.files_table = SeriesTableWidget(self.viewer)
+        self.series_widget = SeriesDetailWidget(self, self.viewer)
         tables_layout.addWidget(self.files_table)
-
-        # Series details widget
-        self.series_widget = SeriesDetailWidget(self, viewer)
         tables_layout.addWidget(self.series_widget)
-
         main_layout.addLayout(tables_layout)
 
-        # Conversion options
-        options_layout = QVBoxLayout()
-
-        # Output format selection
+        # Format selection
         format_layout = QHBoxLayout()
-        format_label = QLabel("Output Format:")
+        format_layout.addWidget(QLabel("Output Format:"))
         self.tif_radio = QCheckBox("TIF")
         self.tif_radio.setChecked(True)
         self.zarr_radio = QCheckBox("ZARR (Recommended for >4GB)")
 
-        # Make checkboxes mutually exclusive like radio buttons
         self.tif_radio.toggled.connect(self.handle_format_toggle)
         self.zarr_radio.toggled.connect(self.handle_format_toggle)
 
-        format_layout.addWidget(format_label)
         format_layout.addWidget(self.tif_radio)
         format_layout.addWidget(self.zarr_radio)
-        options_layout.addLayout(format_layout)
+        main_layout.addLayout(format_layout)
 
-        # Output folder selection
+        # Output folder
         output_layout = QHBoxLayout()
-        output_label = QLabel("Output Folder:")
+        output_layout.addWidget(QLabel("Output Folder:"))
         self.output_edit = QLineEdit()
         output_browse = QPushButton("Browse...")
         output_browse.clicked.connect(self.browse_output)
 
-        output_layout.addWidget(output_label)
         output_layout.addWidget(self.output_edit)
         output_layout.addWidget(output_browse)
-        options_layout.addLayout(output_layout)
+        main_layout.addLayout(output_layout)
 
-        main_layout.addLayout(options_layout)
-
-        # Conversion progress bar
+        # Conversion progress
         self.conversion_progress = QProgressBar()
         self.conversion_progress.setVisible(False)
         main_layout.addWidget(self.conversion_progress)
 
-        # Conversion and cancel buttons
+        # Control buttons
         button_layout = QHBoxLayout()
-
         convert_button = QPushButton("Convert Selected Files")
         convert_button.clicked.connect(self.convert_files)
-
-        # Add Convert All Files button
         convert_all_button = QPushButton("Convert All Files")
         convert_all_button.clicked.connect(self.convert_all_files)
-
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel_operation)
         self.cancel_button.setVisible(False)
@@ -1729,82 +1258,70 @@ class MicroscopyImageConverterWidget(QWidget):
         button_layout.addWidget(self.cancel_button)
         main_layout.addLayout(button_layout)
 
-        # Status label
+        # Status
         self.status_label = QLabel("")
         main_layout.addWidget(self.status_label)
 
-    def cancel_operation(self):
-        """Cancel current operation"""
-        if self.scan_worker and self.scan_worker.isRunning():
-            self.scan_worker.terminate()
-            self.scan_worker = None
-            self.status_label.setText("Scanning cancelled")
-
-        if self.conversion_worker and self.conversion_worker.isRunning():
-            self.conversion_worker.stop()
-            self.status_label.setText("Conversion cancelled")
-
-        self.scan_progress.setVisible(False)
-        self.conversion_progress.setVisible(False)
-        self.cancel_button.setVisible(False)
-
     def browse_folder(self):
-        """Open a folder browser dialog"""
+        """Browse for input folder"""
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
         if folder:
             self.folder_edit.setText(folder)
 
     def browse_output(self):
-        """Open a folder browser dialog for output folder"""
+        """Browse for output folder"""
         folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if folder:
             self.output_edit.setText(folder)
 
     def scan_folder(self):
-        """Scan the selected folder for image files"""
+        """Scan folder for image files"""
         folder = self.folder_edit.text()
         if not folder or not os.path.isdir(folder):
             self.status_label.setText("Please select a valid folder")
             return
 
-        # Get file filters
         filters = [
             f.strip() for f in self.filter_edit.text().split(",") if f.strip()
         ]
         if not filters:
             filters = [".lif", ".nd2", ".ndpi", ".czi"]
 
-        # Clear existing files
+        # Clear existing data and force garbage collection
         self.files_table.setRowCount(0)
         self.files_table.file_data.clear()
 
-        # Set up and start the worker thread
+        # Clear any cached datasets
+        AcquiferLoader._dataset_cache.clear()
+
+        # Force memory cleanup before starting scan
+        import gc
+
+        gc.collect()
+
+        # Start scan worker
         self.scan_worker = ScanFolderWorker(folder, filters)
         self.scan_worker.progress.connect(self.update_scan_progress)
         self.scan_worker.finished.connect(self.process_found_files)
         self.scan_worker.error.connect(self.show_error)
 
-        # Show progress bar and start worker
         self.scan_progress.setVisible(True)
         self.scan_progress.setValue(0)
         self.cancel_button.setVisible(True)
         self.status_label.setText("Scanning folder...")
         self.scan_worker.start()
 
-    def update_scan_progress(self, current, total):
-        """Update the scan progress bar"""
+    def update_scan_progress(self, current: int, total: int):
+        """Update scan progress"""
         if total > 0:
             self.scan_progress.setValue(int(current * 100 / total))
 
-    def process_found_files(self, found_files):
-        """Process the list of found files after scanning is complete"""
-        # Hide progress bar
+    def process_found_files(self, found_files: List[str]):
+        """Process found files and add to table"""
         self.scan_progress.setVisible(False)
         self.cancel_button.setVisible(False)
 
-        # Process files
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            # Process files in parallel to get series counts
             futures = {}
             for filepath in found_files:
                 file_type = self.get_file_type(filepath)
@@ -1816,47 +1333,62 @@ class MicroscopyImageConverterWidget(QWidget):
                         )
                         futures[future] = (filepath, file_type)
 
-            # Process results as they complete
-            file_count = len(found_files)
-            processed = 0
-
             for i, future in enumerate(
                 concurrent.futures.as_completed(futures)
             ):
-                processed = i + 1
                 filepath, file_type = futures[future]
-
                 try:
                     series_count = future.result()
-                    # Add file to table
                     self.files_table.add_file(
                         filepath, file_type, series_count
                     )
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Error processing {filepath}: {str(e)}")
-                    # Add file with error indication
-                    self.files_table.add_file(filepath, file_type, -1)
+                except (OSError, FileFormatError, ValueError) as e:
+                    print(f"Error processing {filepath}: {e}")
+                    self.files_table.add_file(filepath, file_type, 0)
 
                 # Update status periodically
-                if processed % 5 == 0 or processed == file_count:
+                if i % 5 == 0:
                     self.status_label.setText(
-                        f"Processed {processed}/{file_count} files..."
+                        f"Processed {i+1}/{len(futures)} files..."
                     )
                     QApplication.processEvents()
 
         self.status_label.setText(f"Found {len(found_files)} files")
 
-    def show_error(self, error_message):
+    def show_error(self, error_message: str):
         """Show error message"""
         self.status_label.setText(f"Error: {error_message}")
         self.scan_progress.setVisible(False)
         self.cancel_button.setVisible(False)
         QMessageBox.critical(self, "Error", error_message)
 
+    def cancel_operation(self):
+        """Cancel current operation"""
+        if self.scan_worker and self.scan_worker.isRunning():
+            self.scan_worker.terminate()
+            self.scan_worker.deleteLater()
+            self.scan_worker = None
+
+        if self.conversion_worker and self.conversion_worker.isRunning():
+            self.conversion_worker.stop()
+            self.conversion_worker.deleteLater()
+            self.conversion_worker = None
+
+        # Force memory cleanup after cancellation
+        import gc
+
+        gc.collect()
+
+        self.scan_progress.setVisible(False)
+        self.conversion_progress.setVisible(False)
+        self.cancel_button.setVisible(False)
+        self.status_label.setText("Operation cancelled")
+
     def get_file_type(self, filepath: str) -> str:
-        """Determine the file type based on extension or directory type"""
+        """Determine file type"""
         if os.path.isdir(filepath) and AcquiferLoader.can_load(filepath):
             return "Acquifer"
+
         ext = filepath.lower()
         if ext.endswith(".lif"):
             return "LIF"
@@ -1869,222 +1401,46 @@ class MicroscopyImageConverterWidget(QWidget):
         return "Unknown"
 
     def get_file_loader(self, filepath: str) -> Optional[FormatLoader]:
-        """Get the appropriate loader for the file type"""
+        """Get appropriate loader for file"""
         for loader in self.loaders:
             if loader.can_load(filepath):
                 return loader
         return None
 
     def show_series_details(self, filepath: str):
-        """Show details for the series in the selected file"""
+        """Show series details"""
         self.series_widget.set_file(filepath)
 
     def set_selected_series(self, filepath: str, series_index: int):
-        """Set the selected series for a file"""
+        """Set selected series for file"""
         self.selected_series[filepath] = series_index
 
     def set_export_all_series(self, filepath: str, export_all: bool):
-        """Set whether to export all series for a file"""
+        """Set export all series flag"""
         self.export_all_series[filepath] = export_all
-
-        # If exporting all, we still need a default series in selected_series
-        # for files that are marked for export all
         if export_all and filepath not in self.selected_series:
             self.selected_series[filepath] = 0
 
     def load_image(self, filepath: str):
-        """Load an image file into the viewer"""
-        loader = self.get_file_loader(filepath)
-        if not loader:
-            self.viewer.status = f"Unsupported file format: {filepath}"
-            return
-
+        """Load image into viewer"""
         try:
-            # For non-series files, just load the first series
-            series_index = 0
-            image_data = loader.load_series(filepath, series_index)
+            loader = self.get_file_loader(filepath)
+            if not loader:
+                raise FileFormatError("Unsupported file format")
 
-            # Clear existing layers and display the image
+            image_data = loader.load_series(filepath, 0)
             self.viewer.layers.clear()
-            self.viewer.add_image(image_data, name=f"{Path(filepath).stem}")
-
-            # Update status
+            layer_name = f"{Path(filepath).stem}"
+            self.viewer.add_image(image_data, name=layer_name)
             self.viewer.status = f"Loaded {Path(filepath).name}"
-        except (ValueError, FileNotFoundError) as e:
-            self.viewer.status = f"Error loading image: {str(e)}"
-            QMessageBox.warning(
-                self, "Error", f"Could not load image: {str(e)}"
-            )
 
-    def is_output_folder_valid(self, folder):
-        """Check if the output folder is valid and writable"""
-        if not folder:
-            self.status_label.setText("Please specify an output folder")
-            return False
+        except (OSError, FileFormatError, MemoryError) as e:
+            error_msg = f"Error loading image: {str(e)}"
+            self.viewer.status = error_msg
+            QMessageBox.warning(self, "Load Error", error_msg)
 
-        # Check if folder exists, if not try to create it
-        if not os.path.exists(folder):
-            try:
-                os.makedirs(folder)
-            except (FileNotFoundError, PermissionError) as e:
-                self.status_label.setText(
-                    f"Cannot create output folder: {str(e)}"
-                )
-                return False
-
-        # Check if folder is writable
-        if not os.access(folder, os.W_OK):
-            self.status_label.setText("Output folder is not writable")
-            return False
-
-        return True
-
-    def validate_format_selection(self):
-        """Validate format selection against file sizes"""
-        if not self.selected_series:
-            return True
-
-        large_files = []
-        for filepath in self.selected_series:
-            try:
-                file_type = self.get_file_type(filepath)
-                if file_type == "ND2":
-                    with nd2.ND2File(filepath) as nd2_file:
-                        dims = dict(nd2_file.sizes)
-                        pixel_size = nd2_file.dtype.itemsize
-                        total_elements = np.prod([dims[dim] for dim in dims])
-                        size_GB = (total_elements * pixel_size) / (1024**3)
-
-                        if size_GB > 10 and self.tif_radio.isChecked():
-                            large_files.append((Path(filepath).name, size_GB))
-            except (ValueError, FileNotFoundError, OSError):
-                continue
-
-        if large_files:
-            file_list = "\n".join(
-                [f"- {name}: {size:.1f}GB" for name, size in large_files]
-            )
-            reply = QMessageBox.question(
-                self,
-                "Large Files Detected",
-                f"The following files are very large and may cause memory issues with TIF format:\n\n{file_list}\n\nRecommend using ZARR format instead. Continue with TIF?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            return reply == QMessageBox.Yes
-
-        return True
-
-    def convert_files(self):
-        """Convert selected files to TIF or ZARR"""
-
-        # Validate format selection first
-        if not self.validate_format_selection():
-            return
-
-        # If no specific series selected, convert all files with series 0
-        if not self.selected_series:
-            all_files = list(self.files_table.file_data.keys())
-            if not all_files:
-                self.status_label.setText("No files available for conversion")
-                return
-
-            for filepath in all_files:
-                self.selected_series[filepath] = 0
-
-        # Check output folder
-        output_folder = self.output_edit.text()
-        if not output_folder:
-            output_folder = os.path.join(self.folder_edit.text(), "converted")
-
-        if not self.is_output_folder_valid(output_folder):
-            return
-
-        # Build conversion list
-        files_to_convert = []
-        for filepath, series_index in self.selected_series.items():
-            if self.export_all_series.get(filepath, False):
-                loader = self.get_file_loader(filepath)
-                if loader:
-                    try:
-                        series_count = loader.get_series_count(filepath)
-                        for i in range(series_count):
-                            files_to_convert.append((filepath, i))
-                    except (ValueError, FileNotFoundError, OSError) as e:
-                        self.status_label.setText(
-                            f"Error getting series count: {str(e)}"
-                        )
-                        return
-            else:
-                files_to_convert.append((filepath, series_index))
-
-        if not files_to_convert:
-            self.status_label.setText("No valid files to convert")
-            return
-
-        # Start conversion worker
-        self.conversion_worker = ConversionWorker(
-            files_to_convert=files_to_convert,
-            output_folder=output_folder,
-            use_zarr=self.zarr_radio.isChecked(),
-            file_loader_func=self.get_file_loader,
-        )
-
-        self.conversion_worker.progress.connect(
-            self.update_conversion_progress
-        )
-        self.conversion_worker.file_done.connect(
-            self.handle_file_conversion_result
-        )
-        self.conversion_worker.finished.connect(self.conversion_completed)
-
-        self.conversion_progress.setVisible(True)
-        self.conversion_progress.setValue(0)
-        self.cancel_button.setVisible(True)
-        self.status_label.setText(
-            f"Starting conversion of {len(files_to_convert)} files/series..."
-        )
-
-        self.conversion_worker.start()
-
-    def update_conversion_progress(self, current, total, filename):
-        """Update conversion progress bar and status"""
-        if total > 0:
-            self.conversion_progress.setValue(int(current * 100 / total))
-            self.status_label.setText(
-                f"Converting {filename} ({current}/{total})..."
-            )
-
-    def handle_file_conversion_result(self, filepath, success, message):
-        """Handle result of a single file conversion"""
-        filename = Path(filepath).name
-        if success:
-            print(f"Successfully converted: {filename} - {message}")
-        else:
-            print(f"Failed to convert: {filename} - {message}")
-            QMessageBox.warning(
-                self,
-                "Conversion Warning",
-                f"Error converting {filename}: {message}",
-            )
-
-    def conversion_completed(self, success_count):
-        """Handle completion of all conversions"""
-        self.conversion_progress.setVisible(False)
-        self.cancel_button.setVisible(False)
-
-        output_folder = self.output_edit.text()
-        if not output_folder:
-            output_folder = os.path.join(self.folder_edit.text(), "converted")
-        if success_count > 0:
-            self.status_label.setText(
-                f"Successfully converted {success_count} files to {output_folder}"
-            )
-        else:
-            self.status_label.setText("No files were converted")
-
-    def update_format_buttons(self, use_zarr=False):
-        """Update format radio buttons based on file size"""
+    def update_format_buttons(self, use_zarr: bool = False):
+        """Update format buttons based on file size"""
         if self.updating_format_buttons:
             return
 
@@ -2093,9 +1449,8 @@ class MicroscopyImageConverterWidget(QWidget):
             if use_zarr:
                 self.zarr_radio.setChecked(True)
                 self.tif_radio.setChecked(False)
-                # Show warning for large files
                 self.status_label.setText(
-                    "Auto-selected ZARR format for large file (>4GB). TIF may cause memory issues."
+                    "Auto-selected ZARR format for large file (>4GB)"
                 )
             else:
                 self.tif_radio.setChecked(True)
@@ -2103,14 +1458,13 @@ class MicroscopyImageConverterWidget(QWidget):
         finally:
             self.updating_format_buttons = False
 
-    def handle_format_toggle(self, checked):
-        """Handle format radio button toggle"""
+    def handle_format_toggle(self, checked: bool):
+        """Handle format toggle"""
         if self.updating_format_buttons:
             return
 
         self.updating_format_buttons = True
         try:
-            # Make checkboxes mutually exclusive like radio buttons
             sender = self.sender()
             if sender == self.tif_radio and checked:
                 self.zarr_radio.setChecked(False)
@@ -2119,53 +1473,185 @@ class MicroscopyImageConverterWidget(QWidget):
         finally:
             self.updating_format_buttons = False
 
+    def convert_files(self):
+        """Convert selected files"""
+        try:
+            # Prepare conversion list
+            if not self.selected_series:
+                all_files = list(self.files_table.file_data.keys())
+                if not all_files:
+                    self.status_label.setText(
+                        "No files available for conversion"
+                    )
+                    return
+                for filepath in all_files:
+                    self.selected_series[filepath] = 0
+
+            # Validate output folder
+            output_folder = self.output_edit.text()
+            if not output_folder:
+                output_folder = os.path.join(
+                    self.folder_edit.text(), "converted"
+                )
+
+            if not self._validate_output_folder(output_folder):
+                return
+
+            # Build conversion list
+            files_to_convert = []
+            for filepath, series_index in self.selected_series.items():
+                if self.export_all_series.get(filepath, False):
+                    loader = self.get_file_loader(filepath)
+                    if loader:
+                        try:
+                            series_count = loader.get_series_count(filepath)
+                            for i in range(series_count):
+                                files_to_convert.append((filepath, i))
+                        except (OSError, FileFormatError, ValueError) as e:
+                            self.status_label.setText(
+                                f"Error getting series count: {str(e)}"
+                            )
+                            return
+                else:
+                    files_to_convert.append((filepath, series_index))
+
+            if not files_to_convert:
+                self.status_label.setText("No valid files to convert")
+                return
+
+            # Start conversion
+            self.conversion_worker = ConversionWorker(
+                files_to_convert=files_to_convert,
+                output_folder=output_folder,
+                use_zarr=self.zarr_radio.isChecked(),
+                file_loader_func=self.get_file_loader,
+            )
+
+            self.conversion_worker.progress.connect(
+                self.update_conversion_progress
+            )
+            self.conversion_worker.file_done.connect(
+                self.handle_conversion_result
+            )
+            self.conversion_worker.finished.connect(self.conversion_completed)
+
+            self.conversion_progress.setVisible(True)
+            self.conversion_progress.setValue(0)
+            self.cancel_button.setVisible(True)
+            self.status_label.setText(
+                f"Converting {len(files_to_convert)} files/series..."
+            )
+
+            self.conversion_worker.start()
+
+        except (OSError, PermissionError, ValueError) as e:
+            QMessageBox.critical(
+                self,
+                "Conversion Error",
+                f"Failed to start conversion: {str(e)}",
+            )
+
     def convert_all_files(self):
-        """Convert all files in the table to TIF or ZARR"""
-        # Clear existing selections
+        """Convert all files with default settings"""
         self.selected_series.clear()
         self.export_all_series.clear()
 
-        # Get all files from the table
         all_files = list(self.files_table.file_data.keys())
         if not all_files:
             self.status_label.setText("No files available for conversion")
             return
 
-        # Set default series 0 for all files
         for filepath in all_files:
             self.selected_series[filepath] = 0
-            # For files with multiple series, export all by default
             file_info = self.files_table.file_data.get(filepath)
             if file_info and file_info.get("series_count", 0) > 1:
                 self.export_all_series[filepath] = True
 
-        self.status_label.setText(f"Converting all {len(all_files)} files...")
-
-        # Call the existing convert_files method
         self.convert_files()
 
+    def _validate_output_folder(self, folder: str) -> bool:
+        """Validate output folder"""
+        if not folder:
+            self.status_label.setText("Please specify an output folder")
+            return False
 
-# Create a MagicGUI widget that creates and returns the converter widget
-@magicgui(
-    call_button="Start Microscopy Image Converter",
-    layout="vertical",
-)
+        if not os.path.exists(folder):
+            try:
+                os.makedirs(folder)
+            except (OSError, PermissionError) as e:
+                self.status_label.setText(
+                    f"Cannot create output folder: {str(e)}"
+                )
+                return False
+
+        if not os.access(folder, os.W_OK):
+            self.status_label.setText("Output folder is not writable")
+            return False
+
+        return True
+
+    def update_conversion_progress(
+        self, current: int, total: int, filename: str
+    ):
+        """Update conversion progress"""
+        if total > 0:
+            self.conversion_progress.setValue(int(current * 100 / total))
+            self.status_label.setText(
+                f"Converting {filename} ({current}/{total})..."
+            )
+
+    def handle_conversion_result(
+        self, filepath: str, success: bool, message: str
+    ):
+        """Handle single file conversion result"""
+        filename = Path(filepath).name
+        if success:
+            print(f"Successfully converted: {filename}")
+        else:
+            print(f"Failed to convert: {filename} - {message}")
+            QMessageBox.warning(
+                self,
+                "Conversion Warning",
+                f"Error converting {filename}: {message}",
+            )
+
+    def conversion_completed(self, success_count: int):
+        """Handle conversion completion"""
+        self.conversion_progress.setVisible(False)
+        self.cancel_button.setVisible(False)
+
+        # Clean up conversion worker
+        if self.conversion_worker:
+            self.conversion_worker.deleteLater()
+            self.conversion_worker = None
+
+        # Force memory cleanup
+        import gc
+
+        gc.collect()
+
+        output_folder = self.output_edit.text()
+        if not output_folder:
+            output_folder = os.path.join(self.folder_edit.text(), "converted")
+
+        if success_count > 0:
+            self.status_label.setText(
+                f"Successfully converted {success_count} files to {output_folder}"
+            )
+        else:
+            self.status_label.setText("No files were converted")
+
+
+@magicgui(call_button="Start Microscopy Image Converter", layout="vertical")
 def microscopy_converter(viewer: napari.Viewer):
-    """
-    Start the microscopy image converter tool
-    """
-    # Create the converter widget
+    """Start the enhanced microscopy image converter tool"""
     converter_widget = MicroscopyImageConverterWidget(viewer)
-
-    # Add to viewer
     viewer.window.add_dock_widget(
         converter_widget, name="Microscopy Image Converter", area="right"
     )
-
     return converter_widget
 
 
-# This is what napari calls to get the widget
 def napari_experimental_provide_dock_widget():
     """Provide the converter widget to Napari"""
     return microscopy_converter
