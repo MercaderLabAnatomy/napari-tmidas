@@ -26,7 +26,7 @@ from dask.diagnostics import ProgressBar
 from magicgui import magicgui
 from ome_zarr.io import parse_url
 from ome_zarr.writer import write_image
-from pylibCZIrw import czi
+from pylibCZIrw import czi as pyczi
 from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
     QApplication,
@@ -1028,92 +1028,320 @@ class TIFFSlideLoader(FormatLoader):
 
 
 class CZILoader(FormatLoader):
-    """Loader for Zeiss CZI files"""
+    """
+    Loader for Zeiss CZI files using pylibCZIrw API
+
+    """
 
     @staticmethod
     def can_load(filepath: str) -> bool:
-        return filepath.lower().endswith(".czi")
+        if not filepath.lower().endswith(".czi"):
+            return False
+
+        # Test if we can actually open the file
+        try:
+            with pyczi.open_czi(filepath) as czidoc:
+                # Try to get basic info to validate the file
+                _ = czidoc.total_bounding_box
+                return True
+        except (
+            OSError,
+            ImportError,
+            ValueError,
+            AttributeError,
+            RuntimeError,
+        ) as e:
+            print(f"Cannot load CZI file {filepath}: {e}")
+            return False
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
+        """
+        Get number of series in CZI file
+
+        For CZI files:
+        - If scenes exist, each scene is a series
+        - If no scenes, there's 1 series (the whole image)
+        """
         try:
-            with czi.open_czi(filepath) as czi_file:
-                return len(czi_file.scenes_bounding_rectangle)
-        except (OSError, ImportError, ValueError, AttributeError):
+            with pyczi.open_czi(filepath) as czidoc:
+                scenes_bbox = czidoc.scenes_bounding_rectangle
+
+                if scenes_bbox:
+                    # File has scenes - each scene is a series
+                    scene_count = len(scenes_bbox)
+                    print(f"CZI file has {scene_count} scenes")
+                    return scene_count
+                else:
+                    # No scenes - single series
+                    print("CZI file has no scenes - treating as single series")
+                    return 1
+
+        except (
+            OSError,
+            ImportError,
+            ValueError,
+            AttributeError,
+            RuntimeError,
+        ) as e:
+            print(f"Error getting series count for {filepath}: {e}")
             return 0
 
     @staticmethod
-    def load_series(filepath: str, series_index: int) -> np.ndarray:
+    def load_series(
+        filepath: str, series_index: int
+    ) -> Union[np.ndarray, da.Array]:
+        """
+        Load a specific series from CZI file using correct pylibCZIrw API
+        """
         try:
-            with czi.open_czi(filepath) as czi_file:
-                scenes = czi_file.scenes_bounding_rectangle
+            print(f"Loading CZI series {series_index} from {filepath}")
 
-                if series_index >= len(scenes):
-                    raise SeriesIndexError(
-                        f"Scene index {series_index} out of range"
+            with pyczi.open_czi(filepath) as czidoc:
+                # Get file information
+                total_bbox = czidoc.total_bounding_box
+                scenes_bbox = czidoc.scenes_bounding_rectangle
+
+                print(f"Total bounding box: {total_bbox}")
+                print(f"Scenes: {len(scenes_bbox) if scenes_bbox else 0}")
+
+                # Determine if we're dealing with scenes or single image
+                if scenes_bbox:
+                    # Multi-scene file
+                    scene_indices = list(scenes_bbox.keys())
+                    if series_index >= len(scene_indices):
+                        raise SeriesIndexError(
+                            f"Scene index {series_index} out of range (0-{len(scene_indices)-1})"
+                        )
+
+                    # Get the actual scene ID (may not be sequential 0,1,2...)
+                    scene_id = scene_indices[series_index]
+                    print(f"Loading scene ID: {scene_id}")
+
+                    # Read the specific scene
+                    # The scene parameter in read() expects the actual scene ID
+                    image_data = czidoc.read(scene=scene_id)
+
+                else:
+                    # Single scene file
+                    if series_index != 0:
+                        raise SeriesIndexError(
+                            f"Single scene file only supports series index 0, got {series_index}"
+                        )
+
+                    print("Loading single scene CZI")
+                    # Read without specifying scene
+                    image_data = czidoc.read()
+
+                print(
+                    f"Raw CZI data shape: {image_data.shape}, dtype: {image_data.dtype}"
+                )
+
+                # Simply squeeze out all singleton dimensions
+                if hasattr(image_data, "dask"):
+                    image_data = da.squeeze(image_data)
+                else:
+                    image_data = np.squeeze(image_data)
+
+                print(f"Final CZI data shape: {image_data.shape}")
+
+                # Check if we need to use Dask for large arrays
+                size_gb = (
+                    image_data.nbytes
+                    if hasattr(image_data, "nbytes")
+                    else np.prod(image_data.shape) * 4
+                ) / (1024**3)
+
+                if size_gb > 2.0 and not hasattr(image_data, "dask"):
+                    print(
+                        f"Large CZI data ({size_gb:.2f}GB), converting to Dask array"
                     )
+                    return da.from_array(image_data, chunks="auto")
+                else:
+                    return image_data
 
-                scene_keys = list(scenes.keys())
-                scene_index = scene_keys[series_index]
-                return czi_file.read(scene=scene_index)
-
-        except (OSError, ImportError, AttributeError, ValueError) as e:
+        except (
+            OSError,
+            ImportError,
+            AttributeError,
+            ValueError,
+            RuntimeError,
+        ) as e:
             raise FileFormatError(
                 f"Failed to load CZI series {series_index}: {str(e)}"
             ) from e
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
+        """Extract metadata using correct pylibCZIrw API"""
         try:
-            with czi.open_czi(filepath) as czi_file:
-                scenes = czi_file.scenes_bounding_rectangle
-                if series_index >= len(scenes):
-                    return {}
+            with pyczi.open_czi(filepath) as czidoc:
+                scenes_bbox = czidoc.scenes_bounding_rectangle
+                total_bbox = czidoc.total_bounding_box
 
-                dims = czi_file.total_bounding_box
-                metadata_xml = czi_file.raw_metadata
+                # Validate series index
+                if scenes_bbox:
+                    if series_index >= len(scenes_bbox):
+                        return {}
+                    scene_indices = list(scenes_bbox.keys())
+                    scene_id = scene_indices[series_index]
+                    print(f"Getting metadata for scene {scene_id}")
+                else:
+                    if series_index != 0:
+                        return {}
+                    scene_id = None
+                    print("Getting metadata for single scene CZI")
 
-                # Extract scales
+                # Get basic metadata
+                metadata = {}
+
                 try:
-                    scale_x = CZILoader._get_scales(metadata_xml, "X")
-                    scale_y = CZILoader._get_scales(metadata_xml, "Y")
+                    # Get raw metadata XML
+                    raw_metadata = czidoc.metadata
+                    if raw_metadata:
+                        # Extract scale information from XML metadata
+                        scale_x = CZILoader._extract_scale_from_xml(
+                            raw_metadata, "X"
+                        )
+                        scale_y = CZILoader._extract_scale_from_xml(
+                            raw_metadata, "Y"
+                        )
+                        scale_z = CZILoader._extract_scale_from_xml(
+                            raw_metadata, "Z"
+                        )
 
-                    filtered_dims = {
-                        k: v for k, v in dims.items() if v != (0, 1)
-                    }
-                    axes = "".join(filtered_dims.keys())
-
-                    metadata = {
-                        "axes": axes,
-                        "resolution": (scale_x, scale_y),
-                        "unit": "um",
-                    }
-
-                    if dims.get("Z") != (0, 1):
-                        scale_z = CZILoader._get_scales(metadata_xml, "Z")
+                        if scale_x and scale_y:
+                            metadata["resolution"] = (scale_x, scale_y)
                         if scale_z:
                             metadata["spacing"] = scale_z
 
-                    return metadata
-                except (ValueError, TypeError, AttributeError):
-                    return {"axes": "YX"}
-        except (OSError, ImportError, AttributeError):
+                except (AttributeError, RuntimeError):
+                    print(
+                        "Warning: Could not extract scale information from metadata"
+                    )
+
+                # Get actual data to determine final dimensions after squeezing
+                try:
+                    if scenes_bbox:
+                        scene_indices = list(scenes_bbox.keys())
+                        scene_id = scene_indices[series_index]
+                        sample_data = czidoc.read(scene=scene_id)
+                    else:
+                        sample_data = czidoc.read()
+
+                    # Squeeze to match what load_series() returns
+                    if hasattr(sample_data, "dask"):
+                        sample_data = da.squeeze(sample_data)
+                    else:
+                        sample_data = np.squeeze(sample_data)
+
+                    actual_shape = sample_data.shape
+                    actual_ndim = len(actual_shape)
+                    print(
+                        f"Actual squeezed shape for metadata: {actual_shape}"
+                    )
+
+                    # Create axes based on actual squeezed dimensions
+                    if actual_ndim == 2:
+                        axes = "YX"
+                    elif actual_ndim == 3:
+                        # Check which dimension survived the squeeze
+                        unsqueezed_dims = []
+                        for dim, (_start, size) in total_bbox.items():
+                            if size > 1 and dim in ["T", "Z", "C"]:
+                                unsqueezed_dims.append(dim)
+
+                        if unsqueezed_dims:
+                            axes = f"{unsqueezed_dims[0]}YX"  # First non-singleton dim + YX
+                        else:
+                            axes = "ZYX"  # Default fallback
+                    elif actual_ndim == 4:
+                        axes = "TCYX"  # Most common 4D case
+                    elif actual_ndim == 5:
+                        axes = "TZCYX"
+                    else:
+                        # Fallback: just use YX and pad with standard dims
+                        standard_dims = ["T", "Z", "C"]
+                        axes = "".join(standard_dims[: actual_ndim - 2]) + "YX"
+
+                    # Ensure axes length matches actual dimensions
+                    axes = axes[:actual_ndim]
+
+                    print(
+                        f"Final axes for squeezed data: '{axes}' (length: {len(axes)})"
+                    )
+
+                except (AttributeError, RuntimeError) as e:
+                    print(f"Could not get sample data for metadata: {e}")
+                    # Fallback to original logic
+                    filtered_dims = {}
+                    for dim, (_start, size) in total_bbox.items():
+                        if size > 1:  # Only include dimensions with size > 1
+                            filtered_dims[dim] = size
+
+                    # Standard microscopy axis order: TZCYX
+                    axis_order = "TZCYX"
+                    axes = "".join(
+                        [ax for ax in axis_order if ax in filtered_dims]
+                    )
+
+                    # Fallback to YX if no significant dimensions found
+                    if not axes:
+                        axes = "YX"
+
+                metadata.update(
+                    {
+                        "axes": axes,
+                        "unit": "um",
+                        "total_bounding_box": total_bbox,
+                        "has_scenes": bool(scenes_bbox),
+                        "scene_count": len(scenes_bbox) if scenes_bbox else 1,
+                    }
+                )
+
+                # Add scene-specific info if applicable
+                if scene_id is not None:
+                    metadata["scene_id"] = scene_id
+
+                return metadata
+
+        except (OSError, ImportError, AttributeError, RuntimeError) as e:
+            print(f"Warning: Could not extract metadata from {filepath}: {e}")
             return {}
 
     @staticmethod
-    def _get_scales(metadata_xml, dim):
-        """Extract scale information from CZI metadata"""
+    def _extract_scale_from_xml(metadata_xml: str, dimension: str) -> float:
+        """
+        Extract scale information from CZI XML metadata
+
+        This looks for Distance elements with the specified dimension ID
+        """
         try:
+            # Pattern to find Distance elements with specific dimension
             pattern = re.compile(
-                r'<Distance[^>]*Id="'
-                + re.escape(dim)
-                + r'"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
-                re.DOTALL,
+                rf'<Distance[^>]*Id="{re.escape(dimension)}"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
+                re.DOTALL | re.IGNORECASE,
             )
+
             match = pattern.search(metadata_xml)
             if match:
-                return float(match.group(1)) * 1e6  # Convert to microns
-            return 1.0
+                value = float(match.group(1))
+                # CZI typically stores in meters, convert to micrometers
+                return value * 1e6
+
+            # Alternative pattern for older CZI format
+            pattern2 = re.compile(
+                rf'<Scaling>.*?<Items>.*?<Distance.*?Id="{re.escape(dimension)}".*?>.*?<Value>(.*?)</Value>',
+                re.DOTALL | re.IGNORECASE,
+            )
+
+            match2 = pattern2.search(metadata_xml)
+            if match2:
+                value = float(match2.group(1))
+                return value * 1e6
+
+            return 1.0  # Default fallback
+
         except (ValueError, TypeError, AttributeError):
             return 1.0
 
