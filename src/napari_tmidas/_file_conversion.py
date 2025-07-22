@@ -11,6 +11,7 @@ import concurrent.futures
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -200,8 +201,6 @@ class SeriesDetailWidget(QWidget):
 
                 # Set info text
                 if series_count > 0:
-                    # metadata = file_loader.get_metadata(filepath, 0)
-
                     # Estimate file size and set appropriate format radio button
                     file_type = self.parent.get_file_type(filepath)
                     if file_type == "ND2":
@@ -254,11 +253,6 @@ class SeriesDetailWidget(QWidget):
             file_loader = self.parent.get_file_loader(self.current_file)
             if file_loader:
                 try:
-                    # Estimate file size based on metadata
-                    # metadata = file_loader.get_metadata(
-                    #    self.current_file, series_index
-                    # )
-
                     # For ND2 files, we can directly check the size
                     if self.parent.get_file_type(self.current_file) == "ND2":
                         with nd2.ND2File(self.current_file) as nd2_file:
@@ -326,16 +320,7 @@ class SeriesDetailWidget(QWidget):
                 )
 
     def _reorder_dimensions(self, image_data, metadata, target_order="YXZTC"):
-        """Reorder dimensions based on metadata axes information
-
-        Args:
-            image_data: The numpy or dask array to reorder
-            metadata: Metadata dictionary containing axes information
-            target_order: Target dimension order (e.g., "YXZTC")
-
-        Returns:
-            Reordered array
-        """
+        """Reorder dimensions based on metadata axes information"""
         # Early exit if no metadata or no axes information
         if not metadata or "axes" not in metadata:
             print("No axes information in metadata - returning original")
@@ -478,9 +463,6 @@ class LIFLoader(FormatLoader):
                 axes += "C"
 
             metadata = {
-                # "channels": image.channels,
-                # "z_stacks": image.nz,
-                # "timepoints": image.nt,
                 "axes": "TZCYX",
                 "unit": "um",
                 "resolution": image.scale[:2],
@@ -714,9 +696,7 @@ class TIFFSlideLoader(FormatLoader):
 
 
 class CZILoader(FormatLoader):
-    """Loader for Zeiss CZI files
-    https://github.com/ZEISS/pylibczirw
-    """
+    """Loader for Zeiss CZI files"""
 
     @staticmethod
     def can_load(filepath: str) -> bool:
@@ -745,12 +725,11 @@ class CZILoader(FormatLoader):
                 scene_keys = list(scenes.keys())
                 scene_index = scene_keys[series_index]
 
-                # You might need to specify pixel_type if automatic detection fails
                 image = czi_file.read(scene=scene_index)
                 return image
         except (ValueError, FileNotFoundError) as e:
             print(f"Error loading series: {e}")
-            raise  # Re-raise the exception after logging
+            raise
 
     @staticmethod
     def get_scales(metadata_xml, dim):
@@ -768,7 +747,7 @@ class CZILoader(FormatLoader):
             scale = scale * 1e6
             return scale
         else:
-            return None  # Fixed: return a single None value instead of (None, None, None)
+            return None
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
@@ -778,10 +757,6 @@ class CZILoader(FormatLoader):
 
                 if series_index < 0 or series_index >= len(scenes):
                     return {}
-
-                # scene_keys = list(scenes.keys())
-                # scene_index = scene_keys[series_index]
-                # scene = scenes[scene_index]
 
                 dims = czi_file.total_bounding_box
 
@@ -816,32 +791,6 @@ class CZILoader(FormatLoader):
             print(f"Error getting metadata: {e}")
             return {}
 
-    @staticmethod
-    def get_physical_pixel_size(
-        filepath: str, series_index: int
-    ) -> Dict[str, float]:
-        try:
-            with czi.open_czi(filepath) as czi_file:
-                scenes = czi_file.scenes_bounding_rectangle
-
-                if series_index < 0 or series_index >= len(scenes):
-                    raise ValueError(
-                        f"Scene index {series_index} out of range"
-                    )
-
-                # scene_keys = list(scenes.keys())
-                # scene_index = scene_keys[series_index]
-
-                # Get scale information
-                scale_x = czi_file.scale_x
-                scale_y = czi_file.scale_y
-                scale_z = czi_file.scale_z
-
-                return {"X": scale_x, "Y": scale_y, "Z": scale_z}
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error getting pixel size: {str(e)}")
-            return {}
-
 
 class AcquiferLoader(FormatLoader):
     """Loader for Acquifer datasets using the acquifer_napari_plugin utility"""
@@ -851,14 +800,11 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def can_load(filepath: str) -> bool:
-        """
-        Check if this is a directory that can be loaded as an Acquifer dataset
-        """
+        """Check if this is a directory that can be loaded as an Acquifer dataset"""
         if not os.path.isdir(filepath):
             return False
 
         try:
-
             # Check if directory contains files
             image_files = []
             for root, _, files in os.walk(filepath):
@@ -905,9 +851,7 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
-        """
-        Return the number of wells as series count
-        """
+        """Return the number of wells as series count"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
@@ -923,9 +867,7 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
-        """
-        Load a specific well as a series
-        """
+        """Load a specific well as a series"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
@@ -960,9 +902,7 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
-        """
-        Extract metadata for a specific well
-        """
+        """Extract metadata for a specific well"""
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
@@ -993,7 +933,7 @@ class AcquiferLoader(FormatLoader):
                 if image_files:
                     sample_file = image_files[0]
                     try:
-                        # acquifer_metadata.getPixelSize_um(sample_file) is deprecated, get values after --PX in filename
+                        # Get values after --PX in filename
                         pattern = re.compile(r"--PX(\d+)")
                         match = pattern.search(sample_file)
                         if match:
@@ -1141,26 +1081,8 @@ class ConversionWorker(QThread):
                 # Generate output filename
                 base_name = Path(filepath).stem
 
-                # Determine format based on size and settings
-                estimated_size_bytes = (
-                    np.prod(image_data.shape) * image_data.itemsize
-                )
-                file_size_GB = estimated_size_bytes / (1024**3)
-
                 # Determine format
                 use_zarr = self.use_zarr
-                # If file is very large (>4GB) and user didn't explicitly choose TIF,
-                # auto-switch to ZARR format
-                if file_size_GB > 4 and not self.use_zarr:
-                    # Recommend ZARR format but respect user's choice by still allowing TIF
-                    print(
-                        f"File size ({file_size_GB:.2f}GB) exceeds 4GB, ZARR format is recommended but using TIF with BigTIFF format"
-                    )
-                    self.file_done.emit(
-                        filepath,
-                        True,
-                        f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using TIF with BigTIFF format",
-                    )
 
                 # Set up the output path
                 if use_zarr:
@@ -1215,7 +1137,7 @@ class ConversionWorker(QThread):
     def _save_tif(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Enhanced TIF saving with proper dimension handling and BigTIFF support"""
+        """Enhanced TIF saving with memory-efficient options for large files"""
         import tifffile
 
         print(f"Saving TIF file: {output_path}")
@@ -1224,160 +1146,311 @@ class ConversionWorker(QThread):
         # Check if this is a large file that needs BigTIFF
         estimated_size_bytes = np.prod(image_data.shape) * image_data.itemsize
         file_size_GB = estimated_size_bytes / (1024**3)
-        use_bigtiff = file_size_GB > 4
 
-        if use_bigtiff:
-            print(
-                f"File size ({file_size_GB:.2f}GB) exceeds 4GB, using BigTIFF format"
-            )
+        print(f"Estimated file size: {file_size_GB:.2f}GB")
+
+        # Choose saving strategy based on file size and data type
+        if file_size_GB > 4:  # Use memory-efficient methods for large files
+            try:
+                print("Using memory-efficient saving for large file")
+                return self._save_tif_memory_efficient(
+                    image_data, output_path, metadata
+                )
+            except (ValueError, OSError, RuntimeError) as e:
+                print(f"Memory-efficient saving failed: {e}")
+                print("Falling back to standard method...")
+
+        # Standard method for smaller files
+        use_bigtiff = file_size_GB > 4
 
         if metadata:
             print(f"Metadata keys: {list(metadata.keys())}")
-            if "axes" in metadata:
-                print(f"Original axes: {metadata['axes']}")
 
-        # Handle Dask arrays
+        # Handle Dask arrays for smaller files
         if hasattr(image_data, "compute"):
-            print("Computing Dask array before saving")
-            # For large arrays, compute block by block
-            try:
-                # Convert to numpy array in memory
-                image_data = image_data.compute()
-            except (MemoryError, ValueError) as e:
-                print(f"Error computing dask array: {e}")
-                # Alternative: write block by block
-                # This would require custom implementation
-                raise
+            if file_size_GB > 16:  # Still too large even for standard method
+                raise ValueError(
+                    f"File size ({file_size_GB:.2f}GB) too large for TIF format. Use ZARR instead."
+                )
 
-        # Basic save if no metadata
-        if metadata is None:
-            print("No metadata provided, using basic save")
+            print("Computing Dask array for standard save")
+            try:
+                image_data = image_data.compute()
+            except MemoryError as e:
+                raise ValueError(
+                    "Not enough memory to save as TIF. Use ZARR format instead."
+                ) from e
+
+        # Simple save with minimal metadata for compatibility
+        try:
+            imagej_kwargs = {}
+
+            # Only add ImageJ metadata for multi-dimensional arrays
+            if len(image_data.shape) > 2:
+                imagej_kwargs["imagej"] = True
+
+            # Add resolution if available
+            if metadata and "resolution" in metadata:
+                try:
+                    res_x, res_y = metadata["resolution"]
+                    imagej_kwargs["resolution"] = (float(res_x), float(res_y))
+                except (ValueError, TypeError):
+                    pass
+
             tifffile.imwrite(
                 output_path,
                 image_data,
-                compression="zlib",
                 bigtiff=use_bigtiff,
+                compression="zlib",
+                **imagej_kwargs,
             )
-            return
-
-        # Get image dimensions and axis order
-        ndim = len(image_data.shape)
-        axes = metadata.get("axes", "")
-
-        print(f"Number of dimensions: {ndim}")
-        if axes:
-            print(f"Axes from metadata: {axes}")
-
-        # Handle ImageJ compatibility for dimensions
-        if ndim > 2:
-            # Get target order for ImageJ
-            imagej_order = "TZCYX"
-
-            # If axes information is incomplete, try to infer from shape
-            if len(axes) != ndim:
-                print(
-                    f"Warning: Axes length ({len(axes)}) doesn't match dimensions ({ndim})"
-                )
-                # For your specific case with shape (45, 101, 4, 1024, 1024)
-                # Infer TZCYX if shape matches
-                if (
-                    ndim == 5
-                    and image_data.shape[2] <= 10
-                    and image_data.shape[3] > 100
-                    and image_data.shape[4] > 100
-                ):
-                    print("Inferring TZCYX from shape")
-                    axes = "TZCYX"
-
-            if axes and axes != imagej_order:
-                print(f"Reordering: {axes} -> {imagej_order}")
-
-                # Map dimensions from original to target order
-                dim_map = {}
-                for i, ax in enumerate(axes):
-                    if ax in imagej_order:
-                        dim_map[ax] = i
-
-                # Handle missing dimensions
-                for ax in imagej_order:
-                    if ax not in dim_map:
-                        print(f"Adding missing dimension: {ax}")
-                        image_data = np.expand_dims(image_data, axis=0)
-                        dim_map[ax] = image_data.shape[0] - 1
-
-                # Create reordering indices
-                source_idx = [dim_map[ax] for ax in imagej_order]
-                target_idx = list(range(len(imagej_order)))
-
-                print(f"Reordering dimensions: {source_idx} -> {target_idx}")
-
-                # Reorder dimensions
-                try:
-                    image_data = np.moveaxis(
-                        image_data, source_idx, target_idx
-                    )
-                except (ValueError, IndexError) as e:
-                    print(f"Error reordering dimensions: {e}")
-                    # Fall back to simple save without reordering
-                    tifffile.imwrite(
-                        output_path,
-                        image_data,
-                        compression="zlib",
-                        bigtiff=use_bigtiff,
-                    )
-                    return
-
-                # Update axes information
-                metadata["axes"] = imagej_order
-
-        # Extract resolution information for ImageJ
-        resolution = None
-        if "resolution" in metadata:
-            try:
-                res_x, res_y = metadata["resolution"]
-                resolution = (float(res_x), float(res_y))
-                print(f"Using resolution: {resolution}")
-            except (ValueError, TypeError) as e:
-                print(f"Error processing resolution: {e}")
-
-        # Handle saving with metadata
-        try:
-            if ndim <= 2:
-                # 2D case - simpler saving
-                print("Saving as 2D image")
-                tifffile.imwrite(
-                    output_path,
-                    image_data,
-                    resolution=resolution,
-                    compression="zlib",
-                    bigtiff=use_bigtiff,
-                )
-            else:
-                # Hyperstack case
-                print("Saving as hyperstack with ImageJ metadata")
-
-                # Create clean metadata dict with only needed keys
-                imagej_metadata = {}
-                if "unit" in metadata:
-                    imagej_metadata["unit"] = metadata["unit"]
-                if "spacing" in metadata:
-                    imagej_metadata["spacing"] = float(metadata["spacing"])
-
-                tifffile.imwrite(
-                    output_path,
-                    image_data,
-                    imagej=True,
-                    resolution=resolution,
-                    metadata=imagej_metadata,
-                    compression="zlib",
-                    bigtiff=use_bigtiff,
-                )
 
             print(f"Successfully saved TIF file: {output_path}")
-        except (ValueError, FileNotFoundError) as e:
+
+        except (ValueError, OSError, RuntimeError) as e:
             print(f"Error saving TIF file: {e}")
-            # Try simple save as fallback
+            # Final fallback - basic save without metadata
             tifffile.imwrite(output_path, image_data, bigtiff=use_bigtiff)
+            print("Saved with basic fallback method")
+
+    def _save_tif_memory_efficient(
+        self, image_data: np.ndarray, output_path: str, metadata: dict = None
+    ):
+        """Memory-efficient TIF saving using chunked writing for large files"""
+
+        print(f"Saving TIF file (memory-efficient): {output_path}")
+        print(f"Image data shape: {image_data.shape}")
+
+        # Check file size
+        estimated_size_bytes = np.prod(image_data.shape) * image_data.itemsize
+        file_size_GB = estimated_size_bytes / (1024**3)
+        use_bigtiff = file_size_GB > 4
+
+        print(
+            f"Estimated file size: {file_size_GB:.2f}GB, using BigTIFF: {use_bigtiff}"
+        )
+
+        # For Dask arrays, we can write chunks directly without computing the whole array
+        if hasattr(image_data, "dask") and hasattr(image_data, "chunks"):
+            return self._save_dask_tif_chunked(
+                image_data, output_path, metadata, use_bigtiff
+            )
+
+        # For regular numpy arrays that are large, use memory mapping
+        if file_size_GB > 8:  # Use memory mapping for very large files
+            return self._save_numpy_tif_memmap(
+                image_data, output_path, metadata, use_bigtiff
+            )
+
+        # For smaller files or if chunked methods fail, fall back to standard method
+        return self._save_tif_standard(
+            image_data, output_path, metadata, use_bigtiff
+        )
+
+    def _save_dask_tif_chunked(
+        self, dask_array, output_path: str, metadata: dict, use_bigtiff: bool
+    ):
+        """Save Dask array to TIF using chunked writing"""
+        import tifffile
+
+        print("Using Dask chunked writing strategy")
+
+        try:
+            # Method 1: Use tifffile's built-in support for dask arrays (if available)
+            try:
+                # Recent versions of tifffile can handle dask arrays directly
+                tifffile.imwrite(
+                    output_path,
+                    dask_array,
+                    bigtiff=use_bigtiff,
+                    compression="zlib",
+                )
+                print("Successfully saved using tifffile's dask support")
+                return True
+            except (TypeError, AttributeError):
+                # Fallback to manual chunked writing
+                pass
+
+            # Method 2: Manual chunked writing
+            print("Using manual chunked writing")
+
+            # Determine chunk strategy based on array dimensions
+            shape = dask_array.shape
+            chunks = dask_array.chunks
+
+            print(f"Dask chunks: {chunks}")
+
+            # For 5D data (T,Z,C,Y,X), write one timepoint at a time
+            if len(shape) == 5:
+                return self._write_5d_chunked(
+                    dask_array, output_path, use_bigtiff
+                )
+            # For 4D data, write in Z-slices or timepoints
+            elif len(shape) == 4:
+                return self._write_4d_chunked(
+                    dask_array, output_path, use_bigtiff
+                )
+            else:
+                # For other dimensions, compute in memory (should be smaller)
+                computed_array = dask_array.compute()
+                return self._save_tif_standard(
+                    computed_array, output_path, {}, use_bigtiff
+                )
+
+        except (ValueError, OSError, RuntimeError) as e:
+            print(f"Chunked writing failed: {e}")
+            # Final fallback - compute smaller chunks
+            try:
+                # Rechunk to smaller pieces and compute
+                rechunked = dask_array.rechunk(
+                    (1, -1, -1, -1, -1)
+                )  # One timepoint at a time
+                computed = rechunked.compute()
+                return self._save_tif_standard(
+                    computed, output_path, {}, use_bigtiff
+                )
+            except MemoryError as e:
+                print(
+                    "Cannot save this file as TIF - too large for available memory"
+                )
+                raise ValueError(
+                    "File too large for TIF format - use ZARR instead"
+                ) from e
+
+    def _write_5d_chunked(
+        self, dask_array, output_path: str, use_bigtiff: bool
+    ):
+        """Write 5D array (T,Z,C,Y,X) one timepoint at a time"""
+        import tifffile
+
+        shape = dask_array.shape
+        T, Z, C, Y, X = shape
+
+        print(f"Writing 5D array {shape} one timepoint at a time")
+
+        # Create the TIF file and write timepoints sequentially
+        with tifffile.TiffWriter(output_path, bigtiff=use_bigtiff) as tif:
+            for t in range(T):
+                print(f"Writing timepoint {t+1}/{T}")
+
+                # Extract one timepoint (this should fit in memory)
+                timepoint_data = dask_array[t].compute()  # Shape: (Z,C,Y,X)
+
+                # Write this timepoint
+                tif.write(
+                    timepoint_data,
+                    compression="zlib",
+                )
+
+        print(f"Successfully wrote {T} timepoints to {output_path}")
+        return True
+
+    def _write_4d_chunked(
+        self, dask_array, output_path: str, use_bigtiff: bool
+    ):
+        """Write 4D array in chunks"""
+        import tifffile
+
+        shape = dask_array.shape
+        print(f"Writing 4D array {shape} in chunks")
+
+        # For 4D, assume first dimension can be chunked
+        with tifffile.TiffWriter(output_path, bigtiff=use_bigtiff) as tif:
+            for i in range(shape[0]):
+                print(f"Writing slice {i+1}/{shape[0]}")
+
+                # Extract one slice
+                slice_data = dask_array[i].compute()
+
+                tif.write(slice_data, compression="zlib")
+
+        return True
+
+    def _save_numpy_tif_memmap(
+        self, numpy_array, output_path: str, metadata: dict, use_bigtiff: bool
+    ):
+        """Save large numpy array using memory mapping"""
+        import tifffile
+
+        print("Using memory mapping strategy for large numpy array")
+
+        try:
+            # Create a temporary memory-mapped array
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_path = temp_file.name
+
+            # Create memory-mapped copy
+            memmap_array = np.memmap(
+                temp_path,
+                dtype=numpy_array.dtype,
+                mode="w+",
+                shape=numpy_array.shape,
+            )
+
+            # Copy data in chunks
+            chunk_size = 1024 * 1024 * 100  # 100MB chunks
+            flat_array = numpy_array.flat
+            flat_memmap = memmap_array.flat
+
+            total_elements = numpy_array.size
+            for i in range(0, total_elements, chunk_size):
+                end_idx = min(i + chunk_size, total_elements)
+                flat_memmap[i:end_idx] = flat_array[i:end_idx]
+
+                if i % (chunk_size * 10) == 0:  # Progress every 1GB
+                    progress = (i / total_elements) * 100
+                    print(f"Copying to memory map: {progress:.1f}%")
+
+            # Now save from memory map
+            tifffile.imwrite(
+                output_path,
+                memmap_array,
+                bigtiff=use_bigtiff,
+                compression="zlib",
+            )
+
+            # Clean up temp file
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)
+
+            print("Successfully saved using memory mapping")
+            return True
+
+        except Exception as e:
+            print(f"Memory mapping failed: {e}")
+            raise
+
+    def _save_tif_standard(
+        self, image_data, output_path: str, metadata: dict, use_bigtiff: bool
+    ):
+        """Standard TIF saving method (fallback)"""
+        import tifffile
+
+        print("Using standard TIF saving")
+
+        # Simple metadata handling
+        imagej_kwargs = {}
+        if len(image_data.shape) > 2:
+            imagej_kwargs["imagej"] = True
+
+        if metadata and "resolution" in metadata:
+            try:
+                res_x, res_y = metadata["resolution"]
+                imagej_kwargs["resolution"] = (float(res_x), float(res_y))
+            except (ValueError, TypeError):
+                pass
+
+        tifffile.imwrite(
+            output_path,
+            image_data,
+            bigtiff=use_bigtiff,
+            compression="zlib",
+            **imagej_kwargs,
+        )
+
+        return True
 
     def _save_zarr(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
@@ -1420,7 +1493,6 @@ class ConversionWorker(QThread):
                     print(f"Successfully reordered to: {axes}")
             except (ValueError, IndexError) as e:
                 print(f"Reordering failed, using original order: {e}")
-                # Keep original axes
 
         # Convert to Dask array and save
         if not hasattr(image_data, "dask"):
@@ -1527,9 +1599,9 @@ class MicroscopyImageConverterWidget(QWidget):
         # Output format selection
         format_layout = QHBoxLayout()
         format_label = QLabel("Output Format:")
-        self.tif_radio = QCheckBox("TIF (< 4GB)")
+        self.tif_radio = QCheckBox("TIF (Memory-efficient for large files)")
         self.tif_radio.setChecked(True)
-        self.zarr_radio = QCheckBox("ZARR (> 4GB)")
+        self.zarr_radio = QCheckBox("ZARR (Recommended for >4GB)")
 
         # Make checkboxes mutually exclusive like radio buttons
         self.tif_radio.toggled.connect(self.handle_format_toggle)
@@ -1565,7 +1637,7 @@ class MicroscopyImageConverterWidget(QWidget):
         convert_button = QPushButton("Convert Selected Files")
         convert_button.clicked.connect(self.convert_files)
 
-        # NEW: Add Convert All Files button
+        # Add Convert All Files button
         convert_all_button = QPushButton("Convert All Files")
         convert_all_button.clicked.connect(self.convert_all_files)
 
@@ -1574,7 +1646,7 @@ class MicroscopyImageConverterWidget(QWidget):
         self.cancel_button.setVisible(False)
 
         button_layout.addWidget(convert_button)
-        button_layout.addWidget(convert_all_button)  # NEW
+        button_layout.addWidget(convert_all_button)
         button_layout.addWidget(self.cancel_button)
         main_layout.addLayout(button_layout)
 
@@ -1788,66 +1860,90 @@ class MicroscopyImageConverterWidget(QWidget):
 
         return True
 
+    def validate_format_selection(self):
+        """Validate format selection against file sizes"""
+        if not self.selected_series:
+            return True
+
+        large_files = []
+        for filepath in self.selected_series:
+            try:
+                file_type = self.get_file_type(filepath)
+                if file_type == "ND2":
+                    with nd2.ND2File(filepath) as nd2_file:
+                        dims = dict(nd2_file.sizes)
+                        pixel_size = nd2_file.dtype.itemsize
+                        total_elements = np.prod([dims[dim] for dim in dims])
+                        size_GB = (total_elements * pixel_size) / (1024**3)
+
+                        if size_GB > 10 and self.tif_radio.isChecked():
+                            large_files.append((Path(filepath).name, size_GB))
+            except (ValueError, FileNotFoundError, OSError):
+                continue
+
+        if large_files:
+            file_list = "\n".join(
+                [f"- {name}: {size:.1f}GB" for name, size in large_files]
+            )
+            reply = QMessageBox.question(
+                self,
+                "Large Files Detected",
+                f"The following files are very large and may cause memory issues with TIF format:\n\n{file_list}\n\nRecommend using ZARR format instead. Continue with TIF?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return reply == QMessageBox.Yes
+
+        return True
+
     def convert_files(self):
         """Convert selected files to TIF or ZARR"""
 
-        # NEW: Add option to convert all files
+        # Validate format selection first
+        if not self.validate_format_selection():
+            return
+
+        # If no specific series selected, convert all files with series 0
         if not self.selected_series:
-            # If no specific series selected, convert all files with series 0
             all_files = list(self.files_table.file_data.keys())
             if not all_files:
                 self.status_label.setText("No files available for conversion")
                 return
 
-            # Set default series 0 for all files
             for filepath in all_files:
                 self.selected_series[filepath] = 0
-
-            self.status_label.setText(
-                f"Converting all {len(all_files)} files with default series"
-            )
 
         # Check output folder
         output_folder = self.output_edit.text()
         if not output_folder:
             output_folder = os.path.join(self.folder_edit.text(), "converted")
 
-        # Validate output folder
         if not self.is_output_folder_valid(output_folder):
             return
 
-        # Rest of the method remains the same...
+        # Build conversion list
         files_to_convert = []
-
         for filepath, series_index in self.selected_series.items():
-            # Check if we should export all series for this file
             if self.export_all_series.get(filepath, False):
-                # Get the number of series for this file
                 loader = self.get_file_loader(filepath)
                 if loader:
                     try:
                         series_count = loader.get_series_count(filepath)
-                        # Add all series for this file
                         for i in range(series_count):
                             files_to_convert.append((filepath, i))
-                    except (ValueError, FileNotFoundError) as e:
+                    except (ValueError, FileNotFoundError, OSError) as e:
                         self.status_label.setText(
                             f"Error getting series count: {str(e)}"
                         )
-                        QMessageBox.warning(
-                            self,
-                            "Error",
-                            f"Could not get series count for {Path(filepath).name}: {str(e)}",
-                        )
+                        return
             else:
-                # Just add the selected series
                 files_to_convert.append((filepath, series_index))
 
         if not files_to_convert:
             self.status_label.setText("No valid files to convert")
             return
 
-        # Set up and start the conversion worker thread
+        # Start conversion worker
         self.conversion_worker = ConversionWorker(
             files_to_convert=files_to_convert,
             output_folder=output_folder,
@@ -1855,7 +1951,6 @@ class MicroscopyImageConverterWidget(QWidget):
             file_loader_func=self.get_file_loader,
         )
 
-        # Connect signals
         self.conversion_worker.progress.connect(
             self.update_conversion_progress
         )
@@ -1864,7 +1959,6 @@ class MicroscopyImageConverterWidget(QWidget):
         )
         self.conversion_worker.finished.connect(self.conversion_completed)
 
-        # Show progress bar and start worker
         self.conversion_progress.setVisible(True)
         self.conversion_progress.setValue(0)
         self.cancel_button.setVisible(True)
@@ -1872,7 +1966,6 @@ class MicroscopyImageConverterWidget(QWidget):
             f"Starting conversion of {len(files_to_convert)} files/series..."
         )
 
-        # Start conversion
         self.conversion_worker.start()
 
     def update_conversion_progress(self, current, total, filename):
@@ -1912,11 +2005,7 @@ class MicroscopyImageConverterWidget(QWidget):
             self.status_label.setText("No files were converted")
 
     def update_format_buttons(self, use_zarr=False):
-        """Update format radio buttons based on file size
-
-        Args:
-            use_zarr: True if file size > 4GB, otherwise False
-        """
+        """Update format radio buttons based on file size"""
         if self.updating_format_buttons:
             return
 
@@ -1925,11 +2014,13 @@ class MicroscopyImageConverterWidget(QWidget):
             if use_zarr:
                 self.zarr_radio.setChecked(True)
                 self.tif_radio.setChecked(False)
-                print("Auto-selected ZARR format for large file (>4GB)")
+                # Show warning for large files
+                self.status_label.setText(
+                    "Auto-selected ZARR format for large file (>4GB). TIF may cause memory issues."
+                )
             else:
                 self.tif_radio.setChecked(True)
                 self.zarr_radio.setChecked(False)
-                print("Auto-selected TIF format for smaller file (<4GB)")
         finally:
             self.updating_format_buttons = False
 
