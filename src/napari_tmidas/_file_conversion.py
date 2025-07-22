@@ -1137,7 +1137,7 @@ class ConversionWorker(QThread):
     def _save_tif(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Enhanced TIF saving with memory-efficient options for large files"""
+        """Enhanced TIF saving with chunked writing options for large files"""
         import tifffile
 
         print(f"Saving TIF file: {output_path}")
@@ -1150,14 +1150,14 @@ class ConversionWorker(QThread):
         print(f"Estimated file size: {file_size_GB:.2f}GB")
 
         # Choose saving strategy based on file size and data type
-        if file_size_GB > 4:  # Use memory-efficient methods for large files
+        if file_size_GB > 4:  # Use chunked methods for large files
             try:
-                print("Using memory-efficient saving for large file")
-                return self._save_tif_memory_efficient(
+                print("Using chunked saving for large file")
+                return self._save_tif_chunked(
                     image_data, output_path, metadata
                 )
             except (ValueError, OSError, RuntimeError) as e:
-                print(f"Memory-efficient saving failed: {e}")
+                print(f"Chunked saving failed: {e}")
                 print("Falling back to standard method...")
 
         # Standard method for smaller files
@@ -1213,12 +1213,12 @@ class ConversionWorker(QThread):
             tifffile.imwrite(output_path, image_data, bigtiff=use_bigtiff)
             print("Saved with basic fallback method")
 
-    def _save_tif_memory_efficient(
+    def _save_tif_chunked(
         self, image_data: np.ndarray, output_path: str, metadata: dict = None
     ):
-        """Memory-efficient TIF saving using chunked writing for large files"""
+        """Chunked TIF saving using block-wise writing for large files"""
 
-        print(f"Saving TIF file (memory-efficient): {output_path}")
+        print(f"Saving TIF file (chunked): {output_path}")
         print(f"Image data shape: {image_data.shape}")
 
         # Check file size
@@ -1534,6 +1534,52 @@ class ConversionWorker(QThread):
         try:
             with ProgressBar():
                 root = zarr.group(store=store)
+
+                # Extract base filename for proper naming
+                base_name = Path(output_path).stem
+
+                # Add metadata to the root group for proper layer naming
+                root.attrs["name"] = base_name
+
+                # Add OMERO metadata for proper channel naming in napari
+                # But only if we can determine the actual channel count correctly
+                if hasattr(image_data, "shape") and len(image_data.shape) >= 3:
+                    # Extract actual number of channels from the data
+                    if "axes" in metadata and "C" in metadata["axes"]:
+                        axes_str = metadata["axes"]
+                        c_index = axes_str.index("C")
+                        actual_channels = image_data.shape[c_index]
+                    else:
+                        # Assume last non-spatial dimension is channels if > 3D
+                        actual_channels = (
+                            image_data.shape[-3]
+                            if len(image_data.shape) > 3
+                            else 1
+                        )
+
+                    # Only create OMERO metadata if we have a reasonable number of channels
+                    if (
+                        actual_channels <= 10
+                    ):  # Reasonable limit for most microscopy
+                        channels = []
+                        for i in range(actual_channels):
+                            channels.append(
+                                {
+                                    "label": f"{base_name}_Ch{i}",
+                                    "color": "FFFFFF",  # White by default
+                                    "window": {"start": 0, "end": 65535},
+                                    "active": True,
+                                }
+                            )
+
+                        root.attrs["omero"] = {
+                            "name": base_name,
+                            "channels": channels,
+                        }
+                    else:
+                        # Too many channels, just set basic name
+                        root.attrs["omero"] = {"name": base_name}
+
                 write_image(
                     image_data,
                     group=root,
