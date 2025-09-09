@@ -53,6 +53,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install setuptools tox tox-gh-actions
 
+      - name: Remove .tox cache
+        run: rm -rf .tox
+
+      - name: Upgrade critical dependencies
+        run: |
+          python -m pip install --upgrade numpy psygnal pytest
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
+
       # this runs the platform-specific tests declared in tox.ini
       - name: Test with tox
         uses: aganders3/headless-gui@v2
@@ -60,6 +74,10 @@ jobs:
           run: python -m tox
         env:
           PLATFORM: ${{ matrix.platform }}
+          QT_QPA_PLATFORM: offscreen
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: 1
+          PYTHONDONTWRITEBYTECODE: 1
 
       - name: Coverage
         uses: codecov/codecov-action@v3

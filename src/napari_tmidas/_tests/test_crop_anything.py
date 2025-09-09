@@ -33,3 +33,19 @@ class TestBatchCropAnythingWidget:
         # The browse button should be added to the layout
         # This is hard to test directly without mocking Qt, but we can check the function exists
         assert callable(batch_crop_anything_widget)
+
+    @patch("napari_tmidas._crop_anything.BatchCropAnything")
+    @patch("napari_tmidas._crop_anything.magicgui")
+    def test_widget_creation_safe(self, mock_magicgui, mock_batch_crop):
+        """Test widget creation with BatchCropAnything mocked to avoid any SAM2 issues"""
+        # Mock the BatchCropAnything class to avoid any SAM2 initialization
+        mock_instance = Mock()
+        mock_batch_crop.return_value = mock_instance
+
+        # Mock magicgui to return a simple widget
+        mock_widget = Mock()
+        mock_magicgui.return_value = mock_widget
+
+        # This should be completely safe since everything is mocked
+        widget = batch_crop_anything_widget()
+        assert widget is not None
