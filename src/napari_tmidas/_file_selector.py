@@ -24,7 +24,6 @@ from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -42,6 +41,7 @@ from skimage.io import imread
 
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 
 sys.path.append("src/napari_tmidas")
 from napari_tmidas.processing_functions import (
@@ -1227,56 +1227,10 @@ def file_selector(
     return matching_files
 
 
-# Modify the file_selector widget to add a browse button after it's created
-def _add_browse_button_to_selector(file_selector_widget):
-    """
-    Add a browse button to the file selector widget
-    """
-    # Get the container widget that holds the input_folder widget
-    container = file_selector_widget.native
-
-    # Create a browse button
-    browse_button = QPushButton("Browse...")
-
-    # Get access to the input_folder widget
-    input_folder_widget = file_selector_widget.input_folder.native
-
-    # Get the parent of the input_folder widget
-    parent_layout = input_folder_widget.parentWidget().layout()
-
-    # Create a container for input field and browse button
-    container_widget = QWidget()
-    h_layout = QHBoxLayout(container_widget)
-    h_layout.setContentsMargins(0, 0, 0, 0)
-
-    # Add the input field to our container
-    h_layout.addWidget(input_folder_widget)
-
-    # Add the browse button
-    h_layout.addWidget(browse_button)
-
-    # Replace the input field with our container
-    layout_index = parent_layout.indexOf(input_folder_widget)
-    parent_layout.removeWidget(input_folder_widget)
-    parent_layout.insertWidget(layout_index, container_widget)
-
-    # Connect button to browse action
-    def browse_folder():
-        folder = QFileDialog.getExistingDirectory(
-            container,
-            "Select Folder",
-            file_selector_widget.input_folder.value or os.path.expanduser("~"),
-        )
-        if folder:
-            file_selector_widget.input_folder.value = folder
-
-    browse_button.clicked.connect(browse_folder)
-
-    return file_selector_widget
-
-
 # Create a modified file_selector with browse button
-file_selector = _add_browse_button_to_selector(file_selector)
+file_selector = add_browse_button_to_folder_field(
+    file_selector, "input_folder"
+)
 
 
 # Processing worker for multithreading

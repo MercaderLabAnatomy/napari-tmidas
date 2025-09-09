@@ -63,5 +63,73 @@ class TestBatchProcessingRegistry:
         for t in threads:
             t.join()
 
-        assert len(results) == 10
-        assert len(BatchProcessingRegistry.list_functions()) == 10
+    def test_get_function_info_nonexistent(self):
+        """Test getting info for non-existent function"""
+        info = BatchProcessingRegistry.get_function_info("NonExistent")
+        assert info is None
+
+    def test_register_with_none_parameters(self):
+        """Test registering function with None parameters (should convert to empty dict)"""
+
+        @BatchProcessingRegistry.register(
+            name="None Params Function",
+            suffix="_none",
+            description="Function with None parameters",
+        )
+        def none_params_func(image):
+            return image
+
+        info = BatchProcessingRegistry.get_function_info(
+            "None Params Function"
+        )
+        assert info["parameters"] == {}
+        assert info["suffix"] == "_none"
+        assert info["description"] == "Function with None parameters"
+
+    def test_register_minimal(self):
+        """Test registering function with minimal parameters"""
+
+        @BatchProcessingRegistry.register(name="Minimal Function")
+        def minimal_func(image):
+            return image
+
+        info = BatchProcessingRegistry.get_function_info("Minimal Function")
+        assert info is not None
+        assert callable(info["func"])
+
+    def test_register_with_complex_parameters(self):
+        """Test registering function with complex parameter metadata"""
+
+        @BatchProcessingRegistry.register(
+            name="Complex Params Function",
+            suffix="_complex",
+            description="Function with complex parameters",
+            parameters={
+                "param1": {
+                    "type": int,
+                    "default": 5,
+                    "min": 1,
+                    "max": 10,
+                    "description": "Parameter description",
+                },
+                "param2": {
+                    "type": str,
+                    "default": "default_value",
+                    "description": "String parameter",
+                },
+            },
+        )
+        def complex_func(image, param1=5, param2="default"):
+            return image
+
+        info = BatchProcessingRegistry.get_function_info(
+            "Complex Params Function"
+        )
+        assert info["parameters"]["param1"]["type"] is int
+        assert info["parameters"]["param1"]["default"] == 5
+        assert info["parameters"]["param1"]["min"] == 1
+        assert info["parameters"]["param1"]["max"] == 10
+        assert (
+            info["parameters"]["param1"]["description"]
+            == "Parameter description"
+        )

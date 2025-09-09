@@ -5,105 +5,79 @@ Updated to support Cellpose 4 (Cellpose-SAM) installation.
 """
 
 import os
-import platform
-import shutil
 import subprocess
 import tempfile
-import venv
+from contextlib import suppress
 
 import tifffile
 
-# Define the environment directory in user's home folder
-ENV_DIR = os.path.join(
-    os.path.expanduser("~"), ".napari-tmidas", "envs", "cellpose"
-)
+from napari_tmidas._env_manager import BaseEnvironmentManager
+
+
+class CellposeEnvironmentManager(BaseEnvironmentManager):
+    """Environment manager for Cellpose."""
+
+    def __init__(self):
+        super().__init__("cellpose")
+
+    def _install_dependencies(self, env_python: str) -> None:
+        """Install Cellpose-specific dependencies."""
+        # Install cellpose 4 and other dependencies
+        print(
+            "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
+        )
+        subprocess.check_call([env_python, "-m", "pip", "install", "cellpose"])
+
+        # Check if installation was successful
+        try:
+            # Run a command to check if cellpose can be imported and GPU is available
+            result = subprocess.run(
+                [
+                    env_python,
+                    "-c",
+                    "from cellpose import core; print(f'GPU available: {core.use_gpu()}')",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            print("Cellpose installation successful:")
+            print(result.stdout)
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Could not verify Cellpose installation: {e}")
+
+    def is_package_installed(self) -> bool:
+        """Check if cellpose is installed in the current environment."""
+        try:
+            import importlib.util
+
+            return importlib.util.find_spec("cellpose") is not None
+        except ImportError:
+            return False
+
+
+# Global instance for backward compatibility
+manager = CellposeEnvironmentManager()
 
 
 def is_cellpose_installed():
     """Check if cellpose is installed in the current environment."""
-    try:
-        import importlib.util
-
-        return importlib.util.find_spec("cellpose") is not None
-    except ImportError:
-        return False
+    return manager.is_package_installed()
 
 
 def is_env_created():
     """Check if the dedicated environment exists."""
-    env_python = get_env_python_path()
-    return os.path.exists(env_python)
+    return manager.is_env_created()
 
 
 def get_env_python_path():
     """Get the path to the Python executable in the environment."""
-    if platform.system() == "Windows":
-        return os.path.join(ENV_DIR, "Scripts", "python.exe")
-    else:
-        return os.path.join(ENV_DIR, "bin", "python")
+    return manager.get_env_python_path()
 
 
 def create_cellpose_env():
     """Create a dedicated virtual environment for Cellpose."""
-    # Ensure the environment directory exists
-    os.makedirs(os.path.dirname(ENV_DIR), exist_ok=True)
-
-    # Remove existing environment if it exists
-    if os.path.exists(ENV_DIR):
-        shutil.rmtree(ENV_DIR)
-
-    print(f"Creating Cellpose environment at {ENV_DIR}...")
-
-    # Create a new virtual environment
-    venv.create(ENV_DIR, with_pip=True)
-
-    # Path to the Python executable in the new environment
-    env_python = get_env_python_path()
-
-    # # Install numpy first to ensure correct version
-    # print("Installing NumPy...")
-    # subprocess.check_call(
-    #     [env_python, "-m", "pip", "install", "--upgrade", "pip"]
-    # )
-    # subprocess.check_call(
-    #     [env_python, "-m", "pip", "install", "numpy>=1.24,<1.25"]
-    # )
-
-    # Install cellpose 4 and other dependencies
-    print(
-        "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
-    )
-    subprocess.check_call([env_python, "-m", "pip", "install", "cellpose"])
-
-    # # Install PyTorch - needed for GPU acceleration
-    # print("Installing PyTorch for GPU acceleration...")
-    # subprocess.check_call([
-    #     env_python, "-m", "pip", "install",
-    #     "torch", "torchvision"
-    # ])
-
-    # # Install tifffile for image handling
-    # subprocess.check_call([env_python, "-m", "pip", "install", "tifffile"])
-
-    # Check if installation was successful
-    try:
-        # Run a command to check if cellpose can be imported and GPU is available
-        result = subprocess.run(
-            [
-                env_python,
-                "-c",
-                "from cellpose import core; print(f'GPU available: {core.use_gpu()}')",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        print(f"Cellpose environment check: {result.stdout.strip()}")
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Cellpose installation check failed: {e.stderr}")
-
-    print("Cellpose environment created successfully.")
-    return env_python
+    return manager.create_env()
 
 
 def run_cellpose_in_env(func_name, args_dict):
@@ -144,8 +118,6 @@ def run_cellpose_in_env(func_name, args_dict):
 import numpy as np
 from cellpose import models, core
 import tifffile
-
-
 
 # Load image
 image = tifffile.imread('{input_file.name}')
@@ -201,9 +173,7 @@ tifffile.imwrite('{output_file.name}', masks)
         raise
 
     finally:
-        # Clean up temporary files using contextlib.suppress
-        from contextlib import suppress
-
+        # Clean up temporary files
         for fname in [input_file.name, output_file.name, script_file.name]:
             with suppress(OSError, FileNotFoundError):
                 os.unlink(fname)

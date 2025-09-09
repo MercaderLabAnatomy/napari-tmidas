@@ -5,105 +5,64 @@ This module manages a dedicated virtual environment for CAREamics.
 
 import contextlib
 import os
-import platform
-import shutil
 import subprocess
 import tempfile
-import venv
 
 import tifffile
 
-# Define the environment directory in user's home folder
-ENV_DIR = os.path.join(
-    os.path.expanduser("~"), ".napari-tmidas", "envs", "careamics"
-)
+from napari_tmidas._env_manager import BaseEnvironmentManager
 
 
-def is_careamics_installed():
-    """Check if CAREamics is installed in the current environment."""
-    try:
-        import importlib.util
+class CAREamicsEnvironmentManager(BaseEnvironmentManager):
+    """Environment manager for CAREamics."""
 
-        return importlib.util.find_spec("careamics") is not None
-    except ImportError:
-        return False
+    def __init__(self):
+        super().__init__("careamics")
 
+    def _install_dependencies(self, env_python: str) -> None:
+        """Install CAREamics-specific dependencies."""
+        # Install PyTorch first for compatibility
+        # Try to detect if CUDA is available
+        cuda_available = False
+        try:
+            import torch
 
-def is_env_created():
-    """Check if the dedicated environment exists."""
-    env_python = get_env_python_path()
-    return os.path.exists(env_python)
+            cuda_available = torch.cuda.is_available()
+            print(
+                f"CUDA is {'available' if cuda_available else 'not available'}"
+            )
+        except ImportError:
+            print("PyTorch not detected in main environment")
 
+        if cuda_available:
+            # Install PyTorch with CUDA support
+            print("Installing PyTorch with CUDA support...")
+            subprocess.check_call(
+                [env_python, "-m", "pip", "install", "torch", "torchvision"]
+            )
+        else:
+            # Install PyTorch without CUDA
+            print("Installing PyTorch without CUDA support...")
+            subprocess.check_call(
+                [env_python, "-m", "pip", "install", "torch", "torchvision"]
+            )
 
-def get_env_python_path():
-    """Get the path to the Python executable in the environment."""
-    if platform.system() == "Windows":
-        return os.path.join(ENV_DIR, "Scripts", "python.exe")
-    else:
-        return os.path.join(ENV_DIR, "bin", "python")
-
-
-def create_careamics_env():
-    """Create a dedicated virtual environment for CAREamics."""
-    # Ensure the environment directory exists
-    os.makedirs(os.path.dirname(ENV_DIR), exist_ok=True)
-
-    # Remove existing environment if it exists
-    if os.path.exists(ENV_DIR):
-        shutil.rmtree(ENV_DIR)
-
-    print(f"Creating CAREamics environment at {ENV_DIR}...")
-
-    # Create a new virtual environment
-    venv.create(ENV_DIR, with_pip=True)
-
-    # Path to the Python executable in the new environment
-    env_python = get_env_python_path()
-
-    # Upgrade pip first
-    print("Upgrading pip...")
-    subprocess.check_call(
-        [env_python, "-m", "pip", "install", "--upgrade", "pip"]
-    )
-
-    # Install PyTorch first for compatibility
-    # Try to detect if CUDA is available
-    cuda_available = False
-    try:
-        import torch
-
-        cuda_available = torch.cuda.is_available()
-        print(f"CUDA is {'available' if cuda_available else 'not available'}")
-    except ImportError:
-        print("PyTorch not detected in main environment")
-
-    if cuda_available:
-        # Install PyTorch with CUDA support
-        print("Installing PyTorch with CUDA support...")
+        # Install CAREamics and dependencies
+        print("Installing CAREamics in the dedicated environment...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "torch", "torchvision"]
-        )
-    else:
-        # Install PyTorch without CUDA
-        print("Installing PyTorch without CUDA support...")
-        subprocess.check_call(
-            [env_python, "-m", "pip", "install", "torch", "torchvision"]
+            [env_python, "-m", "pip", "install", "careamics[tensorboard]"]
         )
 
-    # Install CAREamics and dependencies
-    print("Installing CAREamics in the dedicated environment...")
-    subprocess.check_call(
-        [env_python, "-m", "pip", "install", "careamics[tensorboard]"]
-    )
+        # Install tifffile for image handling
+        subprocess.check_call(
+            [env_python, "-m", "pip", "install", "tifffile", "numpy"]
+        )
 
-    # Install tifffile for image handling
-    subprocess.check_call(
-        [env_python, "-m", "pip", "install", "tifffile", "numpy"]
-    )
+        # Check if installation was successful
+        self._verify_installation(env_python)
 
-    # Check if installation was successful
-    try:
-        # Run a simple script to verify CAREamics is installed and working
+    def _verify_installation(self, env_python: str) -> None:
+        """Verify CAREamics installation."""
         check_script = """
 import sys
 try:
@@ -147,13 +106,38 @@ except Exception as e:
         finally:
             os.unlink(temp_path)
 
-    except subprocess.CalledProcessError as e:
-        print(f"Error during CAREamics installation: {e}")
-        print(f"Output: {e.output}")
-        print(f"Errors: {e.stderr}")
-        raise RuntimeError("Failed to create CAREamics environment") from e
+    def is_package_installed(self) -> bool:
+        """Check if CAREamics is installed in the current environment."""
+        try:
+            import importlib.util
 
-    return env_python
+            return importlib.util.find_spec("careamics") is not None
+        except ImportError:
+            return False
+
+
+# Global instance for backward compatibility
+manager = CAREamicsEnvironmentManager()
+
+
+def is_careamics_installed():
+    """Check if CAREamics is installed in the current environment."""
+    return manager.is_package_installed()
+
+
+def is_env_created():
+    """Check if the dedicated environment exists."""
+    return manager.is_env_created()
+
+
+def get_env_python_path():
+    """Get the path to the Python executable in the environment."""
+    return manager.get_env_python_path()
+
+
+def create_careamics_env():
+    """Create a dedicated virtual environment for CAREamics."""
+    return manager.create_env()
 
 
 def run_careamics_in_env(func_name, args_dict):
@@ -274,17 +258,6 @@ try:
         batch_size={args_dict.get('batch_size', 1)},
         tta={args_dict.get('use_tta', True)},
     )
-
-    # # Handle output shape
-    # if prediction.shape != image.shape:
-    #     print(f"Warning: Prediction shape {{prediction.shape}} differs from input shape {{image.shape}}")
-    #     prediction = np.squeeze(prediction)
-
-    #     # If shapes still don't match, try to reshape
-    #     if prediction.shape != image.shape:
-    #         print(f"Warning: Shapes still don't match after squeezing. Using original dimensions.")
-
-    # print(f"Denoising completed. Output shape: {{prediction.shape}}")
 
     # Save result
     print(f"Saving result to {{os.path.basename('{output_file.name}')}}")

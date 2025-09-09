@@ -4,6 +4,8 @@ except ImportError:
     __version__ = "unknown"
 
 
+from ._crop_anything import batch_crop_anything_widget
+from ._file_selector import file_selector
 from ._label_inspection import label_inspector_widget
 from ._reader import napari_get_reader
 from ._roi_colocalization import roi_colocalization_analyzer

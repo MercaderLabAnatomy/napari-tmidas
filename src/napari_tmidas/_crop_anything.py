@@ -19,7 +19,6 @@ from napari.viewer import Viewer
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -35,6 +34,7 @@ from skimage.io import imread
 from skimage.transform import resize
 from tifffile import imwrite
 
+from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
 sam2_paths = [
@@ -2511,24 +2511,7 @@ def batch_crop_anything_widget():
     # Create the magicgui widget
     widget = batch_crop_anything
 
-    # Create and add browse button for folder path
-    folder_browse_button = QPushButton("Browse...")
-
-    def on_folder_browse_clicked():
-        folder = QFileDialog.getExistingDirectory(
-            None,
-            "Select Folder",
-            os.path.expanduser("~"),
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
-        )
-        if folder:
-            # Update the folder_path field
-            widget.folder_path.value = folder
-
-    folder_browse_button.clicked.connect(on_folder_browse_clicked)
-
-    # Insert the browse button next to the folder_path field
-    folder_layout = widget.folder_path.native.parent().layout()
-    folder_layout.addWidget(folder_browse_button)
+    # Add browse button using common utility
+    add_browse_button_to_folder_field(widget, "folder_path")
 
     return widget
