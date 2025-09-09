@@ -44,7 +44,7 @@ If you want to batch compress image data using [Zstandard](https://github.com/fa
     brew install zstd            # for macOS (requires Homebrew)
     pip install zstandard        # Windows with Python >= 3.7
 
-And you are done! 
+And you are done!
 
 ## Usage
 
