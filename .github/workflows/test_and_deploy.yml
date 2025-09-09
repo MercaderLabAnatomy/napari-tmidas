@@ -54,7 +54,12 @@ jobs:
           python -m pip install setuptools tox tox-gh-actions
 
       - name: Remove .tox cache
+        if: runner.os == 'Linux' || runner.os == 'macOS'
         run: rm -rf .tox
+      - name: Remove .tox cache (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if (Test-Path .tox) { Remove-Item -Recurse -Force .tox }
 
       - name: Upgrade critical dependencies
         run: |
