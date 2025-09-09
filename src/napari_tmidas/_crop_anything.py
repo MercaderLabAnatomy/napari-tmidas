@@ -448,6 +448,7 @@ class BatchCropAnything:
 
     def _generate_2d_segmentation(self, confidence_threshold):
         """Generate initial 2D segmentation - start with empty labels for interactive mode."""
+        device_type = "cuda" if self.device.type == "cuda" else "cpu"
         # Ensure image is in the correct format for SAM2
         image = self.current_image_for_segmentation
 
@@ -594,10 +595,23 @@ class BatchCropAnything:
 
             # Initialize SAM2 state with the video
             self.viewer.status = "Initializing SAM2 Video Predictor..."
-            with torch.inference_mode(), torch.autocast(
-                "cuda", dtype=torch.bfloat16
-            ):
-                self._sam2_state = self.predictor.init_state(mp4_path)
+            try:
+                device_type = "cuda" if self.device.type == "cuda" else "cpu"
+                with torch.inference_mode(), torch.autocast(
+                    device_type, dtype=torch.float32
+                ):
+                    self._sam2_state = self.predictor.init_state(mp4_path)
+            except (
+                RuntimeError,
+                ValueError,
+                TypeError,
+                torch.cuda.OutOfMemoryError,
+            ) as e:
+                self.viewer.status = (
+                    f"Error initializing SAM2 video predictor: {str(e)}"
+                )
+                print(f"SAM2 video predictor initialization failed: {e}")
+                return
 
             # Store needed state for 3D processing
             self._sam2_next_obj_id = 1
@@ -879,8 +893,9 @@ class BatchCropAnything:
             # Try to perform SAM2 propagation with error handling
             try:
                 # Use torch.inference_mode() and torch.autocast to ensure consistent dtypes
+                device_type = "cuda" if self.device.type == "cuda" else "cpu"
                 with torch.inference_mode(), torch.autocast(
-                    "cuda", dtype=torch.float32
+                    device_type, dtype=torch.float32
                 ):
                     # Attempt to run SAM2 propagation - this will iterate through all frames
                     for (
@@ -999,6 +1014,7 @@ class BatchCropAnything:
         Given a 3D coordinate (x, y, z), run SAM2 video predictor to segment the object at that point,
         update the segmentation result and label layer.
         """
+        device_type = "cuda" if self.device.type == "cuda" else "cpu"
         if not hasattr(self, "_sam2_state") or self._sam2_state is None:
             self.viewer.status = "SAM2 3D state not initialized."
             return
@@ -1013,7 +1029,7 @@ class BatchCropAnything:
         point_labels = np.array([1])  # 1 = foreground
 
         with torch.inference_mode(), torch.autocast(
-            "cuda", dtype=torch.bfloat16
+            device_type, dtype=torch.float32
         ):
             masks, scores, _ = self.predictor.predict(
                 state=self._sam2_state,
@@ -1124,6 +1140,7 @@ class BatchCropAnything:
 
     def _on_points_clicked(self, layer, event):
         """Handle clicks on the points layer for adding/removing points."""
+        device_type = "cuda" if self.device.type == "cuda" else "cpu"
         try:
             # Only process clicks, not drags
             if event.type != "mouse_press":
@@ -1465,7 +1482,7 @@ class BatchCropAnything:
 
                     self.viewer.status = f"Segmenting object {obj_id} with {len(points)} points..."
 
-                    with torch.inference_mode(), torch.autocast("cuda"):
+                    with torch.inference_mode(), torch.autocast(device_type):
                         masks, scores, _ = self.predictor.predict(
                             point_coords=points,
                             point_labels=labels,

@@ -24,18 +24,16 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "numpy",
+    "numpy>=1.23.0,<2.0",
     "magicgui",
     "tqdm",
     "qtpy",
-    "scikit-image",
+    "scikit-image>=0.19.0",
     "pyqt5",
-    "tqdm",
-    "scikit-image",
     "ome-zarr",
     "napari-ome-zarr",
-    "torch",
-    "torchvision",
+    "torch>=1.12.0",
+    "torchvision>=0.13.0",
     "timm",
     "opencv-python",
     "cmake",
@@ -51,11 +49,12 @@ dependencies = [
 [project.optional-dependencies]
 testing = [
     "tox",
-    "pytest",  # https://docs.pytest.org/en/latest/contents.html
-    "pytest-cov",  # https://pytest-cov.readthedocs.io/en/latest/
-    "pytest-qt",  # https://pytest-qt.readthedocs.io/en/latest/
+    "pytest>=7.0.0",
+    "pytest-cov",
+    "pytest-qt",
     "napari",
     "pyqt5",
+    "psygnal>=0.8.0",
 ]
 
 [project.entry-points."napari.manifest"]
