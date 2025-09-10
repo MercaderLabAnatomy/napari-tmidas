@@ -3,13 +3,28 @@ try:
 except ImportError:
     __version__ = "unknown"
 
-# Safe imports - these should work on all platforms
-from ._file_selector import file_selector
-from ._reader import napari_get_reader
-from ._sample_data import make_sample_data
-from ._writer import write_multiple, write_single_image
+# Conditional imports - these might fail on Windows without dependencies
+try:
+    from ._file_selector import file_selector
+except ImportError:
+    file_selector = None
 
-# Conditional imports for modules that might cause issues on Windows
+try:
+    from ._reader import napari_get_reader
+except ImportError:
+    napari_get_reader = None
+
+try:
+    from ._sample_data import make_sample_data
+except ImportError:
+    make_sample_data = None
+
+try:
+    from ._writer import write_multiple, write_single_image
+except ImportError:
+    write_multiple = None
+    write_single_image = None
+
 try:
     from ._label_inspection import label_inspector_widget
 except ImportError:
