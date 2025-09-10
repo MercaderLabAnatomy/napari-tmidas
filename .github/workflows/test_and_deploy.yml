@@ -44,13 +44,15 @@ jobs:
           git clone --depth 1 https://github.com/pyvista/gl-ci-helpers.git
           powershell gl-ci-helpers/appveyor/install_opengl.ps1
 
-      # Fix Windows long path issues
-      - name: Enable Windows long paths
+      # Fix Windows long path issues and DLL conflicts
+      - name: Configure Windows environment
         if: runner.os == 'Windows'
         run: |
           git config --system core.longpaths true
-
-      # note: if you need dependencies from conda, considering using
+          # Set environment variables to prevent DLL conflicts
+          echo "OPENCV_IO_ENABLE_OPENEXR=0" >> $env:GITHUB_ENV
+          echo "OPENCV_IO_ENABLE_JASPER=0" >> $env:GITHUB_ENV
+          echo "KMP_DUPLICATE_LIB_OK=TRUE" >> $env:GITHUB_ENV      # note: if you need dependencies from conda, considering using
       # setup-miniconda: https://github.com/conda-incubator/setup-miniconda
       # and
       # tox-conda: https://github.com/tox-dev/tox-conda
