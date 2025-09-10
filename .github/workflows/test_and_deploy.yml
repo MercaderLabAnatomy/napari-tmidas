@@ -70,7 +70,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libglib2.0-0 \
+            libsm6 \
+            libxext6 \
+            libxrender1 \
+            libgomp1
 
       # this runs the platform-specific tests declared in tox.ini
       - name: Test with tox
