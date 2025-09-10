@@ -3,14 +3,27 @@ try:
 except ImportError:
     __version__ = "unknown"
 
-
-from ._crop_anything import batch_crop_anything_widget
+# Safe imports - these should work on all platforms
 from ._file_selector import file_selector
-from ._label_inspection import label_inspector_widget
 from ._reader import napari_get_reader
-from ._roi_colocalization import roi_colocalization_analyzer
 from ._sample_data import make_sample_data
 from ._writer import write_multiple, write_single_image
+
+# Conditional imports for modules that might cause issues on Windows
+try:
+    from ._label_inspection import label_inspector_widget
+except ImportError:
+    label_inspector_widget = None
+
+try:
+    from ._roi_colocalization import roi_colocalization_analyzer
+except ImportError:
+    roi_colocalization_analyzer = None
+
+try:
+    from ._crop_anything import batch_crop_anything_widget
+except ImportError:
+    batch_crop_anything_widget = None
 
 __all__ = (
     "napari_get_reader",
