@@ -52,7 +52,13 @@ jobs:
           # Set environment variables to prevent DLL conflicts
           echo "OPENCV_IO_ENABLE_OPENEXR=0" >> $env:GITHUB_ENV
           echo "OPENCV_IO_ENABLE_JASPER=0" >> $env:GITHUB_ENV
-          echo "KMP_DUPLICATE_LIB_OK=TRUE" >> $env:GITHUB_ENV      # note: if you need dependencies from conda, considering using
+          echo "KMP_DUPLICATE_LIB_OK=TRUE" >> $env:GITHUB_ENV
+          echo "MKL_NUM_THREADS=1" >> $env:GITHUB_ENV
+          echo "NUMEXPR_MAX_THREADS=1" >> $env:GITHUB_ENV
+          echo "OMP_NUM_THREADS=1" >> $env:GITHUB_ENV
+          echo "TORCH_NUM_THREADS=1" >> $env:GITHUB_ENV
+          # Prevent memory issues
+          echo "MALLOC_TRIM_THRESHOLD_=100000" >> $env:GITHUB_ENV      # note: if you need dependencies from conda, considering using
       # setup-miniconda: https://github.com/conda-incubator/setup-miniconda
       # and
       # tox-conda: https://github.com/tox-dev/tox-conda
