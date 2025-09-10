@@ -90,6 +90,7 @@ The image processing capabilities are powered by several excellent open-source t
 - [Cellpose 4](https://github.com/MouseLand/cellpose): Advanced cell segmentation
 - [Trackastra](https://github.com/weigertlab/trackastra): Cell tracking and analysis
 - [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
+- [Spotiflow](https://github.com/weigertlab/spotiflow): Accurate and efficient spot detection for fluorescence microscopy
 
 ### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
