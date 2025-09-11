@@ -69,6 +69,16 @@ def test_image_threshold_widget(make_napari_viewer):
 
 # capsys is a pytest fixture that captures stdout and stderr output streams
 def test_example_q_widget(make_napari_viewer, capsys):
+    import os
+
+    import pytest
+
+    if (
+        os.environ.get("CI") == "true"
+        and os.environ.get("DISPLAY", "") == ""
+        and os.name != "nt"
+    ):
+        pytest.skip("Requires display (skipped in headless CI)")
     # make viewer and add an image layer using our fixture
     viewer = make_napari_viewer()
     viewer.add_image(np.random.random((100, 100)))
