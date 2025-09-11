@@ -1,9 +1,13 @@
 # src/napari_tmidas/_tests/test_file_selector.py
+import pytest
 import os
 import tempfile
 from unittest.mock import Mock
 
 import numpy as np
+
+# Skip entire module if napari is not available
+napari = pytest.importorskip("napari")
 
 from napari_tmidas._file_selector import ProcessingWorker, file_selector
 from napari_tmidas._registry import BatchProcessingRegistry

@@ -1,5 +1,9 @@
 # src/napari_tmidas/_tests/test_skimage_filters.py
+import pytest
 import numpy as np
+
+# Skip entire module if pandas is not available
+pandas = pytest.importorskip("pandas")
 
 from napari_tmidas.processing_functions.skimage_filters import invert_image
 

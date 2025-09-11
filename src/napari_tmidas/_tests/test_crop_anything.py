@@ -1,5 +1,9 @@
 # src/napari_tmidas/_tests/test_crop_anything.py
+import pytest
 from unittest.mock import Mock, patch
+
+# Skip entire module if torch is not available
+torch = pytest.importorskip("torch")
 
 from napari_tmidas._crop_anything import batch_crop_anything_widget
 

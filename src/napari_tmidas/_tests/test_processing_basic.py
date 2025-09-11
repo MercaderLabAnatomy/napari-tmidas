@@ -1,5 +1,9 @@
 # src/napari_tmidas/_tests/test_processing_basic.py
+import pytest
 import numpy as np
+
+# Skip entire module if dask is not available
+dask = pytest.importorskip("dask")
 
 from napari_tmidas.processing_functions.basic import labels_to_binary
 

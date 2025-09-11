@@ -1,4 +1,8 @@
+import pytest
 import numpy as np
+
+# Skip entire module if magicgui is not available
+magicgui = pytest.importorskip("magicgui")
 
 from napari_tmidas._widget import (
     ExampleQWidget,
