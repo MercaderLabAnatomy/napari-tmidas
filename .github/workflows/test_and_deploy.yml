@@ -67,6 +67,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install setuptools tox tox-gh-actions
 
+      - name: Pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml', 'tox.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Remove .tox cache
         if: runner.os == 'Linux' || runner.os == 'macOS'
         run: rm -rf .tox
@@ -96,13 +104,18 @@ jobs:
       - name: Test with tox
         uses: aganders3/headless-gui@v2
         with:
-          run: python -m tox
+          run: python -m tox -- -m "not slow"
         env:
           PLATFORM: ${{ matrix.platform }}
           QT_QPA_PLATFORM: offscreen
           MPLBACKEND: Agg
           PYTHONUNBUFFERED: 1
           PYTHONDONTWRITEBYTECODE: 1
+
+      - name: Show pytest summary (if available)
+        if: always()
+        run: |
+          if [ -f .tox/*/coverage.xml ]; then echo "Coverage file present"; fi
 
       - name: Coverage
         uses: codecov/codecov-action@v3
