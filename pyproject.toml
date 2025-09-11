@@ -134,3 +134,15 @@ exclude = [
 
 target-version = "py38"
 fix = true
+
+[tool.pytest.ini_options]
+# Limit test discovery to the package tests directory to avoid picking up
+# helper scripts in repository root (e.g. duplicate test_registry.py) which
+# caused import file mismatch errors on CI.
+testpaths = [
+    "src/napari_tmidas/_tests"
+]
+# Register custom markers used in the test suite.
+markers = [
+    "slow: marks tests as slow (deselect with '-m not slow')",
+]
