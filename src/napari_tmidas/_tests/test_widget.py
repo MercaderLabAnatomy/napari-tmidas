@@ -41,6 +41,17 @@ def test_threshold_magic_widget(make_napari_viewer):
 
 
 def test_image_threshold_widget(make_napari_viewer):
+    # Skip in headless *nix CI environments (segfault risk in Qt/OpenGL stack)
+    import os
+
+    import pytest
+
+    if (
+        os.environ.get("CI") == "true"
+        and os.environ.get("DISPLAY", "") == ""
+        and os.name != "nt"
+    ):
+        pytest.skip("Requires display (skipped in headless CI)")
     viewer = make_napari_viewer()
     layer = viewer.add_image(np.random.random((100, 100)))
     my_widget = ImageThreshold(viewer)
