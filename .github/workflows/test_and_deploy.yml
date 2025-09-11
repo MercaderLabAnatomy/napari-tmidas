@@ -115,7 +115,15 @@ jobs:
       - name: Show pytest summary (if available)
         if: always()
         run: |
-          if [ -f .tox/*/coverage.xml ]; then echo "Coverage file present"; fi
+          echo "=== Test Summary ==="
+          if [ -f .tox/*/coverage.xml ]; then 
+            echo "✓ Coverage file present" 
+            ls -la .tox/*/coverage.xml 2>/dev/null || true
+          else 
+            echo "✗ Coverage file not found"
+          fi
+          echo "Tox environments created:"
+          ls -la .tox/ 2>/dev/null || echo "No .tox directory found"
 
       - name: Coverage
         uses: codecov/codecov-action@v3
