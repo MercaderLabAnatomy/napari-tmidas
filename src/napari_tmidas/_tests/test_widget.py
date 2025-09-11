@@ -1,4 +1,7 @@
+import os
+
 import numpy as np
+import pytest
 
 from napari_tmidas._widget import (
     ExampleQWidget,
@@ -20,6 +23,10 @@ def test_threshold_autogenerate_widget():
 # make_napari_viewer is a pytest fixture that returns a napari viewer object
 # you don't need to import it, as long as napari is installed
 # in your testing environment
+@pytest.mark.skipif(
+    os.environ.get("DISPLAY", "") == "" and os.name != "nt",
+    reason="Requires X11 display in headless *nix CI",
+)
 def test_threshold_magic_widget(make_napari_viewer):
     viewer = make_napari_viewer()
     layer = viewer.add_image(np.random.random((100, 100)))
