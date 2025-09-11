@@ -1,9 +1,13 @@
 # src/napari_tmidas/_tests/test_label_inspection.py
+import pytest
 import os
 import tempfile
 from unittest.mock import Mock, patch
 
 import numpy as np
+
+# Skip entire module if magicgui is not available
+magicgui = pytest.importorskip("magicgui")
 
 from napari_tmidas._label_inspection import (
     LabelInspector,
