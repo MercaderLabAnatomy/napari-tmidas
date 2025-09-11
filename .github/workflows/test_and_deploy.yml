@@ -114,8 +114,22 @@ jobs:
 
       - name: Show pytest summary (if available)
         if: always()
+        shell: bash
         run: |
-          if [ -f .tox/*/coverage.xml ]; then echo "Coverage file present"; fi
+          set -euo pipefail
+          echo "Checking for coverage.xml..."
+          FOUND=0
+          if [ -f coverage.xml ]; then
+            echo "Found coverage.xml at repo root"; FOUND=1
+          fi
+          # Glob inside .tox envs (quiet if none)
+          if ls .tox/*/coverage.xml >/dev/null 2>&1; then
+            echo "Found coverage.xml inside .tox environment"; FOUND=1
+          fi
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No coverage.xml found (this may be fine if tests were skipped).";
+            ls -al . | sed -n '1,120p'
+          fi
 
       - name: Coverage
         uses: codecov/codecov-action@v3
