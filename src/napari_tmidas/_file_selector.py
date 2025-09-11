@@ -774,6 +774,7 @@ class ProcessedFilesTableWidget(QTableWidget):
     def _load_processed_image(self, filepath: str):
         """
         Load processed image into viewer with multi-channel support and ensure it's always shown on top
+        Also handles points data from spot detection functions.
         """
         # Ensure filepath is valid
         if not filepath or not os.path.exists(filepath):
@@ -784,7 +785,63 @@ class ProcessedFilesTableWidget(QTableWidget):
         # Remove existing processed layers
         self._clear_current_images(self.current_processed_images)
 
-        # Load new image
+        # Special handling for .npy files (likely points data from spot detection)
+        if filepath.lower().endswith(".npy"):
+            try:
+                data = np.load(filepath)
+
+                # Check if this is points data
+                if (
+                    isinstance(data, np.ndarray)
+                    and data.ndim == 2
+                    and data.shape[1] in [2, 3]  # 2D or 3D coordinates
+                    and data.dtype in [np.float32, np.float64]
+                ):  # Coordinate data
+
+                    print(f"Loading points data: {data.shape} points")
+
+                    # Determine if 2D or 3D points
+                    is_3d = data.shape[1] == 3
+
+                    # Set appropriate point properties
+                    point_properties = {
+                        "size": 8,
+                        "symbol": "ring",
+                        "opacity": 1,
+                        "face_color": [1.0, 0.5, 0.2],
+                        "border_color": [1.0, 0.5, 0.2],
+                    }
+
+                    if is_3d:
+                        point_properties["out_of_slice_display"] = True
+
+                    # Add points layer
+                    points_layer = self.viewer.add_points(
+                        data,
+                        name=f"Spots ({os.path.basename(filepath)})",
+                        **point_properties,
+                    )
+
+                    # Track the layer
+                    self.current_processed_images = [points_layer]
+
+                    self.viewer.status = f"Loaded {len(data)} spots from {os.path.basename(filepath)}"
+                    print(
+                        f"Successfully loaded {len(data)} spots as points layer"
+                    )
+                    return
+
+                else:
+                    print(
+                        "NPY file doesn't contain points data, treating as image"
+                    )
+                    # Fall through to regular image loading
+
+            except (OSError, ValueError, AttributeError) as e:
+                print(f"Error loading NPY file as points: {e}")
+                # Fall through to regular image loading
+
+        # Load new image (original logic)
         try:
             # Display status while loading
             self.viewer.status = f"Loading {os.path.basename(filepath)}..."
@@ -1369,7 +1426,72 @@ class ProcessingWorker(QThread):
                     raise
 
             # Apply processing with parameters
-            processed_image = self.processing_func(image, **self.param_values)
+            processed_result = self.processing_func(image, **self.param_values)
+
+            # Check if result is points data (for spot detection functions)
+            if (
+                isinstance(processed_result, np.ndarray)
+                and processed_result.ndim == 2
+                and processed_result.shape[1] in [2, 3]  # 2D or 3D coordinates
+                and processed_result.dtype in [np.float32, np.float64]
+            ):  # Coordinate data
+
+                print(f"Detected points data: {processed_result.shape} points")
+
+                # Save points as numpy array
+                filename = os.path.basename(filepath)
+                name, _ = os.path.splitext(filename)
+                points_filename = f"{name}_spots.npy"
+                points_filepath = os.path.join(
+                    self.output_folder, points_filename
+                )
+
+                np.save(points_filepath, processed_result)
+                print(f"Saved points to: {points_filepath}")
+
+                # Also save as CSV if requested
+                if hasattr(self, "param_values") and self.param_values.get(
+                    "output_csv", False
+                ):
+                    csv_filename = f"{name}_spots.csv"
+                    csv_filepath = os.path.join(
+                        self.output_folder, csv_filename
+                    )
+
+                    try:
+                        # Try to save as CSV with pandas
+                        import pandas as pd
+
+                        columns = (
+                            ["y", "x"]
+                            if processed_result.shape[1] == 2
+                            else ["z", "y", "x"]
+                        )
+                        df = pd.DataFrame(processed_result, columns=columns)
+                        df.to_csv(csv_filepath, index=False)
+                        print(f"Saved CSV to: {csv_filepath}")
+                    except ImportError:
+                        # Fallback to numpy if pandas not available
+                        np.savetxt(
+                            csv_filepath,
+                            processed_result,
+                            delimiter=",",
+                            header=(
+                                "y,x"
+                                if processed_result.shape[1] == 2
+                                else "z,y,x"
+                            ),
+                            comments="",
+                        )
+                        print(f"Saved CSV (numpy fallback) to: {csv_filepath}")
+
+                return {
+                    "original_file": filepath,
+                    "processed_file": points_filepath,
+                }
+
+            # Handle as image data (original logic)
+            processed_image = processed_result
 
             print(
                 f"Processed image shape before removing singletons: {processed_image.shape}, dtype: {processed_image.dtype}"
