@@ -19,6 +19,59 @@ from napari_tmidas.processing_functions.spotiflow_env_manager import (
     run_spotiflow_in_env,
 )
 
+
+# Utility functions for axes and input preparation (from napari-spotiflow)
+def _validate_axes(img: np.ndarray, axes: str) -> None:
+    """Validate that the number of dimensions in the image matches the given axes string."""
+    if img.ndim != len(axes):
+        raise ValueError(
+            f"Image has {img.ndim} dimensions, but axes has {len(axes)} dimensions"
+        )
+
+
+def _prepare_input(img: np.ndarray, axes: str) -> np.ndarray:
+    """Reshape input for Spotiflow's API compatibility based on axes notation."""
+    _validate_axes(img, axes)
+
+    if axes in {"YX", "ZYX", "TYX", "TZYX"}:
+        return img[..., None]
+    elif axes in {"YXC", "ZYXC", "TYXC", "TZYXC"}:
+        return img
+    elif axes == "CYX":
+        return img.transpose(1, 2, 0)
+    elif axes == "CZYX":
+        return img.transpose(1, 2, 3, 0)
+    elif axes == "ZCYX" or axes == "TCYX":
+        return img.transpose(0, 2, 3, 1)
+    elif axes == "TZCYX":
+        return img.transpose(0, 1, 3, 4, 2)
+    elif axes == "TCZYX":
+        return img.transpose(0, 2, 3, 4, 1)
+    else:
+        raise ValueError(f"Invalid axes: {axes}")
+
+
+def _infer_axes(img: np.ndarray) -> str:
+    """Infer the most likely axes order for the image."""
+    ndim = img.ndim
+    if ndim == 2:
+        return "YX"
+    elif ndim == 3:
+        # For 3D, we need to make an educated guess
+        # Most common is ZYX for 3D microscopy
+        return "ZYX"
+    elif ndim == 4:
+        # Could be TZYX or ZYXC, let's check the last dimension
+        if img.shape[-1] <= 4:  # Likely channels
+            return "ZYXC"
+        else:
+            return "TZYX"
+    elif ndim == 5:
+        return "TZYXC"
+    else:
+        raise ValueError(f"Cannot infer axes for {ndim}D image")
+
+
 # Check if Spotiflow is directly available in current environment
 try:
     import importlib.util
@@ -96,7 +149,7 @@ except ImportError:
             "default": None,
             "min": 0.0,
             "max": 1.0,
-            "description": "Probability threshold (leave empty for automatic)",
+            "description": "Probability threshold (leave empty or 0.0 for automatic)",
         },
         "n_tiles": {
             "type": str,
@@ -115,17 +168,15 @@ except ImportError:
         },
         "min_distance": {
             "type": int,
-            "default": 1,
+            "default": 2,
             "min": 1,
             "max": 10,
             "description": "Minimum distance between detected spots",
         },
-        "spot_radius": {
-            "type": int,
-            "default": 2,
-            "min": 1,
-            "max": 10,
-            "description": "Radius of spots in the output label mask",
+        "axes": {
+            "type": str,
+            "default": "auto",
+            "description": "Axes order (e.g., 'ZYX', 'YX', or 'auto' for automatic detection)",
         },
         "output_csv": {
             "type": bool,
@@ -152,8 +203,8 @@ def spotiflow_detect_spots(
     n_tiles: str = "auto",
     exclude_border: bool = True,
     scale: str = "auto",
-    min_distance: int = 1,
-    spot_radius: int = 2,
+    min_distance: int = 2,
+    axes: str = "auto",
     output_csv: bool = True,
     force_dedicated_env: bool = False,
     # For internal use by processing system
@@ -164,8 +215,8 @@ def spotiflow_detect_spots(
 
     Spotiflow is a deep learning-based spot detection method that provides
     threshold-agnostic, subpixel-accurate detection of spots in 2D and 3D
-    fluorescence microscopy images. The output is a label mask where each
-    spot is represented as a labeled region.
+    fluorescence microscopy images. The output is a numpy array of spot
+    coordinates suitable for napari Points layers.
 
     Parameters:
     -----------
@@ -195,8 +246,8 @@ def spotiflow_detect_spots(
         Scaling factor (e.g., '(1,1)' or 'auto')
     min_distance : int
         Minimum distance between detected spots
-    spot_radius : int
-        Radius of spots in the output label mask
+    axes : str
+        Axes order (e.g., 'ZYX', 'YX', or 'auto' for automatic detection)
     output_csv : bool
         Save spot coordinates as CSV file alongside the mask
     force_dedicated_env : bool
@@ -207,11 +258,18 @@ def spotiflow_detect_spots(
     Returns:
     --------
     np.ndarray
-        Label mask with detected spots as labeled regions
+        Spot coordinates as (N, 2) or (N, 3) array for napari Points layer
     """
     print("Detecting spots using Spotiflow...")
     print(f"Image shape: {image.shape}")
     print(f"Image dtype: {image.dtype}")
+
+    # Infer axes if auto
+    if axes == "auto":
+        axes = _infer_axes(image)
+        print(f"Inferred axes: {axes}")
+    else:
+        print(f"Using provided axes: {axes}")
 
     # Decide whether to use dedicated environment
     use_env = USE_DEDICATED_ENV or force_dedicated_env
@@ -220,6 +278,7 @@ def spotiflow_detect_spots(
         # Use direct import
         points = _detect_spots_direct(
             image,
+            axes,
             pretrained_model,
             model_path,
             subpixel,
@@ -237,6 +296,7 @@ def spotiflow_detect_spots(
         # Use dedicated environment
         points = _detect_spots_env(
             image,
+            axes,
             pretrained_model,
             model_path,
             subpixel,
@@ -251,16 +311,98 @@ def spotiflow_detect_spots(
             min_distance,
         )
 
-    # Save CSV if requested and file path is available
-    if output_csv and input_file_path:
-        _save_coords_csv(points, input_file_path, use_env)
+    # Save CSV if requested (use a default filename if no input path provided)
+    if output_csv:
+        if input_file_path:
+            _save_coords_csv(points, input_file_path, use_env)
+        else:
+            # No input file path provided; skipping CSV export.
+            print(
+                "No input file path provided, skipping CSV export of spot coordinates."
+            )
 
     print(f"Detected {len(points)} spots, returning points for points layer")
     return points  # Return points directly for napari points layer
 
 
+def _points_to_label_mask(
+    points: np.ndarray, image_shape: tuple, spot_radius: int
+) -> np.ndarray:
+    """Convert detected points to a label mask for napari."""
+    from scipy import ndimage
+    from skimage import draw
+
+    # Create empty label mask
+    label_mask = np.zeros(image_shape, dtype=np.uint16)
+
+    # Handle different dimensionalities
+    if len(image_shape) == 2:  # 2D image
+        if points.shape[1] == 2:  # 2D points
+            coords = points.astype(int)
+        elif (
+            points.shape[1] == 3
+        ):  # 3D points on 2D image - take YX coordinates
+            coords = points[:, 1:].astype(int)  # Skip Z coordinate
+        else:
+            raise ValueError(
+                f"Unexpected points shape for 2D image: {points.shape}"
+            )
+
+        # Create circular spots
+        for i, (y, x) in enumerate(coords):
+            if 0 <= y < image_shape[0] and 0 <= x < image_shape[1]:
+                rr, cc = draw.disk((y, x), spot_radius, shape=image_shape)
+                label_mask[rr, cc] = i + 1  # Labels start from 1
+
+    elif len(image_shape) == 3:  # 3D image
+        if points.shape[1] == 3:  # 3D points
+            coords = points.astype(int)
+        elif points.shape[1] == 2:  # 2D points on 3D image - add Z=0
+            coords = np.column_stack([np.zeros(len(points)), points]).astype(
+                int
+            )
+        else:
+            raise ValueError(
+                f"Unexpected points shape for 3D image: {points.shape}"
+            )
+
+        # Create spherical spots
+        for i, (z, y, x) in enumerate(coords):
+            if (
+                0 <= z < image_shape[0]
+                and 0 <= y < image_shape[1]
+                and 0 <= x < image_shape[2]
+            ):
+                # Create a small sphere
+                ball = ndimage.generate_binary_structure(3, 1)
+                ball = ndimage.iterate_structure(ball, spot_radius)
+
+                # Get sphere coordinates
+                ball_coords = np.array(np.where(ball)).T - spot_radius
+                z_coords = ball_coords[:, 0] + z
+                y_coords = ball_coords[:, 1] + y
+                x_coords = ball_coords[:, 2] + x
+
+                # Filter valid coordinates
+                valid = (
+                    (z_coords >= 0)
+                    & (z_coords < image_shape[0])
+                    & (y_coords >= 0)
+                    & (y_coords < image_shape[1])
+                    & (x_coords >= 0)
+                    & (x_coords < image_shape[2])
+                )
+
+                label_mask[
+                    z_coords[valid], y_coords[valid], x_coords[valid]
+                ] = (i + 1)
+
+    return label_mask
+
+
 def _detect_spots_direct(
     image,
+    axes,
     pretrained_model,
     model_path,
     subpixel,
@@ -285,6 +427,23 @@ def _detect_spots_direct(
         print(f"Loading pretrained model: {pretrained_model}")
         model = Spotiflow.from_pretrained(pretrained_model)
 
+    # Check model compatibility with image dimensionality
+    is_3d_image = len(image.shape) == 3 and "Z" in axes
+    if is_3d_image and not model.config.is_3d:
+        print(
+            "Warning: Using a 2D model on 3D data. Consider using a 3D model like 'synth_3d' or 'smfish_3d'."
+        )
+
+    # Prepare input using the same method as napari-spotiflow
+    print(f"Preparing input with axes: {axes}")
+    try:
+        prepared_img = _prepare_input(image, axes)
+        print(f"Prepared image shape: {prepared_img.shape}")
+    except ValueError as e:
+        print(f"Error preparing input: {e}")
+        # Fallback to original image
+        prepared_img = image
+
     # Parse string parameters
     def parse_param(param_str, default_val):
         if param_str == "auto":
@@ -297,55 +456,84 @@ def _detect_spots_direct(
     n_tiles_parsed = parse_param(n_tiles, None)
     scale_parsed = parse_param(scale, None)
 
-    # Prepare normalizer function
-    if normalizer == "percentile":
-        from csbdeep.utils import normalize_mi_ma
-
-        # Create a normalizer function that uses the specified percentiles
-        def normalizer_func(img):
-            p_low, p_high = np.percentile(
-                img, [normalizer_low, normalizer_high]
-            )
-            return normalize_mi_ma(img, p_low, p_high)
-
-        actual_normalizer = normalizer_func
-    elif normalizer == "minmax":
-        from csbdeep.utils import normalize_mi_ma
-
-        def normalizer_func(img):
-            return normalize_mi_ma(img, img.min(), img.max())
-
-        actual_normalizer = normalizer_func
-    else:
-        actual_normalizer = "auto"
-
-    # Prepare prediction parameters
+    # Prepare prediction parameters (following napari-spotiflow style)
     predict_kwargs = {
         "subpix": subpixel,  # Note: Spotiflow API uses 'subpix', not 'subpixel'
         "peak_mode": peak_mode,
-        "normalizer": actual_normalizer,
+        "normalizer": None,  # We'll handle normalization manually
         "exclude_border": exclude_border,
         "min_distance": min_distance,
-        "device": "cpu",  # Force CPU for now to avoid GPU compatibility issues
+        "verbose": True,
     }
 
-    # Add optional parameters
-    if prob_thresh is not None:
+    # Set probability threshold - use automatic or provided value
+    if prob_thresh is not None and prob_thresh > 0.0:
         predict_kwargs["prob_thresh"] = prob_thresh
+    else:
+        # Use automatic thresholding similar to napari-spotiflow
+        # Don't set prob_thresh - let spotiflow determine it automatically
+        # This includes None and 0.0 values which should use automatic thresholding
+        pass  # Spotiflow will use its default optimized threshold
+
     if n_tiles_parsed is not None:
         predict_kwargs["n_tiles"] = n_tiles_parsed
     if scale_parsed is not None:
         predict_kwargs["scale"] = scale_parsed
 
-    # Perform spot detection
-    points, details = model.predict(image, **predict_kwargs)
+    # Handle normalization manually (similar to napari-spotiflow)
+    if normalizer == "percentile":
+        print(
+            f"Applying percentile normalization: {normalizer_low}% to {normalizer_high}%"
+        )
+        p_low, p_high = np.percentile(
+            prepared_img, [normalizer_low, normalizer_high]
+        )
+        normalized_img = np.clip(
+            (prepared_img - p_low) / (p_high - p_low), 0, 1
+        )
+    elif normalizer == "minmax":
+        print("Applying min-max normalization")
+        img_min, img_max = prepared_img.min(), prepared_img.max()
+        normalized_img = (
+            (prepared_img - img_min) / (img_max - img_min)
+            if img_max > img_min
+            else prepared_img
+        )
+    else:
+        normalized_img = prepared_img
 
-    print(f"Detected {len(points)} spots")
+    print(
+        f"Normalized image range: {normalized_img.min():.3f} to {normalized_img.max():.3f}"
+    )
+
+    # Perform spot detection
+    print("Running Spotiflow prediction...")
+    points, details = model.predict(normalized_img, **predict_kwargs)
+
+    print(f"Initial detection: {len(points)} spots")
+
+    # Only apply minimal additional filtering if we still have too many detections
+    # This should rarely be needed now that we use proper automatic thresholding
+    if len(points) > 500:  # Only if we have an excessive number of spots
+        print(f"Applying additional filtering for {len(points)} spots")
+
+        # Check if we can apply probability filtering
+        if hasattr(details, "prob"):
+            # Use a more stringent threshold
+            auto_thresh = 0.7
+            prob_mask = details.prob > auto_thresh
+            points = points[prob_mask]
+            print(
+                f"After additional probability thresholding ({auto_thresh}): {len(points)} spots"
+            )
+
+    print(f"Final detection: {len(points)} spots")
     return points
 
 
 def _detect_spots_env(
     image,
+    axes,
     pretrained_model,
     model_path,
     subpixel,
@@ -363,6 +551,7 @@ def _detect_spots_env(
     # Prepare arguments for environment execution
     args_dict = {
         "image": image,
+        "axes": axes,
         "pretrained_model": pretrained_model,
         "model_path": model_path,
         "subpixel": subpixel,

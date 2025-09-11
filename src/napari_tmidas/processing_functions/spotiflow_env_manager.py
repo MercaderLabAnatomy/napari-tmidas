@@ -265,6 +265,69 @@ except Exception as e:
     print(f"✗ Failed to load model: {{e}}")
     sys.exit(1)
 
+# Utility functions for input preparation
+def _validate_axes(img, axes):
+    if img.ndim != len(axes):
+        raise ValueError(f"Image has {{img.ndim}} dimensions, but axes has {{len(axes)}} dimensions")
+
+def _prepare_input(img, axes):
+    _validate_axes(img, axes)
+    if axes in {{"YX", "ZYX", "TYX", "TZYX"}}:
+        return img[..., None]
+    elif axes in {{"YXC", "ZYXC", "TYXC", "TZYXC"}}:
+        return img
+    elif axes == "CYX":
+        return img.transpose(1, 2, 0)
+    elif axes == "CZYX":
+        return img.transpose(1, 2, 3, 0)
+    elif axes == "ZCYX":
+        return img.transpose(0, 2, 3, 1)
+    elif axes == "TCYX":
+        return img.transpose(0, 2, 3, 1)
+    elif axes == "TZCYX":
+        return img.transpose(0, 1, 3, 4, 2)
+    elif axes == "TCZYX":
+        return img.transpose(0, 2, 3, 4, 1)
+    else:
+        raise ValueError(f"Invalid axes: {{axes}}")
+
+try:
+    # Handle axes and input preparation
+    axes = '{args_dict.get('axes', 'auto')}'
+    if axes == 'auto':
+        # Auto-infer axes
+        ndim = image.ndim
+        if ndim == 2:
+            axes = "YX"
+        elif ndim == 3:
+            axes = "ZYX"
+        elif ndim == 4:
+            if image.shape[-1] <= 4:
+                axes = "ZYXC"
+            else:
+                axes = "TZYX"
+        elif ndim == 5:
+            axes = "TZYXC"
+        else:
+            raise ValueError(f"Cannot infer axes for {{ndim}}D image")
+
+    print(f"Using axes: {{axes}}")
+
+    # Prepare input
+    prepared_img = _prepare_input(image, axes)
+    print(f"Prepared image shape: {{prepared_img.shape}}")
+
+    # Check model compatibility
+    is_3d_image = len(image.shape) == 3 and "Z" in axes
+    if is_3d_image and not model.config.is_3d:
+        print("Warning: Using a 2D model on 3D data. Consider using a 3D model.")
+
+except Exception as e:
+    print(f"✗ Failed to prepare input: {{e}}")
+    # Fallback to original image
+    prepared_img = image
+    axes = "YX" if image.ndim == 2 else "ZYX"
+
 try:
     # Parse string parameters
     def parse_param(param_str, default_val):
@@ -278,40 +341,39 @@ try:
     n_tiles_parsed = parse_param('{args_dict.get('n_tiles', 'auto')}', None)
     scale_parsed = parse_param('{args_dict.get('scale', 'auto')}', None)
 
-    # Prepare normalizer function
+    # Handle normalization manually (similar to napari-spotiflow)
     normalizer_type = '{args_dict.get('normalizer', 'percentile')}'
     if normalizer_type == "percentile":
         normalizer_low = {args_dict.get('normalizer_low', 1.0)}
         normalizer_high = {args_dict.get('normalizer_high', 99.8)}
-        from csbdeep.utils import normalize_mi_ma
-        import numpy as np
-        # Create a normalizer function that uses the specified percentiles
-        def normalizer_func(img):
-            p_low, p_high = np.percentile(img, [normalizer_low, normalizer_high])
-            return normalize_mi_ma(img, p_low, p_high)
-        actual_normalizer = normalizer_func
+        print(f"Applying percentile normalization: {{normalizer_low}}% to {{normalizer_high}}%")
+        p_low, p_high = np.percentile(prepared_img, [normalizer_low, normalizer_high])
+        normalized_img = np.clip((prepared_img - p_low) / (p_high - p_low), 0, 1)
     elif normalizer_type == "minmax":
-        from csbdeep.utils import normalize_mi_ma
-        def normalizer_func(img):
-            return normalize_mi_ma(img, img.min(), img.max())
-        actual_normalizer = normalizer_func
+        print("Applying min-max normalization")
+        img_min, img_max = prepared_img.min(), prepared_img.max()
+        normalized_img = (prepared_img - img_min) / (img_max - img_min) if img_max > img_min else prepared_img
     else:
-        actual_normalizer = "auto"
+        normalized_img = prepared_img
 
-    # Prepare prediction parameters
+    print(f"Normalized image range: {{normalized_img.min():.3f}} to {{normalized_img.max():.3f}}")
+
+    # Prepare prediction parameters (following napari-spotiflow style)
     predict_kwargs = {{
         'subpix': {args_dict.get('subpixel', True)},  # Note: Spotiflow API uses 'subpix', not 'subpixel'
         'peak_mode': '{args_dict.get('peak_mode', 'fast')}',
-        'normalizer': actual_normalizer,
+        'normalizer': None,  # We handle normalization manually
         'exclude_border': {args_dict.get('exclude_border', True)},
-        'min_distance': {args_dict.get('min_distance', 1)},
-        'device': 'cpu',  # Force CPU for now to avoid GPU compatibility issues
+        'min_distance': {args_dict.get('min_distance', 2)},
+        'verbose': True,
     }}
 
-    # Add optional parameters
+    # Set probability threshold - use automatic or provided value
     prob_thresh = {args_dict.get('prob_thresh', None)}
-    if prob_thresh is not None:
+    if prob_thresh is not None and prob_thresh > 0.0:
         predict_kwargs['prob_thresh'] = prob_thresh
+    # If prob_thresh is None or 0.0, don't set it - let spotiflow use automatic threshold
+
     if n_tiles_parsed is not None:
         predict_kwargs['n_tiles'] = n_tiles_parsed
     if scale_parsed is not None:
@@ -324,10 +386,24 @@ except Exception as e:
 
 try:
     # Perform spot detection
-    print("Starting spot detection...")
-    points, details = model.predict(image, **predict_kwargs)
-    print(f"✓ Spot detection completed successfully")
-    print(f"✓ Detected {{len(points)}} spots")
+    print("Running Spotiflow prediction...")
+    points, details = model.predict(normalized_img, **predict_kwargs)
+    print(f"✓ Initial detection: {{len(points)}} spots")
+
+    # Only apply minimal additional filtering if we still have too many detections
+    # This should rarely be needed now that we use proper automatic thresholding
+    if len(points) > 500:  # Only if we have an excessive number of spots
+        print(f"Applying additional filtering for {{len(points)}} spots")
+
+        # Check if we can apply probability filtering
+        if hasattr(details, 'prob'):
+            # Use a more stringent threshold
+            auto_thresh = 0.7
+            prob_mask = details.prob > auto_thresh
+            points = points[prob_mask]
+            print(f"After additional probability thresholding ({{auto_thresh}}): {{len(points)}} spots")
+
+    print(f"Final detection: {{len(points)}} spots")
 
     if len(points) > 0:
         print(f"✓ Points shape: {{points.shape}}")
