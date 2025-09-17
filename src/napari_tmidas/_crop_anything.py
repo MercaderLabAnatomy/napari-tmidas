@@ -134,17 +134,45 @@ class BatchCropAnything:
 
         try:
             # import torch
+            print("DEBUG: Starting SAM2 initialization...")
 
             self.device = get_device()
+            print(f"DEBUG: Device set to {self.device}")
 
             # Download checkpoint if needed
             checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
             checkpoint_path = download_checkpoint(
                 checkpoint_url, "/opt/sam2/checkpoints/"
             )
+            print(f"DEBUG: Checkpoint path: {checkpoint_path}")
+
+            # Use relative config path for SAM2's Hydra config system
             model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+            print(f"DEBUG: Model config: {model_cfg}")
+
+            # Verify the actual config file exists in the SAM2 installation
+            sam2_base_path = None
+            for path in sam2_paths:
+                if path and os.path.exists(path):
+                    sam2_base_path = path
+                    break
+
+            if sam2_base_path is not None:
+                full_config_path = os.path.join(
+                    sam2_base_path, "sam2", model_cfg
+                )
+                if not os.path.exists(full_config_path):
+                    raise FileNotFoundError(
+                        f"SAM2 config file not found at: {full_config_path}"
+                    )
+                print(f"DEBUG: Verified config exists at: {full_config_path}")
+            else:
+                print(
+                    "DEBUG: Warning - could not verify config file exists, but proceeding with relative path"
+                )
 
             if self.use_3d:
+                print("DEBUG: Initializing SAM2 Video Predictor...")
                 from sam2.build_sam import build_sam2_video_predictor
 
                 self.predictor = build_sam2_video_predictor(
@@ -153,7 +181,9 @@ class BatchCropAnything:
                 self.viewer.status = (
                     f"Initialized SAM2 Video Predictor on {self.device}"
                 )
+                print("DEBUG: SAM2 Video Predictor initialized successfully")
             else:
+                print("DEBUG: Initializing SAM2 Image Predictor...")
                 from sam2.build_sam import build_sam2
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -163,6 +193,7 @@ class BatchCropAnything:
                 self.viewer.status = (
                     f"Initialized SAM2 Image Predictor on {self.device}"
                 )
+                print("DEBUG: SAM2 Image Predictor initialized successfully")
 
         except (
             ImportError,
@@ -170,28 +201,50 @@ class BatchCropAnything:
             ValueError,
             FileNotFoundError,
             requests.RequestException,
+            AttributeError,
+            ModuleNotFoundError,
         ) as e:
             import traceback
 
             error_msg = f"SAM2 initialization failed: {str(e)}"
+            error_type = type(e).__name__
             self.viewer.status = (
                 f"{error_msg} - Images will load without segmentation"
             )
             self.predictor = None
-            print(f"SAM2 Error: {error_msg}")
-            print("Full traceback:")
+            print(f"DEBUG: SAM2 Error ({error_type}): {error_msg}")
+            print("DEBUG: Full traceback:")
             print(traceback.format_exc())
             print(
-                "Note: Images will still load, but automatic segmentation will not be available."
+                "DEBUG: Note: Images will still load, but automatic segmentation will not be available."
             )
+
+            # Provide specific guidance based on error type
+            if isinstance(e, FileNotFoundError):
+                print(
+                    "DEBUG: This appears to be a missing file issue. Check SAM2 installation and config paths."
+                )
+            elif isinstance(e, (ImportError, ModuleNotFoundError)):
+                print(
+                    "DEBUG: This appears to be a SAM2 import issue. Check SAM2 installation."
+                )
+            elif isinstance(e, RuntimeError):
+                print(
+                    "DEBUG: This appears to be a runtime issue, possibly GPU/CUDA related."
+                )
+            else:
+                print(f"DEBUG: Unexpected error type: {error_type}")
 
     def load_images(self, folder_path: str):
         """Load images from the specified folder path."""
+        print(f"DEBUG: Loading images from folder: {folder_path}")
         if not os.path.exists(folder_path):
             self.viewer.status = f"Folder not found: {folder_path}"
+            print(f"DEBUG: Folder does not exist: {folder_path}")
             return
 
         files = os.listdir(folder_path)
+        print(f"DEBUG: Found {len(files)} files in folder")
         self.images = []
         for file in files:
             full = os.path.join(folder_path, file)
@@ -201,18 +254,26 @@ class BatchCropAnything:
                 or (os.path.isdir(full) and low.endswith(".zarr"))
             ) and (
                 "label" not in low
-                and "cropped" not in low
                 and "_labels_" not in low
-                and "_cropped_" not in low
+                and "sam2"
+                not in low  # Exclude any SAM2-related files (including output from this tool)
             ):
                 self.images.append(full)
+                print(f"DEBUG: Added image: {file}")
+            else:
+                print(
+                    f"DEBUG: Excluded file: {file} (reason: filtering criteria)"
+                )
 
         if not self.images:
             self.viewer.status = "No compatible images found in the folder."
+            print("DEBUG: No compatible images found")
             return
 
+        print(f"DEBUG: Total compatible images found: {len(self.images)}")
         self.viewer.status = f"Found {len(self.images)} .tif images."
         self.current_index = 0
+        print(f"DEBUG: About to load first image: {self.images[0]}")
         self._load_current_image()
 
     def next_image(self):
@@ -265,28 +326,35 @@ class BatchCropAnything:
 
     def _load_current_image(self):
         """Load the current image and generate segmentation."""
+        print("DEBUG: _load_current_image called")
         if not self.images:
             self.viewer.status = "No images to process."
-            return
-
-        if self.predictor is None:
-            self.viewer.status = (
-                "SAM2 model not initialized. Cannot segment images."
-            )
+            print("DEBUG: No images to process")
             return
 
         image_path = self.images[self.current_index]
-        self.viewer.status = f"Processing {os.path.basename(image_path)}"
+        print(f"DEBUG: Loading image at path: {image_path}")
+
+        if self.predictor is None:
+            self.viewer.status = f"Loading {os.path.basename(image_path)} (SAM2 model not initialized - no segmentation will be available)"
+            print("DEBUG: SAM2 predictor is None")
+        else:
+            self.viewer.status = f"Processing {os.path.basename(image_path)}"
+            print("DEBUG: SAM2 predictor is available")
 
         try:
+            print("DEBUG: About to clear viewer layers")
             # Clear existing layers
             self.viewer.layers.clear()
+            print("DEBUG: Viewer layers cleared")
 
+            print("DEBUG: About to load image file")
             # Load and process image
             if image_path.lower().endswith(".zarr") or (
                 os.path.isdir(image_path)
                 and image_path.lower().endswith(".zarr")
             ):
+                print("DEBUG: Loading Zarr file")
                 data = load_any_image(image_path)
                 # If multiple layers returned, take first image layer
                 if isinstance(data, list):
@@ -315,7 +383,12 @@ class BatchCropAnything:
 
                 self.original_image = img
             else:
+                print("DEBUG: Loading TIFF file")
                 self.original_image = imread(image_path)
+
+            print(
+                f"DEBUG: Image loaded, shape: {self.original_image.shape}, dtype: {self.original_image.dtype}"
+            )
 
             # For 3D/4D data, determine dimensions
             if self.use_3d and len(self.original_image.shape) >= 3:
@@ -331,10 +404,12 @@ class BatchCropAnything:
 
                     if time_dim_idx == 0:  # TZYX format
                         # Keep as is, T is already the first dimension
+                        print("DEBUG: Adding 4D image (TZYX format) to viewer")
                         self.image_layer = self.viewer.add_image(
                             self.original_image,
                             name=f"Image ({os.path.basename(image_path)})",
                         )
+                        print(f"DEBUG: Added image layer: {self.image_layer}")
                         # Store time dimension info
                         self.time_dim_size = self.original_image.shape[0]
                         self.has_z_dim = True
@@ -356,19 +431,23 @@ class BatchCropAnything:
                             transposed_image  # Replace with transposed version
                         )
 
+                        print("DEBUG: Adding transposed 4D image to viewer")
                         self.image_layer = self.viewer.add_image(
                             self.original_image,
                             name=f"Image ({os.path.basename(image_path)})",
                         )
+                        print(f"DEBUG: Added image layer: {self.image_layer}")
                         # Store time dimension info
                         self.time_dim_size = self.original_image.shape[0]
                         self.has_z_dim = True
                     else:
                         # No time dimension found, treat as ZYX
+                        print("DEBUG: Adding 4D image (ZYX format) to viewer")
                         self.image_layer = self.viewer.add_image(
                             self.original_image,
                             name=f"Image ({os.path.basename(image_path)})",
                         )
+                        print(f"DEBUG: Added image layer: {self.image_layer}")
                         self.time_dim_size = 1
                         self.has_z_dim = True
                 elif (
@@ -377,30 +456,37 @@ class BatchCropAnything:
                     # Check if first dimension is likely time (> 4, < 400)
                     if 4 < self.original_image.shape[0] < 400:
                         # Likely TYX format
+                        print("DEBUG: Adding 3D image (TYX format) to viewer")
                         self.image_layer = self.viewer.add_image(
                             self.original_image,
                             name=f"Image ({os.path.basename(image_path)})",
                         )
+                        print(f"DEBUG: Added image layer: {self.image_layer}")
                         self.time_dim_size = self.original_image.shape[0]
                         self.has_z_dim = False
                     else:
                         # Likely ZYX format or another 3D format
+                        print("DEBUG: Adding 3D image (ZYX format) to viewer")
                         self.image_layer = self.viewer.add_image(
                             self.original_image,
                             name=f"Image ({os.path.basename(image_path)})",
                         )
+                        print(f"DEBUG: Added image layer: {self.image_layer}")
                         self.time_dim_size = 1
                         self.has_z_dim = True
                 else:
                     # Should not reach here with use_3d=True, but just in case
+                    print("DEBUG: Adding 3D image (fallback) to viewer")
                     self.image_layer = self.viewer.add_image(
                         self.original_image,
                         name=f"Image ({os.path.basename(image_path)})",
                     )
+                    print(f"DEBUG: Added image layer: {self.image_layer}")
                     self.time_dim_size = 1
                     self.has_z_dim = False
             else:
                 # Handle 2D data as before
+                print("DEBUG: Processing 2D image")
                 if self.original_image.dtype != np.uint8:
                     image_for_display = (
                         self.original_image
@@ -411,18 +497,42 @@ class BatchCropAnything:
                     image_for_display = self.original_image
 
                 # Add image to viewer
+                print("DEBUG: Adding 2D image to viewer")
                 self.image_layer = self.viewer.add_image(
                     image_for_display,
                     name=f"Image ({os.path.basename(image_path)})",
                 )
+                print(f"DEBUG: Added image layer: {self.image_layer}")
 
-            # Generate segmentation
-            self._generate_segmentation(self.original_image, image_path)
+            # Generate segmentation only if predictor is available
+            if self.predictor is not None:
+                print("DEBUG: About to generate segmentation")
+                self._generate_segmentation(self.original_image, image_path)
+                print("DEBUG: Segmentation generation completed")
+            else:
+                print("DEBUG: Creating empty segmentation (no predictor)")
+                # Create empty segmentation when predictor is not available
+                if self.use_3d:
+                    shape = self.original_image.shape
+                else:
+                    shape = self.original_image.shape[:2]
+
+                self.segmentation_result = np.zeros(shape, dtype=np.uint32)
+                self.label_layer = self.viewer.add_labels(
+                    self.segmentation_result,
+                    name="No Segmentation (SAM2 not available)",
+                )
+                print(f"DEBUG: Added empty label layer: {self.label_layer}")
+
+            print("DEBUG: _load_current_image completed successfully")
 
         except (FileNotFoundError, ValueError, TypeError, OSError) as e:
             import traceback
 
-            self.viewer.status = f"Error processing image: {str(e)}"
+            error_msg = f"Error processing image: {str(e)}"
+            self.viewer.status = error_msg
+            print(f"DEBUG: Exception in _load_current_image: {error_msg}")
+            print("DEBUG: Full traceback:")
             traceback.print_exc()
 
             # Create empty segmentation in case of error
@@ -439,6 +549,7 @@ class BatchCropAnything:
                 self.label_layer = self.viewer.add_labels(
                     self.segmentation_result, name="Error: No Segmentation"
                 )
+                print(f"DEBUG: Added error label layer: {self.label_layer}")
 
     def _generate_segmentation(self, image, image_path: str):
         """Generate segmentation for the current image using SAM2."""
@@ -2277,14 +2388,14 @@ class BatchCropAnything:
             label_str = "_".join(
                 str(lid) for lid in sorted(self.selected_labels)
             )
-            output_path = f"{base_name}_cropped_{label_str}.tif"
+            output_path = f"{base_name}_sam2_cropped_{label_str}.tif"
 
             # Save using tifffile with explicit parameters for best compatibility
             imwrite(output_path, cropped_image, compression="zlib")
             self.viewer.status = f"Saved cropped image to {output_path}"
 
             # Save the label image with exact same dimensions as original
-            label_output_path = f"{base_name}_labels_{label_str}.tif"
+            label_output_path = f"{base_name}_sam2_labels_{label_str}.tif"
             imwrite(label_output_path, label_image, compression="zlib")
             self.viewer.status += f"\nSaved label mask to {label_output_path}"
 
