@@ -173,9 +173,17 @@ class BatchCropAnything:
         ) as e:
             import traceback
 
-            self.viewer.status = f"Error initializing SAM2: {str(e)}"
+            error_msg = f"SAM2 initialization failed: {str(e)}"
+            self.viewer.status = (
+                f"{error_msg} - Images will load without segmentation"
+            )
             self.predictor = None
+            print(f"SAM2 Error: {error_msg}")
+            print("Full traceback:")
             print(traceback.format_exc())
+            print(
+                "Note: Images will still load, but automatic segmentation will not be available."
+            )
 
     def load_images(self, folder_path: str):
         """Load images from the specified folder path."""
