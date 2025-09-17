@@ -34,6 +34,9 @@ from skimage.io import imread
 from skimage.transform import resize
 from tifffile import imwrite
 
+from napari_tmidas._file_selector import (
+    load_image_file as load_any_image,
+)
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
@@ -181,16 +184,20 @@ class BatchCropAnything:
             return
 
         files = os.listdir(folder_path)
-        self.images = [
-            os.path.join(folder_path, file)
-            for file in files
-            if file.lower().endswith(".tif")
-            or file.lower().endswith(".tiff")
-            and "label" not in file.lower()
-            and "cropped" not in file.lower()
-            and "_labels_" not in file.lower()
-            and "_cropped_" not in file.lower()
-        ]
+        self.images = []
+        for file in files:
+            full = os.path.join(folder_path, file)
+            low = file.lower()
+            if (
+                low.endswith((".tif", ".tiff"))
+                or (os.path.isdir(full) and low.endswith(".zarr"))
+            ) and (
+                "label" not in low
+                and "cropped" not in low
+                and "_labels_" not in low
+                and "_cropped_" not in low
+            ):
+                self.images.append(full)
 
         if not self.images:
             self.viewer.status = "No compatible images found in the folder."
@@ -268,7 +275,39 @@ class BatchCropAnything:
             self.viewer.layers.clear()
 
             # Load and process image
-            self.original_image = imread(image_path)
+            if image_path.lower().endswith(".zarr") or (
+                os.path.isdir(image_path)
+                and image_path.lower().endswith(".zarr")
+            ):
+                data = load_any_image(image_path)
+                # If multiple layers returned, take first image layer
+                if isinstance(data, list):
+                    img = None
+                    for entry in data:
+                        if isinstance(entry, tuple) and len(entry) == 3:
+                            d, _kwargs, layer_type = entry
+                            if layer_type == "image":
+                                img = d
+                                break
+                        elif isinstance(entry, tuple) and len(entry) == 2:
+                            d, _kwargs = entry
+                            img = d
+                            break
+                        else:
+                            img = entry
+                            break
+                    if img is None:
+                        raise ValueError("No image layer found in Zarr store")
+                else:
+                    img = data
+
+                # Compute dask arrays to numpy if needed
+                if hasattr(img, "compute"):
+                    img = img.compute()
+
+                self.original_image = img
+            else:
+                self.original_image = imread(image_path)
 
             # For 3D/4D data, determine dimensions
             if self.use_3d and len(self.original_image.shape) >= 3:
@@ -626,8 +665,10 @@ class BatchCropAnything:
             if self.label_layer is not None and hasattr(
                 self.label_layer, "mouse_drag_callbacks"
             ):
+                # Safely remove all existing callbacks
                 for callback in list(self.label_layer.mouse_drag_callbacks):
-                    self.label_layer.mouse_drag_callbacks.remove(callback)
+                    with contextlib.suppress(ValueError):
+                        self.label_layer.mouse_drag_callbacks.remove(callback)
 
                 # Add 3D-specific click handler
                 self.label_layer.mouse_drag_callbacks.append(
@@ -991,7 +1032,11 @@ class BatchCropAnything:
                 time.sleep(2)
                 for layer in list(self.viewer.layers):
                     if "Propagation Progress" in layer.name:
-                        self.viewer.layers.remove(layer)
+                        # Clean up callbacks before removing the layer to prevent cleanup issues
+                        if hasattr(layer, "mouse_drag_callbacks"):
+                            layer.mouse_drag_callbacks.clear()
+                        with contextlib.suppress(ValueError):
+                            self.viewer.layers.remove(layer)
 
             threading.Thread(target=remove_progress).start()
 
@@ -1083,7 +1128,11 @@ class BatchCropAnything:
         # Remove existing label layer if it exists
         for layer in list(self.viewer.layers):
             if isinstance(layer, Labels) and "Segmentation" in layer.name:
-                self.viewer.layers.remove(layer)
+                # Clean up callbacks before removing the layer to prevent cleanup issues
+                if hasattr(layer, "mouse_drag_callbacks"):
+                    layer.mouse_drag_callbacks.clear()
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(layer)
 
         # Add label layer to viewer
         self.label_layer = self.viewer.add_labels(
@@ -1386,7 +1435,11 @@ class BatchCropAnything:
                         time.sleep(2)
                         for layer in list(self.viewer.layers):
                             if "Propagation Progress" in layer.name:
-                                self.viewer.layers.remove(layer)
+                                # Clean up callbacks before removing the layer to prevent cleanup issues
+                                if hasattr(layer, "mouse_drag_callbacks"):
+                                    layer.mouse_drag_callbacks.clear()
+                                with contextlib.suppress(ValueError):
+                                    self.viewer.layers.remove(layer)
 
                     threading.Thread(target=remove_progress).start()
 
@@ -1753,7 +1806,11 @@ class BatchCropAnything:
         # Remove previous point markers
         for layer in list(self.viewer.layers):
             if "Point Prompt" in layer.name:
-                self.viewer.layers.remove(layer)
+                # Clean up callbacks before removing the layer to prevent cleanup issues
+                if hasattr(layer, "mouse_drag_callbacks"):
+                    layer.mouse_drag_callbacks.clear()
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(layer)
 
         # Create points layer
         color = (
@@ -1968,7 +2025,11 @@ class BatchCropAnything:
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
                 if f"Points for Object {label_id}" in layer.name:
-                    self.viewer.layers.remove(layer)
+                    # Clean up callbacks before removing the layer to prevent cleanup issues
+                    if hasattr(layer, "mouse_drag_callbacks"):
+                        layer.mouse_drag_callbacks.clear()
+                    with contextlib.suppress(ValueError):
+                        self.viewer.layers.remove(layer)
 
             # Clean up object tracking data
             if hasattr(self, "obj_points") and label_id in self.obj_points:
@@ -2006,7 +2067,11 @@ class BatchCropAnything:
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
                 if f"Points for Object {label_id}" in layer.name:
-                    self.viewer.layers.remove(layer)
+                    # Clean up callbacks before removing the layer to prevent cleanup issues
+                    if hasattr(layer, "mouse_drag_callbacks"):
+                        layer.mouse_drag_callbacks.clear()
+                    with contextlib.suppress(ValueError):
+                        self.viewer.layers.remove(layer)
 
             # Clean up 3D object tracking data
             if (
@@ -2060,7 +2125,11 @@ class BatchCropAnything:
                 # Remove previous preview if exists
                 for layer in list(self.viewer.layers):
                     if "Preview" in layer.name:
-                        self.viewer.layers.remove(layer)
+                        # Clean up callbacks before removing the layer to prevent cleanup issues
+                        if hasattr(layer, "mouse_drag_callbacks"):
+                            layer.mouse_drag_callbacks.clear()
+                        with contextlib.suppress(ValueError):
+                            self.viewer.layers.remove(layer)
 
                 # Make sure the segmentation layer is active again
                 if self.label_layer is not None:
@@ -2098,7 +2167,11 @@ class BatchCropAnything:
             # Remove previous preview if exists
             for layer in list(self.viewer.layers):
                 if "Preview" in layer.name:
-                    self.viewer.layers.remove(layer)
+                    # Clean up callbacks before removing the layer to prevent cleanup issues
+                    if hasattr(layer, "mouse_drag_callbacks"):
+                        layer.mouse_drag_callbacks.clear()
+                    with contextlib.suppress(ValueError):
+                        self.viewer.layers.remove(layer)
 
             # Add preview layer
             if label_ids:
@@ -2343,7 +2416,11 @@ def create_crop_widget(processor):
 
         # Remove object-specific point layers (these are created dynamically)
         for layer in object_points_layers:
-            processor.viewer.layers.remove(layer)
+            # Clean up callbacks before removing the layer to prevent cleanup issues
+            if hasattr(layer, "mouse_drag_callbacks"):
+                layer.mouse_drag_callbacks.clear()
+            with contextlib.suppress(ValueError):
+                processor.viewer.layers.remove(layer)
 
         # Clear data from main points layer instead of removing it
         if main_points_layer is not None:
