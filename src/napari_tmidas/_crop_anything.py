@@ -554,8 +554,9 @@ class BatchCropAnything:
 
         # Set the image in the predictor for later use
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
-        with torch.inference_mode(), torch.autocast(
-            device_type, dtype=torch.float32
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type, dtype=torch.float32),
         ):
             self.predictor.set_image(resized_image)
 
@@ -636,8 +637,9 @@ class BatchCropAnything:
             self.viewer.status = "Initializing SAM2 Video Predictor..."
             try:
                 device_type = "cuda" if self.device.type == "cuda" else "cpu"
-                with torch.inference_mode(), torch.autocast(
-                    device_type, dtype=torch.float32
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type, dtype=torch.float32),
                 ):
                     self._sam2_state = self.predictor.init_state(mp4_path)
             except (
@@ -935,8 +937,9 @@ class BatchCropAnything:
             try:
                 # Use torch.inference_mode() and torch.autocast to ensure consistent dtypes
                 device_type = "cuda" if self.device.type == "cuda" else "cpu"
-                with torch.inference_mode(), torch.autocast(
-                    device_type, dtype=torch.float32
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type, dtype=torch.float32),
                 ):
                     # Attempt to run SAM2 propagation - this will iterate through all frames
                     for (
@@ -1073,8 +1076,9 @@ class BatchCropAnything:
         point_coords = np.array([[x, y, z]])
         point_labels = np.array([1])  # 1 = foreground
 
-        with torch.inference_mode(), torch.autocast(
-            device_type, dtype=torch.float32
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type, dtype=torch.float32),
         ):
             masks, scores, _ = self.predictor.predict(
                 state=self._sam2_state,
@@ -2292,8 +2296,9 @@ class BatchCropAnything:
             # Re-set the image in the predictor
             device_type = "cuda" if self.device.type == "cuda" else "cpu"
             try:
-                with torch.inference_mode(), torch.autocast(
-                    device_type, dtype=torch.float32
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type, dtype=torch.float32),
                 ):
                     self.predictor.set_image(self.prepared_sam2_image)
             except (RuntimeError, AssertionError, TypeError, ValueError) as e:
