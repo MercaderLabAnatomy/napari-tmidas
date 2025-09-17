@@ -82,3 +82,9 @@ venv/
 
 # written by setuptools_scm
 **/_version.py
+
+# Test run artifacts (not source)
+slow_tests_output.txt
+tox_run_output.txt
+*_run_output.txt
+*tests_output.txt

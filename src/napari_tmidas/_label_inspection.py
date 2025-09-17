@@ -27,6 +27,43 @@ class LabelInspector:
         self.image_label_pairs = []
         self.current_index = 0
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _can_show_message(self) -> bool:
+        """Return True if it's (probably) safe to show a QMessageBox.
+
+        On Windows CI (headless) creating a modal dialog without a running
+        QApplication or with a mocked viewer can cause access violations.
+        We suppress dialogs when:
+          * No QApplication instance exists
+          * Running under pytest (detected via env var)
+          * The provided viewer is a mock (has no 'window' attr)
+        """
+        try:
+            from qtpy.QtWidgets import QApplication
+
+            if QApplication.instance() is None:
+                return False
+        except (ImportError, RuntimeError):
+            return False
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return False
+        return hasattr(self.viewer, "window")
+
+    def _show_message(self, level: str, title: str, text: str):
+        """Safely show a QMessageBox if environment allows, otherwise noop."""
+        if not self._can_show_message():
+            return
+        try:
+            if level == "warning":
+                QMessageBox.warning(None, title, text)
+            else:
+                QMessageBox.information(None, title, text)
+        except (RuntimeError, ValueError, OSError):
+            # Never let common GUI/runtime issues crash tests
+            pass
+
     def load_image_label_pairs(self, folder_path: str, label_suffix: str):
         """
         Load image-label pairs from a folder.
@@ -47,8 +84,8 @@ class LabelInspector:
 
         if not potential_label_files:
             self.viewer.status = f"No files found with suffix '{label_suffix}'"
-            QMessageBox.warning(
-                None,
+            self._show_message(
+                "warning",
                 "No Label Files Found",
                 f"No files containing '{label_suffix}' were found in {folder_path}.",
             )
@@ -128,7 +165,7 @@ class LabelInspector:
                 for file, issue in format_issues:
                     msg += f"- {file}: {issue}\n"
 
-            QMessageBox.information(None, "Loading Report", msg)
+            self._show_message("info", "Loading Report", msg)
 
     def _load_current_pair(self):
         """

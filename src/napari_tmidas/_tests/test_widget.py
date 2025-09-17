@@ -1,4 +1,7 @@
+import os
+
 import numpy as np
+import pytest
 
 from napari_tmidas._widget import (
     ExampleQWidget,
@@ -20,6 +23,10 @@ def test_threshold_autogenerate_widget():
 # make_napari_viewer is a pytest fixture that returns a napari viewer object
 # you don't need to import it, as long as napari is installed
 # in your testing environment
+@pytest.mark.skipif(
+    os.environ.get("DISPLAY", "") == "" and os.name != "nt",
+    reason="Requires X11 display in headless *nix CI",
+)
 def test_threshold_magic_widget(make_napari_viewer):
     viewer = make_napari_viewer()
     layer = viewer.add_image(np.random.random((100, 100)))
@@ -34,6 +41,17 @@ def test_threshold_magic_widget(make_napari_viewer):
 
 
 def test_image_threshold_widget(make_napari_viewer):
+    # Skip in headless *nix CI environments (segfault risk in Qt/OpenGL stack)
+    import os
+
+    import pytest
+
+    if (
+        os.environ.get("CI") == "true"
+        and os.environ.get("DISPLAY", "") == ""
+        and os.name != "nt"
+    ):
+        pytest.skip("Requires display (skipped in headless CI)")
     viewer = make_napari_viewer()
     layer = viewer.add_image(np.random.random((100, 100)))
     my_widget = ImageThreshold(viewer)
@@ -51,6 +69,16 @@ def test_image_threshold_widget(make_napari_viewer):
 
 # capsys is a pytest fixture that captures stdout and stderr output streams
 def test_example_q_widget(make_napari_viewer, capsys):
+    import os
+
+    import pytest
+
+    if (
+        os.environ.get("CI") == "true"
+        and os.environ.get("DISPLAY", "") == ""
+        and os.name != "nt"
+    ):
+        pytest.skip("Requires display (skipped in headless CI)")
     # make viewer and add an image layer using our fixture
     viewer = make_napari_viewer()
     viewer.add_image(np.random.random((100, 100)))

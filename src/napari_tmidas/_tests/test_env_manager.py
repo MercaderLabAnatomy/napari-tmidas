@@ -61,7 +61,10 @@ class TestBaseEnvironmentManager:
             "napari_tmidas._env_manager.platform.system", return_value="Linux"
         ):
             path = self.manager.get_env_python_path()
-            assert "bin/python" in path
+            import os
+
+            norm = os.path.normpath(path)
+            assert os.path.join("bin", "python") in norm
 
     def test_get_env_python_path_windows(self):
         """Test getting Python path on Windows"""
