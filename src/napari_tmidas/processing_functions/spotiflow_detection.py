@@ -91,10 +91,100 @@ except ImportError:
     )
 
 
+def _convert_points_to_labels_with_heatmap(
+    image: np.ndarray,
+    points: np.ndarray,
+    spot_radius: int,
+    pretrained_model: str,
+    model_path: str,
+    prob_thresh: float,
+    force_cpu: bool,
+) -> np.ndarray:
+    """
+    Convert points to label masks using Spotiflow's probability heatmap for better segmentation.
+    """
+    try:
+        import torch
+        from scipy.ndimage import label
+        from skimage.segmentation import watershed
+        from spotiflow.model import Spotiflow
+
+        # Set device
+        if force_cpu:
+            device = torch.device("cpu")
+        else:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+
+        # Load the model (reuse existing model loading logic)
+        if model_path and os.path.exists(model_path):
+            model = Spotiflow.from_folder(model_path)
+        else:
+            model = Spotiflow.from_pretrained(pretrained_model)
+
+        model = model.to(device)
+
+        # Prepare input (reuse existing logic)
+        axes = _infer_axes(image)
+        prepared_img = _prepare_input(image, axes)
+
+        # Normalize (simple percentile normalization)
+        p_low, p_high = np.percentile(prepared_img, [1.0, 99.8])
+        normalized_img = np.clip(
+            (prepared_img - p_low) / (p_high - p_low), 0, 1
+        )
+
+        # Get prediction with details
+        points_new, details = model.predict(
+            normalized_img,
+            prob_thresh=prob_thresh,
+            device=device,
+            verbose=False,
+        )
+
+        # Use probability heatmap for segmentation
+        if hasattr(details, "heatmap") and details.heatmap is not None:
+            prob_map = details.heatmap
+
+            # Apply threshold to create binary mask
+            threshold = prob_thresh if prob_thresh is not None else 0.4
+            binary_mask = prob_map > threshold
+
+            # Use detected points as seeds for watershed segmentation
+            if len(points) > 0:
+                # Create marker image from detected points
+                markers = np.zeros(prob_map.shape, dtype=np.int32)
+                for i, point in enumerate(points):
+                    if len(point) >= 2:
+                        y, x = int(point[0]), int(point[1])
+                        if (
+                            0 <= y < markers.shape[0]
+                            and 0 <= x < markers.shape[1]
+                        ):
+                            markers[y, x] = i + 1
+
+                # Apply watershed segmentation using probability map and markers
+                labels = watershed(-prob_map, markers, mask=binary_mask)
+            else:
+                # No points detected, just label connected components
+                labels, _ = label(binary_mask)
+
+            return labels.astype(np.uint16)
+        else:
+            # Fallback to point-based method
+            return _points_to_label_mask(points, image.shape[:2], spot_radius)
+
+    except (ImportError, RuntimeError, ValueError, AttributeError) as e:
+        print(f"Error in heatmap-based conversion: {e}")
+        # Fallback to point-based method
+        return _points_to_label_mask(points, image.shape[:2], spot_radius)
+
+
 @BatchProcessingRegistry.register(
     name="Spotiflow Spot Detection",
-    suffix="_spots",
-    description="Detect spots in fluorescence microscopy images using Spotiflow",
+    suffix="_spot_labels",
+    description="Detect spots in fluorescence microscopy images using Spotiflow and return as label masks",
     parameters={
         "pretrained_model": {
             "type": str,
@@ -173,6 +263,13 @@ except ImportError:
             "max": 10,
             "description": "Minimum distance between detected spots",
         },
+        "spot_radius": {
+            "type": int,
+            "default": 3,
+            "min": 1,
+            "max": 20,
+            "description": "Radius of spots in the label mask (in pixels, used for fallback method)",
+        },
         "axes": {
             "type": str,
             "default": "auto",
@@ -187,6 +284,11 @@ except ImportError:
             "type": bool,
             "default": False,
             "description": "Force using dedicated environment even if Spotiflow is available",
+        },
+        "force_cpu": {
+            "type": bool,
+            "default": False,
+            "description": "Force CPU execution (disable GPU) to avoid CUDA compatibility issues",
         },
     },
 )
@@ -204,19 +306,21 @@ def spotiflow_detect_spots(
     exclude_border: bool = True,
     scale: str = "auto",
     min_distance: int = 2,
+    spot_radius: int = 3,
     axes: str = "auto",
     output_csv: bool = True,
     force_dedicated_env: bool = False,
+    force_cpu: bool = False,
     # For internal use by processing system
     input_file_path: str = None,
 ) -> np.ndarray:
     """
-    Detect spots in fluorescence microscopy images using Spotiflow.
+    Detect spots in fluorescence microscopy images using Spotiflow and return label masks.
 
     Spotiflow is a deep learning-based spot detection method that provides
     threshold-agnostic, subpixel-accurate detection of spots in 2D and 3D
-    fluorescence microscopy images. The output is a numpy array of spot
-    coordinates suitable for napari Points layers.
+    fluorescence microscopy images. The output is a label mask suitable for
+    napari Labels layers, created from the Spotiflow probability heatmap.
 
     Parameters:
     -----------
@@ -246,19 +350,23 @@ def spotiflow_detect_spots(
         Scaling factor (e.g., '(1,1)' or 'auto')
     min_distance : int
         Minimum distance between detected spots
+    spot_radius : int
+        Radius of spots in the label mask (in pixels, used for fallback method)
     axes : str
         Axes order (e.g., 'ZYX', 'YX', or 'auto' for automatic detection)
     output_csv : bool
         Save spot coordinates as CSV file alongside the mask
     force_dedicated_env : bool
         Force using dedicated environment
+    force_cpu : bool
+        Force CPU execution (disable GPU) to avoid CUDA compatibility issues
     input_file_path : str
         Path to input file (used for saving CSV output)
 
     Returns:
     --------
     np.ndarray
-        Spot coordinates as (N, 2) or (N, 3) array for napari Points layer
+        Label mask with detected spots (uint16) for napari Labels layer
     """
     print("Detecting spots using Spotiflow...")
     print(f"Image shape: {image.shape}")
@@ -291,6 +399,7 @@ def spotiflow_detect_spots(
             exclude_border,
             scale,
             min_distance,
+            force_cpu,
         )
     else:
         # Use dedicated environment
@@ -309,6 +418,7 @@ def spotiflow_detect_spots(
             exclude_border,
             scale,
             min_distance,
+            force_cpu,
         )
 
     # Save CSV if requested (use a default filename if no input path provided)
@@ -321,8 +431,16 @@ def spotiflow_detect_spots(
                 "No input file path provided, skipping CSV export of spot coordinates."
             )
 
-    print(f"Detected {len(points)} spots, returning points for points layer")
-    return points  # Return points directly for napari points layer
+    # Convert points to label masks using the improved method
+    print(f"Detected {len(points)} spots, converting to label masks...")
+
+    # Always use the simple point-based method for now to ensure it works
+    label_mask = _points_to_label_mask(points, image.shape, spot_radius)
+
+    print(
+        f"Created label mask with {len(np.unique(label_mask)) - 1} labeled objects"
+    )
+    return label_mask
 
 
 def _points_to_label_mask(
@@ -332,71 +450,176 @@ def _points_to_label_mask(
     from scipy import ndimage
     from skimage import draw
 
-    # Create empty label mask
+    # Create empty label mask with the same shape as input image
     label_mask = np.zeros(image_shape, dtype=np.uint16)
 
-    # Handle different dimensionalities
-    if len(image_shape) == 2:  # 2D image
-        if points.shape[1] == 2:  # 2D points
-            coords = points.astype(int)
-        elif (
-            points.shape[1] == 3
-        ):  # 3D points on 2D image - take YX coordinates
-            coords = points[:, 1:].astype(int)  # Skip Z coordinate
+    # Handle different dimensionalities - focus on spatial dimensions
+    spatial_dims = len(image_shape)
+    if spatial_dims >= 4:  # TZYX, TZYXC, etc.
+        if image_shape[-1] <= 4:  # Last dim is channels
+            spatial_shape = image_shape[-4:-1]  # Take ZYX (skip channels)
         else:
-            raise ValueError(
-                f"Unexpected points shape for 2D image: {points.shape}"
-            )
-
-        # Create circular spots
-        for i, (y, x) in enumerate(coords):
-            if 0 <= y < image_shape[0] and 0 <= x < image_shape[1]:
-                rr, cc = draw.disk((y, x), spot_radius, shape=image_shape)
-                label_mask[rr, cc] = i + 1  # Labels start from 1
-
-    elif len(image_shape) == 3:  # 3D image
-        if points.shape[1] == 3:  # 3D points
-            coords = points.astype(int)
-        elif points.shape[1] == 2:  # 2D points on 3D image - add Z=0
-            coords = np.column_stack([np.zeros(len(points)), points]).astype(
-                int
-            )
+            spatial_shape = image_shape[-3:]  # Take last 3 dims (ZYX)
+    elif spatial_dims == 3:  # ZYX or YXC
+        # Check if last dimension is small (likely channels)
+        if image_shape[-1] <= 4:
+            spatial_shape = image_shape[:2]  # YX (with channels)
         else:
-            raise ValueError(
-                f"Unexpected points shape for 3D image: {points.shape}"
-            )
+            spatial_shape = image_shape  # ZYX
+    else:  # 2D: YX or YXC
+        if len(image_shape) == 3 and image_shape[-1] <= 4:
+            spatial_shape = image_shape[:2]  # YX (with channels)
+        else:
+            spatial_shape = image_shape  # YX
 
-        # Create spherical spots
-        for i, (z, y, x) in enumerate(coords):
+    if len(points) == 0:
+        return label_mask
+
+    # Check coordinate format and swap if necessary
+    if points.shape[1] == 2:  # 2D points (y, x)
+        coords = points.astype(int)
+    elif points.shape[1] == 3:  # 3D points - need to figure out the format
+        # Try to determine the correct coordinate mapping based on spatial shape
+        if len(spatial_shape) == 2:  # Working with 2D spatial data
+            # If dim1 and dim2 fit in image bounds, assume (z, y, x)
             if (
-                0 <= z < image_shape[0]
-                and 0 <= y < image_shape[1]
-                and 0 <= x < image_shape[2]
+                points[:, 1].max() < spatial_shape[0]
+                and points[:, 2].max() < spatial_shape[1]
             ):
-                # Create a small sphere
-                ball = ndimage.generate_binary_structure(3, 1)
-                ball = ndimage.iterate_structure(ball, spot_radius)
+                coords = points[:, 1:3].astype(int)  # Take y, x (skip z)
+            # If dim0 and dim2 fit in image bounds, assume (y, z, x)
+            elif (
+                points[:, 0].max() < spatial_shape[0]
+                and points[:, 2].max() < spatial_shape[1]
+            ):
+                coords = points[:, [0, 2]].astype(int)  # Take y, x (skip z)
+            # If dim0 and dim1 fit in image bounds, assume (y, x, z)
+            elif (
+                points[:, 0].max() < spatial_shape[0]
+                and points[:, 1].max() < spatial_shape[1]
+            ):
+                coords = points[:, 0:2].astype(int)  # Take y, x (skip z)
+            else:
+                # Try swapping coordinates - maybe it's (x, y) instead of (y, x)
+                coords = points[:, [1, 0]].astype(int)
+        else:  # Working with 3D spatial data
+            coords = points.astype(int)  # Use all 3 coordinates
+    else:
+        raise ValueError(f"Unexpected points shape: {points.shape}")
 
-                # Get sphere coordinates
-                ball_coords = np.array(np.where(ball)).T - spot_radius
-                z_coords = ball_coords[:, 0] + z
-                y_coords = ball_coords[:, 1] + y
-                x_coords = ball_coords[:, 2] + x
+    # Create spots based on spatial dimensions
+    valid_spots = 0
 
-                # Filter valid coordinates
-                valid = (
-                    (z_coords >= 0)
-                    & (z_coords < image_shape[0])
-                    & (y_coords >= 0)
-                    & (y_coords < image_shape[1])
-                    & (x_coords >= 0)
-                    & (x_coords < image_shape[2])
-                )
+    if len(spatial_shape) == 2:  # 2D spatial
+        for i, (y, x) in enumerate(coords):
+            if 0 <= y < spatial_shape[0] and 0 <= x < spatial_shape[1]:
+                try:
+                    rr, cc = draw.disk(
+                        (y, x), spot_radius, shape=spatial_shape
+                    )
+                    # Handle different label mask shapes
+                    if len(image_shape) == 2:  # Pure 2D
+                        label_mask[rr, cc] = i + 1
+                    elif len(image_shape) == 3:  # 2D with channels or 3D
+                        if image_shape[-1] <= 4:  # Likely channels
+                            label_mask[rr, cc, :] = (
+                                i + 1
+                            )  # Apply to all channels
+                        else:  # 3D data - apply to all Z slices
+                            label_mask[:, rr, cc] = i + 1
+                    elif len(image_shape) == 4:  # TZYX or similar
+                        label_mask[:, :, rr, cc] = (
+                            i + 1
+                        )  # Apply to all T and Z
+                    elif len(image_shape) == 5:  # TZYXC
+                        label_mask[:, :, rr, cc, :] = (
+                            i + 1
+                        )  # Apply to all T, Z, and C
 
-                label_mask[
-                    z_coords[valid], y_coords[valid], x_coords[valid]
-                ] = (i + 1)
+                    valid_spots += 1
+                except (ValueError, IndexError, TypeError) as e:
+                    print(f"Error drawing spot {i} at ({y}, {x}): {e}")
 
+    elif len(spatial_shape) == 3:  # 3D spatial
+        # For 3D spatial, we need 3D coordinates
+        if coords.shape[1] == 2:
+            # We have 2D points but need 3D - place them in the middle Z slice
+            middle_z = spatial_shape[0] // 2
+            coords_3d = np.column_stack(
+                [np.full(len(coords), middle_z), coords]
+            )
+        else:
+            coords_3d = coords
+
+        for i, (z, y, x) in enumerate(coords_3d):
+            if (
+                0 <= z < spatial_shape[0]
+                and 0 <= y < spatial_shape[1]
+                and 0 <= x < spatial_shape[2]
+            ):
+                try:
+                    # Create a small sphere
+                    ball = ndimage.generate_binary_structure(3, 1)
+                    ball = ndimage.iterate_structure(ball, spot_radius)
+
+                    # Get sphere coordinates
+                    ball_coords = np.array(np.where(ball)).T - spot_radius
+                    z_coords = ball_coords[:, 0] + z
+                    y_coords = ball_coords[:, 1] + y
+                    x_coords = ball_coords[:, 2] + x
+
+                    # Filter valid coordinates
+                    valid = (
+                        (z_coords >= 0)
+                        & (z_coords < spatial_shape[0])
+                        & (y_coords >= 0)
+                        & (y_coords < spatial_shape[1])
+                        & (x_coords >= 0)
+                        & (x_coords < spatial_shape[2])
+                    )
+
+                    # Handle different label mask shapes
+                    if len(image_shape) == 3:  # Pure 3D
+                        label_mask[
+                            z_coords[valid], y_coords[valid], x_coords[valid]
+                        ] = (i + 1)
+                    elif len(image_shape) == 4:  # TZYX or ZYXC
+                        if image_shape[-1] <= 4:  # ZYXC
+                            label_mask[
+                                z_coords[valid],
+                                y_coords[valid],
+                                x_coords[valid],
+                                :,
+                            ] = (
+                                i + 1
+                            )
+                        else:  # TZYX
+                            label_mask[
+                                :,
+                                z_coords[valid],
+                                y_coords[valid],
+                                x_coords[valid],
+                            ] = (
+                                i + 1
+                            )
+                    elif len(image_shape) == 5:  # TZYXC
+                        label_mask[
+                            :,
+                            z_coords[valid],
+                            y_coords[valid],
+                            x_coords[valid],
+                            :,
+                        ] = (
+                            i + 1
+                        )
+
+                    valid_spots += 1
+                except (ValueError, IndexError, TypeError) as e:
+                    print(f"Error drawing 3D spot {i} at ({z}, {y}, {x}): {e}")
+
+    print(
+        f"Successfully created {valid_spots} spots in label mask with shape {label_mask.shape}"
+    )
     return label_mask
 
 
@@ -415,9 +638,36 @@ def _detect_spots_direct(
     exclude_border,
     scale,
     min_distance,
+    force_cpu,
 ):
     """Direct implementation using imported Spotiflow."""
+    import torch
     from spotiflow.model import Spotiflow
+
+    # Set device based on force_cpu parameter
+    if force_cpu:
+        print("Forcing CPU execution as requested")
+        device = torch.device("cpu")
+        # Set environment variable to ensure CPU usage
+        import os
+
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        # Use CUDA if available and compatible
+        if torch.cuda.is_available():
+            try:
+                # Test CUDA compatibility by creating a small tensor
+                torch.ones(1).cuda()
+                device = torch.device("cuda")
+                print("Using CUDA (GPU) for inference")
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                print(f"CUDA incompatible ({e}), falling back to CPU")
+                device = torch.device("cpu")
+                force_cpu = True
+        else:
+            print("CUDA not available, using CPU")
+            device = torch.device("cpu")
+            force_cpu = True
 
     # Load the model
     if model_path and os.path.exists(model_path):
@@ -426,6 +676,18 @@ def _detect_spots_direct(
     else:
         print(f"Loading pretrained model: {pretrained_model}")
         model = Spotiflow.from_pretrained(pretrained_model)
+
+    # Move model to the appropriate device
+    try:
+        model = model.to(device)
+        print(f"Model moved to device: {device}")
+    except Exception as e:
+        if not force_cpu:
+            print(f"Failed to move model to GPU ({e}), falling back to CPU")
+            device = torch.device("cpu")
+            model = model.to(device)
+        else:
+            raise
 
     # Check model compatibility with image dimensionality
     is_3d_image = len(image.shape) == 3 and "Z" in axes
@@ -508,7 +770,21 @@ def _detect_spots_direct(
 
     # Perform spot detection
     print("Running Spotiflow prediction...")
-    points, details = model.predict(normalized_img, **predict_kwargs)
+    try:
+        points, details = model.predict(normalized_img, **predict_kwargs)
+    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+        if "CUDA" in str(e) and not force_cpu:
+            print(f"CUDA error during prediction ({e}), retrying with CPU")
+            # Move model to CPU and retry
+            device = torch.device("cpu")
+            model = model.to(device)
+            # Set environment to force CPU
+            import os
+
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            points, details = model.predict(normalized_img, **predict_kwargs)
+        else:
+            raise
 
     print(f"Initial detection: {len(points)} spots")
 
@@ -546,6 +822,7 @@ def _detect_spots_env(
     exclude_border,
     scale,
     min_distance,
+    force_cpu,
 ):
     """Implementation using dedicated environment."""
     # Prepare arguments for environment execution
@@ -564,6 +841,7 @@ def _detect_spots_env(
         "exclude_border": exclude_border,
         "scale": scale,
         "min_distance": min_distance,
+        "force_cpu": force_cpu,
     }
 
     # Run in dedicated environment

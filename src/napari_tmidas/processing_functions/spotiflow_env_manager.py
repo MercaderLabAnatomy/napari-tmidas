@@ -59,23 +59,91 @@ class SpotiflowEnvironmentManager(BaseEnvironmentManager):
                 print("nvidia-smi not found, assuming no CUDA support")
 
         if cuda_available:
-            # Install PyTorch with CUDA support for older GPUs (includes sm_61 for GTX 1080 Ti)
-            print(
-                "Installing PyTorch with CUDA support for older GPU architectures..."
-            )
-            # Use PyTorch with CUDA 11.8 which supports sm_61 (GTX 1080 Ti) and other older GPUs
-            subprocess.check_call(
-                [
-                    env_python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch==2.0.1",
-                    "torchvision==0.15.2",
-                    "--index-url",
-                    "https://download.pytorch.org/whl/cu118",
-                ]
-            )
+            # Try to install PyTorch with CUDA support, but with fallback to CPU-only
+            print("Attempting PyTorch installation with CUDA support...")
+            try:
+                # First try with CUDA 11.8 which supports sm_61 (GTX 1080 Ti) and other older GPUs
+                subprocess.check_call(
+                    [
+                        env_python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "torch==2.0.1",
+                        "torchvision==0.15.2",
+                        "--index-url",
+                        "https://download.pytorch.org/whl/cu118",
+                    ]
+                )
+                print("✓ PyTorch with CUDA 11.8 installed successfully")
+
+                # Test CUDA compatibility
+                test_script = """
+import torch
+try:
+    if torch.cuda.is_available():
+        test_tensor = torch.ones(1).cuda()
+        print("CUDA compatibility test passed")
+    else:
+        print("CUDA not available in PyTorch")
+        exit(1)
+except Exception as e:
+    print(f"CUDA compatibility test failed: {e}")
+    exit(1)
+"""
+                result = subprocess.run(
+                    [env_python, "-c", test_script],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    print(
+                        "CUDA compatibility test failed, falling back to CPU-only PyTorch..."
+                    )
+                    # Uninstall CUDA version and install CPU version
+                    subprocess.check_call(
+                        [
+                            env_python,
+                            "-m",
+                            "pip",
+                            "uninstall",
+                            "-y",
+                            "torch",
+                            "torchvision",
+                        ]
+                    )
+                    subprocess.check_call(
+                        [
+                            env_python,
+                            "-m",
+                            "pip",
+                            "install",
+                            "torch==2.0.1",
+                            "torchvision==0.15.2",
+                        ]
+                    )
+                    print(
+                        "✓ Switched to CPU-only PyTorch due to CUDA incompatibility"
+                    )
+                else:
+                    print("✓ CUDA compatibility test passed")
+
+            except subprocess.CalledProcessError as e:
+                print(f"CUDA PyTorch installation failed: {e}")
+                print("Falling back to CPU-only PyTorch...")
+                # Install PyTorch without CUDA
+                subprocess.check_call(
+                    [
+                        env_python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "torch==2.0.1",
+                        "torchvision==0.15.2",
+                    ]
+                )
+                print("✓ CPU-only PyTorch installed as fallback")
         else:
             # Install PyTorch without CUDA
             print("Installing PyTorch without CUDA support...")
@@ -208,13 +276,15 @@ def run_spotiflow_in_env(func_name, args_dict):
         create_spotiflow_env()
 
     # Prepare temporary files
-    with tempfile.NamedTemporaryFile(
-        suffix=".tif", delete=False
-    ) as input_file, tempfile.NamedTemporaryFile(
-        suffix=".npy", delete=False
-    ) as output_file, tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False
-    ) as script_file:
+    with (
+        tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as input_file,
+        tempfile.NamedTemporaryFile(
+            suffix=".npy", delete=False
+        ) as output_file,
+        tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as script_file,
+    ):
 
         # Save input image
         tifffile.imwrite(input_file.name, args_dict["image"])
@@ -261,6 +331,46 @@ try:
         print(f"Loading pretrained model: {args_dict.get('pretrained_model', 'general')}")
         model = Spotiflow.from_pretrained('{args_dict.get('pretrained_model', 'general')}')
     print("✓ Model loaded successfully")
+
+    # Handle device selection and force_cpu parameter
+    import torch
+    force_cpu = {args_dict.get('force_cpu', False)}
+
+    if force_cpu:
+        print("Forcing CPU execution as requested")
+        device = torch.device("cpu")
+        # Set environment variable to ensure CPU usage
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        # Use CUDA if available and compatible
+        if torch.cuda.is_available():
+            try:
+                # Test CUDA compatibility by creating a small tensor
+                test_tensor = torch.ones(1).cuda()
+                device = torch.device("cuda")
+                print("Using CUDA (GPU) for inference")
+            except Exception as cuda_e:
+                print(f"CUDA incompatible ({{cuda_e}}), falling back to CPU")
+                device = torch.device("cpu")
+                force_cpu = True
+        else:
+            print("CUDA not available, using CPU")
+            device = torch.device("cpu")
+            force_cpu = True
+
+    # Move model to appropriate device
+    try:
+        model = model.to(device)
+        print(f"Model moved to device: {{device}}")
+    except Exception as device_e:
+        if not force_cpu:
+            print(f"Failed to move model to GPU ({{device_e}}), falling back to CPU")
+            device = torch.device("cpu")
+            model = model.to(device)
+        else:
+            raise
+
 except Exception as e:
     print(f"✗ Failed to load model: {{e}}")
     sys.exit(1)
@@ -387,7 +497,21 @@ except Exception as e:
 try:
     # Perform spot detection
     print("Running Spotiflow prediction...")
-    points, details = model.predict(normalized_img, **predict_kwargs)
+    try:
+        points, details = model.predict(normalized_img, **predict_kwargs)
+    except (RuntimeError, Exception) as pred_e:
+        if "CUDA" in str(pred_e) and not force_cpu:
+            print(f"CUDA error during prediction ({{pred_e}}), retrying with CPU")
+            # Move model to CPU and retry
+            device = torch.device("cpu")
+            model = model.to(device)
+            # Set environment to force CPU
+            import os
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            points, details = model.predict(normalized_img, **predict_kwargs)
+        else:
+            raise
+
     print(f"✓ Initial detection: {{len(points)}} spots")
 
     # Only apply minimal additional filtering if we still have too many detections
