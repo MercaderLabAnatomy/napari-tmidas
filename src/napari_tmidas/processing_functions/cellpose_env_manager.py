@@ -8,10 +8,50 @@ import os
 import subprocess
 import tempfile
 from contextlib import suppress
+import signal
+import threading
+import sys
 
+import numpy as np
 import tifffile
 
 from napari_tmidas._env_manager import BaseEnvironmentManager
+
+# Global variable to track running processes for cancellation
+_running_processes = []
+_process_lock = threading.Lock()
+
+
+def cancel_all_processes():
+    """Cancel all running cellpose processes."""
+    with _process_lock:
+        for process in _running_processes[:]:  # Copy list to avoid modification during iteration
+            try:
+                if process.poll() is None:  # Process is still running
+                    process.terminate()
+                    # Give it a moment to terminate gracefully
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # Force kill if it doesn't terminate gracefully
+                        process.kill()
+                        process.wait()
+                _running_processes.remove(process)
+            except Exception as e:
+                print(f"Error terminating process: {e}")
+
+
+def _add_process(process):
+    """Add a process to the tracking list."""
+    with _process_lock:
+        _running_processes.append(process)
+
+
+def _remove_process(process):
+    """Remove a process from the tracking list."""
+    with _process_lock:
+        if process in _running_processes:
+            _running_processes.remove(process)
 
 
 class CellposeEnvironmentManager(BaseEnvironmentManager):
@@ -26,7 +66,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         print(
             "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
         )
-        subprocess.check_call([env_python, "-m", "pip", "install", "cellpose"])
+        subprocess.check_call([env_python, "-m", "pip", "install", "cellpose", "zarr"])
 
         # Check if installation was successful
         try:
@@ -80,27 +120,196 @@ def create_cellpose_env():
     return manager.create_env()
 
 
+def cancel_cellpose_processing():
+    """Cancel all running cellpose processes."""
+    cancel_all_processes()
+
+
 def run_cellpose_in_env(func_name, args_dict):
     """
-    Run Cellpose in a dedicated environment with minimal complexity.
-
-    Parameters:
-    -----------
-    func_name : str
-        Name of the Cellpose function to run (currently unused)
-    args_dict : dict
-        Dictionary of arguments for Cellpose segmentation
-
-    Returns:
-    --------
-    numpy.ndarray
-        Segmentation masks
+    Run Cellpose in a dedicated environment with optimized zarr support.
     """
     # Ensure the environment exists
     if not is_env_created():
         create_cellpose_env()
 
-    # Prepare temporary files
+    # Check for zarr optimization
+    use_zarr_direct = "zarr_path" in args_dict
+    
+    if use_zarr_direct:
+        zarr_path = args_dict["zarr_path"]
+        print(f"Using optimized zarr processing for: {zarr_path}")
+        return run_zarr_processing(zarr_path, args_dict)
+    else:
+        return run_legacy_processing(args_dict)
+
+
+def run_zarr_processing(zarr_path, args_dict):
+    """Process zarr files directly without temporary input files."""
+    
+    with tempfile.NamedTemporaryFile(
+        suffix=".tif", delete=False
+    ) as output_file, tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False
+    ) as script_file:
+
+        # Create zarr processing script (similar to working TIFF script)
+        script = f"""
+import numpy as np
+import sys
+from cellpose import models, core
+import tifffile
+import zarr
+
+# Force output to flush immediately for real-time progress
+import sys
+sys.stdout.flush()
+
+print("=== Cellpose Environment Info ===")
+print(f"GPU available in dedicated environment: {{core.use_gpu()}}")
+sys.stdout.flush()
+
+def process_volume(image, name=""):
+    print(f"\\nProcessing {{name}}: shape={{image.shape}}, range={{np.min(image):.1f}}-{{np.max(image):.1f}}")
+    sys.stdout.flush()
+    
+    # GPU detection IN THE DEDICATED ENVIRONMENT (not main environment)
+    gpu_available = core.use_gpu()
+    use_gpu_requested = {str(args_dict.get('use_gpu', True))}  # Convert to string for f-string
+    actual_use_gpu = use_gpu_requested and gpu_available
+    
+    print(f"GPU: requested={{use_gpu_requested}}, available={{gpu_available}}, using={{actual_use_gpu}}")
+    sys.stdout.flush()
+    
+    # Create model with explicit GPU setting
+    print("Creating Cellpose model...")
+    sys.stdout.flush()
+    model = models.CellposeModel(gpu=actual_use_gpu)
+    print(f"Model created (GPU={{model.gpu}})")
+    sys.stdout.flush()
+    
+    print("Running segmentation...")
+    sys.stdout.flush()
+    
+    # Remove deprecated channels parameter for Cellpose v4.0.1+
+    masks, flows, styles = model.eval(
+        image,
+        # channels parameter removed - deprecated in v4.0.1+
+        flow_threshold={args_dict.get('flow_threshold', 0.4)},
+        cellprob_threshold={args_dict.get('cellprob_threshold', 0.0)},
+        batch_size={args_dict.get('batch_size', 32)},
+        normalize={args_dict.get('normalize', {'tile_norm_blocksize': 128})},
+        do_3D={args_dict.get('do_3D', False)},
+        flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
+        anisotropy={args_dict.get('anisotropy', None)},
+        z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None
+    )
+    
+    object_count = np.max(masks)
+    print(f"Found {{object_count}} objects in {{name}}")
+    sys.stdout.flush()
+    return masks
+
+print("Opening zarr: {zarr_path}")
+sys.stdout.flush()
+zarr_root = zarr.open('{zarr_path}', mode='r')
+
+if hasattr(zarr_root, 'shape'):
+    image = np.array(zarr_root)
+    result = process_volume(image, "zarr")
+else:
+    arrays = list(zarr_root.array_keys())
+    print(f"Arrays: {{arrays}}")
+    sys.stdout.flush()
+    zarr_array = zarr_root[arrays[0]]
+    print(f"Selected: {{arrays[0]}}, shape={{zarr_array.shape}}")
+    sys.stdout.flush()
+    
+    if len(zarr_array.shape) == 5:  # TCZYX
+        T, C, Z, Y, X = zarr_array.shape
+        print(f"5D TCZYX: T={{T}}, C={{C}}, Z={{Z}}, Y={{Y}}, X={{X}}")
+        print(f"Will process {{T*C}} T,C combinations")
+        sys.stdout.flush()
+        result = np.zeros((T, C, Z, Y, X), dtype=np.uint32)
+        
+        for t in range(T):
+            for c in range(C):
+                print(f"\\n=== T={{t+1}}/{{T}}, C={{c+1}}/{{C}} ===")
+                sys.stdout.flush()
+                image = np.array(zarr_array[t, c, :, :, :])
+                masks = process_volume(image, f"T{{t+1}}C{{c+1}}")
+                result[t, c] = masks
+                
+    elif len(zarr_array.shape) == 4:  # 4D
+        dim1, Z, Y, X = zarr_array.shape
+        print(f"4D array: dim1={{dim1}}, Z={{Z}}, Y={{Y}}, X={{X}}")
+        sys.stdout.flush()
+        result = np.zeros((dim1, Z, Y, X), dtype=np.uint32)
+        
+        for i in range(dim1):
+            print(f"\\n=== Volume {{i+1}}/{{dim1}} ===")
+            sys.stdout.flush()
+            image = np.array(zarr_array[i, :, :, :])
+            masks = process_volume(image, f"Vol{{i+1}}")
+            result[i] = masks
+    else:
+        image = np.array(zarr_array)
+        result = process_volume(image, "3D")
+
+print(f"Saving results: shape={{result.shape}}, total objects={{np.max(result)}}")
+sys.stdout.flush()
+tifffile.imwrite('{output_file.name}', result.astype(np.uint32))
+print("Complete!")
+sys.stdout.flush()
+"""
+
+        script_file.write(script)
+        script_file.flush()
+
+        try:
+            # Run with REAL-TIME output (don't capture, let it stream)
+            env_python = get_env_python_path()
+            print("=== Starting Cellpose Processing ===")
+            
+            # Use Popen for real-time progress and cancellation support
+            process = subprocess.Popen(
+                [env_python, script_file.name], 
+                cwd=os.getcwd(),
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                text=True
+            )
+            
+            # Track the process for cancellation
+            _add_process(process)
+            
+            try:
+                # Wait for completion
+                returncode = process.wait()
+                
+                if returncode != 0:
+                    raise RuntimeError(f"Cellpose failed with return code {returncode}")
+                    
+            finally:
+                # Remove from tracking regardless of outcome
+                _remove_process(process)
+
+            # Check if output file was created
+            if not os.path.exists(output_file.name):
+                raise RuntimeError("Output file was not created")
+                
+            return tifffile.imread(output_file.name)
+
+        finally:
+            # Cleanup
+            for fname in [output_file.name, script_file.name]:
+                with suppress(OSError, FileNotFoundError):
+                    os.unlink(fname)
+
+
+def run_legacy_processing(args_dict):
+    """Legacy processing for numpy arrays (original working TIFF approach)."""
+    
     with tempfile.NamedTemporaryFile(
         suffix=".tif", delete=False
     ) as input_file, tempfile.NamedTemporaryFile(
@@ -109,11 +318,10 @@ def run_cellpose_in_env(func_name, args_dict):
         mode="w", suffix=".py", delete=False
     ) as script_file:
 
-        # Save input image
+        # Save input image (exactly like original working code)
         tifffile.imwrite(input_file.name, args_dict["image"])
 
-        # Prepare a temporary script to run Cellpose
-        # Updated to use Cellpose 4 parameters
+        # Create script (exactly like original working code)
         script = f"""
 import numpy as np
 from cellpose import models, core
@@ -122,7 +330,7 @@ import tifffile
 # Load image
 image = tifffile.imread('{input_file.name}')
 
-# Create and run model
+# Create and run model (exactly like original working code)
 model = models.CellposeModel(
     gpu={args_dict.get('use_gpu', True)})
 
@@ -152,18 +360,35 @@ tifffile.imwrite('{output_file.name}', masks)
         script_file.flush()
 
     try:
-        # Run the script in the dedicated environment
+        # Run the script with cancellation support
         env_python = get_env_python_path()
-        result = subprocess.run(
-            [env_python, script_file.name], capture_output=True, text=True
+        
+        # Use Popen for cancellation support
+        process = subprocess.Popen(
+            [env_python, script_file.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
         )
-        print("Stdout:", result.stdout)
-        # Check for errors
-        if result.returncode != 0:
-            print("Stderr:", result.stderr)
-            raise RuntimeError(
-                f"Cellpose segmentation failed: {result.stderr}"
-            )
+        
+        # Track the process for cancellation
+        _add_process(process)
+        
+        try:
+            # Wait for completion and get output
+            stdout, stderr = process.communicate()
+            print("Stdout:", stdout)
+            
+            # Check for errors
+            if process.returncode != 0:
+                print("Stderr:", stderr)
+                raise RuntimeError(
+                    f"Cellpose segmentation failed: {stderr}"
+                )
+                
+        finally:
+            # Remove from tracking regardless of outcome
+            _remove_process(process)
 
         # Read and return the results
         return tifffile.imread(output_file.name)

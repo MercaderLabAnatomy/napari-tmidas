@@ -48,6 +48,12 @@ from napari_tmidas.processing_functions import (
     discover_and_load_processing_functions,
 )
 
+# Import cancellation functions for subprocess-based processing
+try:
+    from napari_tmidas.processing_functions.cellpose_env_manager import cancel_cellpose_processing
+except ImportError:
+    cancel_cellpose_processing = None
+
 # Check for OME-Zarr support
 try:
     from napari_ome_zarr import napari_get_reader
@@ -1382,9 +1388,16 @@ class ProcessingWorker(QThread):
                     f"Processing first layer of multi-layer file: {filepath}"
                 )
                 # Take the first image layer
-                for data, _add_kwargs, layer_type in image_data:
+                for data, add_kwargs, layer_type in image_data:
                     if layer_type == "image":
                         image = data
+                        # Extract metadata if available
+                        if isinstance(add_kwargs, dict):
+                            metadata = add_kwargs.get('metadata', {})
+                            if 'axes' in metadata:
+                                print(f"Zarr axes: {metadata['axes']}")
+                            if 'channel_axis' in metadata:
+                                print(f"Channel axis: {metadata['channel_axis']}")
                         break
                 else:
                     # No image layer found, take first available
@@ -1398,8 +1411,21 @@ class ProcessingWorker(QThread):
             else:
                 image_dtype = np.float32
 
+            # Get shape information for different array types
+            if hasattr(image, 'shape'):
+                shape_info = f"{image.shape}"
+            elif hasattr(image, '__array__'):
+                # For array-like objects
+                try:
+                    arr = np.asarray(image)
+                    shape_info = f"{arr.shape} (converted from array-like)"
+                except:
+                    shape_info = "unknown (array conversion failed)"
+            else:
+                shape_info = "unknown (no shape attribute)"
+
             print(
-                f"Original image shape: {image.shape if hasattr(image, 'shape') else 'unknown'}, dtype: {image_dtype}"
+                f"Original image shape: {shape_info}, dtype: {image_dtype}"
             )
 
             # Check if this is a folder-processing function that shouldn't save individual files
@@ -1426,7 +1452,14 @@ class ProcessingWorker(QThread):
                     raise
 
             # Apply processing with parameters
-            processed_result = self.processing_func(image, **self.param_values)
+            # For zarr files, pass the original filepath to enable optimized processing
+            if filepath.lower().endswith('.zarr'):
+                # Add filepath for zarr-aware processing functions
+                processing_params = {**self.param_values, '_source_filepath': filepath}
+            else:
+                processing_params = self.param_values
+                
+            processed_result = self.processing_func(image, **processing_params)
 
             # Check if result is points data (for spot detection functions)
             if (
@@ -2019,6 +2052,10 @@ class FileResultsWidget(QWidget):
 
     def cancel_processing(self):
         """Cancel the current processing operation"""
+        # Cancel any running cellpose subprocesses
+        if cancel_cellpose_processing:
+            cancel_cellpose_processing()
+            
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()  # Wait for the thread to finish
