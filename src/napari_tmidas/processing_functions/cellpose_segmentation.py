@@ -20,6 +20,7 @@ from napari_tmidas.processing_functions.cellpose_env_manager import (
     create_cellpose_env,
     is_env_created,
     run_cellpose_in_env,
+    cancel_cellpose_processing,  # Add cancellation import
 )
 
 # Check if cellpose is directly available in this environment
@@ -27,12 +28,13 @@ try:
     from cellpose import core
 
     CELLPOSE_AVAILABLE = True
-    USE_GPU = core.use_gpu()
+    # Don't evaluate USE_GPU here - it should be evaluated in the cellpose environment
+    # USE_GPU = core.use_gpu()  # This was the bug!
 
     print("Cellpose found in current environment. Using native import.")
 except ImportError:
     CELLPOSE_AVAILABLE = False
-    USE_GPU = False
+    # USE_GPU = False  # Don't set here either
 
     print(
         "Cellpose not found in current environment. Will use dedicated environment."
@@ -168,6 +170,7 @@ def cellpose_segmentation(
     flow3D_smooth: int = 0,
     tile_norm_blocksize: int = 128,
     batch_size: int = 32,
+    _source_filepath: str = None,  # Hidden parameter for zarr optimization
 ) -> np.ndarray:
     """
     Run Cellpose 4 (Cellpose-SAM) segmentation on an image.
@@ -214,20 +217,42 @@ def cellpose_segmentation(
         )
         create_cellpose_env()
         print("Environment created successfully.")
-    # Prepare arguments for the Cellpose function
-    args = {
-        "image": image,
-        "channels": channels,
-        "flow_threshold": flow_threshold,
-        "cellprob_threshold": cellprob_threshold,
-        "flow3D_smooth": flow3D_smooth,
-        "anisotropy": anisotropy,
-        "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
-        "batch_size": batch_size,
-        "use_gpu": USE_GPU,
-        "do_3D": "Z" in dim_order,
-        "z_axis": 0 if "Z" in dim_order else None,
-    }
+        
+    # Check if we can use zarr optimization
+    use_zarr_direct = _source_filepath and _source_filepath.lower().endswith('.zarr')
+    
+    if use_zarr_direct:
+        print(f"Using optimized zarr processing for: {_source_filepath}")
+        # Prepare arguments for direct zarr processing
+        args = {
+            "zarr_path": _source_filepath,
+            "zarr_key": None,  # Could be enhanced to support specific keys
+            "channels": channels,
+            "flow_threshold": flow_threshold,
+            "cellprob_threshold": cellprob_threshold,
+            "flow3D_smooth": flow3D_smooth,
+            "anisotropy": anisotropy,
+            "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
+            "batch_size": batch_size,
+            "use_gpu": True,  # Let cellpose environment detect GPU
+            "do_3D": "Z" in dim_order,
+            "z_axis": 0 if "Z" in dim_order else None,
+        }
+    else:
+        # Prepare arguments for the Cellpose function (legacy numpy array mode)
+        args = {
+            "image": image,
+            "channels": channels,
+            "flow_threshold": flow_threshold,
+            "cellprob_threshold": cellprob_threshold,
+            "flow3D_smooth": flow3D_smooth,
+            "anisotropy": anisotropy,
+            "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
+            "batch_size": batch_size,
+            "use_gpu": True,  # Let cellpose environment detect GPU
+            "do_3D": "Z" in dim_order,
+            "z_axis": 0 if "Z" in dim_order else None,
+        }
     # Run Cellpose in the dedicated environment
     print("Running Cellpose model in dedicated environment...")
     result = run_cellpose_in_env("eval", args)
