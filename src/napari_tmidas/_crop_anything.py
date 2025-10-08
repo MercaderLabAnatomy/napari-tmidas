@@ -684,8 +684,9 @@ class BatchCropAnything:
 
         # Show instructions
         self.viewer.status = (
-            "Click on the image to add objects. Use Shift+click for negative points to refine. "
-            "Click existing objects to select them for cropping."
+            "2D Mode: Click on the image to add objects. Use Shift+click for negative points to refine. "
+            "Click existing objects to select them for cropping. "
+            "Note: For stacks, interactive segmentation only works in 2D view mode."
         )
 
     def _generate_3d_segmentation(self, confidence_threshold, image_path):
@@ -813,8 +814,8 @@ class BatchCropAnything:
 
             # Show instructions
             self.viewer.status = (
-                "3D Mode active: Navigate to the first frame where object appears, then click. "
-                "Use Shift+click for negative points (to remove areas). "
+                "3D Mode active: IMPORTANT - Navigate to the FIRST SLICE where object appears (using slider), "
+                "then click on object in 2D view (not 3D view). Use Shift+click for negative points. "
                 "Segmentation will be propagated to all frames automatically."
             )
 
@@ -2164,11 +2165,67 @@ class BatchCropAnything:
         self.viewer.status = f"Selected all {len(self.selected_labels)} labels"
 
     def clear_selection(self):
-        """Clear all selected labels."""
+        """Clear all labels from the segmentation.
+
+        This removes all segmented objects from the label layer, resets all tracking data,
+        and prepares the interface for new segmentations. Note: The method name is kept as
+        'clear_selection' for backwards compatibility, but it clears all labels, not just
+        the selection.
+        """
+        if self.segmentation_result is None:
+            self.viewer.status = "No segmentation available"
+            return
+
+        # Get all unique label IDs (excluding background 0)
+        unique_labels = np.unique(self.segmentation_result)
+        label_ids = [label for label in unique_labels if label > 0]
+
+        if len(label_ids) == 0:
+            self.viewer.status = "No labels to clear"
+            return
+
+        # Clear the entire segmentation result
+        self.segmentation_result[:] = 0
+
+        # Clear selected labels
         self.selected_labels = set()
+
+        # Clear label info
+        self.label_info = {}
+
+        # Remove any object-specific point layers
+        for layer in list(self.viewer.layers):
+            if "Points for Object" in layer.name:
+                # Clean up callbacks before removing the layer to prevent cleanup issues
+                if hasattr(layer, "mouse_drag_callbacks"):
+                    layer.mouse_drag_callbacks.clear()
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(layer)
+
+        # Clean up object tracking data
+        if hasattr(self, "obj_points"):
+            self.obj_points = {}
+        if hasattr(self, "obj_labels"):
+            self.obj_labels = {}
+        if hasattr(self, "points_data"):
+            self.points_data = {}
+        if hasattr(self, "points_labels"):
+            self.points_labels = {}
+
+        # Reset object ID counters
+        if hasattr(self, "next_obj_id"):
+            self.next_obj_id = 1
+        if hasattr(self, "_sam2_next_obj_id"):
+            self._sam2_next_obj_id = 1
+
+        # Update UI
+        self._update_label_layer()
         self._update_label_table()
         self.preview_crop()
-        self.viewer.status = "Cleared all selections"
+
+        self.viewer.status = (
+            f"Cleared all {len(label_ids)} labels from segmentation"
+        )
 
     def clear_label_at_position(self, y, x):
         """Clear a single label at the specified 2D position."""
@@ -2478,13 +2535,38 @@ def create_crop_widget(processor):
 
     # Instructions
     dimension_type = "3D (TYX/ZYX)" if processor.use_3d else "2D (YX)"
-    instructions_label = QLabel(
-        f"<b>Processing {dimension_type} data</b><br><br>"
-        "<ul><li>Select <b>Points layer</b> and then click on objects to segment them.</li><br>"
-        "<li>Click on existing objects in the <b>Segmentation layer</b> to select them for cropping</li><br>"
-        "<li>Press CTRL and click on labels in the <b>Segmentation layer</b> if you want to delete them</li><br>"
-        "<li>Press 'Crop' to save the selected objects to disk</li><br></ul>"
-    )
+
+    if processor.use_3d:
+        instructions_text = (
+            f"<b>Processing {dimension_type} data</b><br><br>"
+            "<b>⚠️ IMPORTANT for 3D stacks:</b><br>"
+            "<ul>"
+            "<li><b>Navigate to the FIRST SLICE</b> where your object appears (use the time/Z slider)</li>"
+            "<li><b>Switch to 2D view</b> (click 2D icon in napari, NOT 3D view)</li>"
+            "<li>Select <b>Points layer</b> and click on objects to segment them</li>"
+            "<li>Segmentation will automatically propagate to all slices</li>"
+            "</ul><br>"
+            "<b>General Controls:</b><br>"
+            "<ul>"
+            "<li>Use <b>Shift+click</b> for negative points (remove areas from segmentation)</li>"
+            "<li>Click on existing objects in <b>Segmentation layer</b> to select for cropping</li>"
+            "<li>Press <b>CTRL+click</b> on labels in <b>Segmentation layer</b> to delete them</li>"
+            "<li>Press <b>'Crop'</b> to save selected objects to disk</li>"
+            "</ul>"
+        )
+    else:
+        instructions_text = (
+            f"<b>Processing {dimension_type} data</b><br><br>"
+            "<ul>"
+            "<li>Select <b>Points layer</b> and click on objects to segment them</li>"
+            "<li>Use <b>Shift+click</b> for negative points (to refine segmentation)</li>"
+            "<li>Click on existing objects in <b>Segmentation layer</b> to select for cropping</li>"
+            "<li>Press <b>CTRL+click</b> on labels in <b>Segmentation layer</b> to delete them</li>"
+            "<li>Press <b>'Crop'</b> to save selected objects to disk</li>"
+            "</ul>"
+        )
+
+    instructions_label = QLabel(instructions_text)
     instructions_label.setWordWrap(True)
     layout.addWidget(instructions_label)
 
@@ -2508,7 +2590,7 @@ def create_crop_widget(processor):
     # Selection buttons
     selection_layout = QHBoxLayout()
     select_all_button = QPushButton("Select All")
-    clear_selection_button = QPushButton("Clear Selection")
+    clear_selection_button = QPushButton("Clear All Labels")
     selection_layout.addWidget(select_all_button)
     selection_layout.addWidget(clear_selection_button)
     layout.addLayout(selection_layout)
@@ -2559,9 +2641,14 @@ def create_crop_widget(processor):
 
         if points_layer is not None:
             processor.viewer.layers.selection.active = points_layer
-            status_label.setText(
-                "Points layer is now active - click to add points"
-            )
+            if processor.use_3d:
+                status_label.setText(
+                    "Points layer active - Navigate to FIRST SLICE of object, ensure 2D view, then click"
+                )
+            else:
+                status_label.setText(
+                    "Points layer is now active - click to add points"
+                )
         else:
             status_label.setText(
                 "No points layer found. Please load an image first."
