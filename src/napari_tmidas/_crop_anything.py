@@ -1318,6 +1318,13 @@ class BatchCropAnything:
             if event.type != "mouse_press":
                 return
 
+            # Check if segmentation result exists
+            if self.segmentation_result is None:
+                self.viewer.status = (
+                    "Segmentation not ready. Please wait for image to load."
+                )
+                return
+
             # Get coordinates of mouse click
             coords = np.round(event.position).astype(int)
 
@@ -1354,6 +1361,25 @@ class BatchCropAnything:
                     colors = ["green"] * (n_points - 1)
                     colors.append("red" if is_negative else "green")
                 layer.face_color = colors
+
+                # Validate coordinates are within segmentation bounds
+                if (
+                    t < 0
+                    or t >= self.segmentation_result.shape[0]
+                    or y < 0
+                    or y >= self.segmentation_result.shape[1]
+                    or x < 0
+                    or x >= self.segmentation_result.shape[2]
+                ):
+                    self.viewer.status = (
+                        f"Click at ({t}, {y}, {x}) is out of bounds for "
+                        f"segmentation shape {self.segmentation_result.shape}. "
+                        f"Please click within the image bounds."
+                    )
+                    # Remove the invalid point that was just added
+                    if len(layer.data) > 0:
+                        layer.data = layer.data[:-1]
+                    return
 
                 # Get the object ID
                 # If clicking on existing segmentation with negative point
@@ -1602,6 +1628,23 @@ class BatchCropAnything:
                     colors = ["green"] * (n_points - 1)
                     colors.append("red" if is_negative else "green")
                 layer.face_color = colors
+
+                # Validate coordinates are within segmentation bounds
+                if (
+                    y < 0
+                    or y >= self.segmentation_result.shape[0]
+                    or x < 0
+                    or x >= self.segmentation_result.shape[1]
+                ):
+                    self.viewer.status = (
+                        f"Click at ({y}, {x}) is out of bounds for "
+                        f"segmentation shape {self.segmentation_result.shape}. "
+                        f"Please click within the image bounds."
+                    )
+                    # Remove the invalid point that was just added
+                    if len(layer.data) > 0:
+                        layer.data = layer.data[:-1]
+                    return
 
                 # Get object ID
                 label_id = self.segmentation_result[y, x]
