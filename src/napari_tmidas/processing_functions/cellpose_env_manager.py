@@ -304,7 +304,8 @@ def process_volume(image, name=""):
         do_3D={args_dict.get('do_3D', False)},
         flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
         anisotropy={args_dict.get('anisotropy', None)},
-        z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None
+        z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None,
+        channel_axis={args_dict.get('channel_axis', None)}
     )
 
     object_count = np.max(masks)
@@ -454,7 +455,8 @@ masks, flows, styles = model.eval(
     do_3D={args_dict.get('do_3D', False)},
     flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
     anisotropy={args_dict.get('anisotropy', None)},
-    z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None
+    z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None,
+    channel_axis={args_dict.get('channel_axis', None)}
 )
 
 # Save results

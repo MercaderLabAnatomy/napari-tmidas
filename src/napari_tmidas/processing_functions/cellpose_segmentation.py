@@ -20,21 +20,18 @@ from napari_tmidas.processing_functions.cellpose_env_manager import (
     create_cellpose_env,
     is_env_created,
     run_cellpose_in_env,
-    cancel_cellpose_processing,  # Add cancellation import
 )
 
 # Check if cellpose is directly available in this environment
 try:
-    from cellpose import core
+    import cellpose  # noqa: F401
 
     CELLPOSE_AVAILABLE = True
     # Don't evaluate USE_GPU here - it should be evaluated in the cellpose environment
-    # USE_GPU = core.use_gpu()  # This was the bug!
 
     print("Cellpose found in current environment. Using native import.")
 except ImportError:
     CELLPOSE_AVAILABLE = False
-    # USE_GPU = False  # Don't set here either
 
     print(
         "Cellpose not found in current environment. Will use dedicated environment."
@@ -206,6 +203,62 @@ def cellpose_segmentation(
     numpy.ndarray
         Segmented image with instance labels
     """
+    # Convert to 8-bit if needed for better Cellpose performance
+    if image.dtype != np.uint8:
+        print(f"Converting image from {image.dtype} to uint8...")
+        # Normalize to 0-255 range
+        image_min = np.min(image)
+        image_max = np.max(image)
+        if image_max > image_min:
+            image = (
+                (image - image_min) / (image_max - image_min) * 255
+            ).astype(np.uint8)
+        else:
+            image = np.zeros_like(image, dtype=np.uint8)
+
+    # Handle TZYX data by processing each timepoint separately
+    if "T" in dim_order and image.ndim == 4:
+        print(
+            f"Detected TZYX data with shape {image.shape}. Processing each timepoint separately..."
+        )
+        t_axis = dim_order.index("T")
+        num_timepoints = image.shape[t_axis]
+
+        # Move T axis to front if not already there
+        if t_axis != 0:
+            axes_order = list(range(image.ndim))
+            axes_order.insert(0, axes_order.pop(t_axis))
+            image = np.transpose(image, axes_order)
+
+        # Process each timepoint
+        results = []
+        for t in range(num_timepoints):
+            print(f"Processing timepoint {t+1}/{num_timepoints}...")
+            timepoint_image = image[t]
+            # Remove 'T' from dim_order for single timepoint
+            timepoint_dim_order = dim_order.replace("T", "")
+
+            # Recursively call this function for the single timepoint
+            timepoint_result = cellpose_segmentation(
+                timepoint_image,
+                dim_order=timepoint_dim_order,
+                channel_1=channel_1,
+                channel_2=channel_2,
+                flow_threshold=flow_threshold,
+                cellprob_threshold=cellprob_threshold,
+                anisotropy=anisotropy,
+                flow3D_smooth=flow3D_smooth,
+                tile_norm_blocksize=tile_norm_blocksize,
+                batch_size=batch_size,
+                _source_filepath=None,  # Don't use zarr optimization for timepoints
+            )
+            results.append(timepoint_result)
+
+        # Stack results back together
+        result = np.stack(results, axis=0)
+        print(f"Completed processing all {num_timepoints} timepoints.")
+        return result
+
     # Convert channel parameters to Cellpose channels list
     # channels = [channel_1, channel_2]
     channels = [0, 0]  # limit script to single channel
@@ -217,13 +270,16 @@ def cellpose_segmentation(
         )
         create_cellpose_env()
         print("Environment created successfully.")
-        
+
     # Check if we can use zarr optimization
-    use_zarr_direct = _source_filepath and _source_filepath.lower().endswith('.zarr')
-    
+    use_zarr_direct = _source_filepath and _source_filepath.lower().endswith(
+        ".zarr"
+    )
+
     if use_zarr_direct:
         print(f"Using optimized zarr processing for: {_source_filepath}")
         # Prepare arguments for direct zarr processing
+        is_3d = "Z" in dim_order
         args = {
             "zarr_path": _source_filepath,
             "zarr_key": None,  # Could be enhanced to support specific keys
@@ -235,11 +291,13 @@ def cellpose_segmentation(
             "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
             "batch_size": batch_size,
             "use_gpu": True,  # Let cellpose environment detect GPU
-            "do_3D": "Z" in dim_order,
-            "z_axis": 0 if "Z" in dim_order else None,
+            "do_3D": is_3d,
+            "z_axis": 0 if is_3d else None,
+            "channel_axis": None,  # No channel axis for single-channel grayscale images
         }
     else:
         # Prepare arguments for the Cellpose function (legacy numpy array mode)
+        is_3d = "Z" in dim_order
         args = {
             "image": image,
             "channels": channels,
@@ -250,8 +308,9 @@ def cellpose_segmentation(
             "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
             "batch_size": batch_size,
             "use_gpu": True,  # Let cellpose environment detect GPU
-            "do_3D": "Z" in dim_order,
-            "z_axis": 0 if "Z" in dim_order else None,
+            "do_3D": is_3d,
+            "z_axis": 0 if is_3d else None,
+            "channel_axis": None,  # No channel axis for single-channel grayscale images
         }
     # Run Cellpose in the dedicated environment
     print("Running Cellpose model in dedicated environment...")
