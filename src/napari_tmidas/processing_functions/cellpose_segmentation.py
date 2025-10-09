@@ -14,7 +14,6 @@ Note: This requires the cellpose library to be installed.
 from typing import Union
 
 import numpy as np
-from skimage import img_as_ubyte
 
 # Import the environment manager
 from napari_tmidas.processing_functions.cellpose_env_manager import (
@@ -204,32 +203,10 @@ def cellpose_segmentation(
     numpy.ndarray
         Segmented image with instance labels
     """
-    # Convert to 8-bit if needed for better Cellpose performance
-    if image.dtype != np.uint8:
-        print(f"Converting image from {image.dtype} to uint8...")
-
-        # Use scikit-image's img_as_ubyte for proper bit-depth conversion
-        # This correctly handles:
-        # - uint16 → uint8: proper rescaling (divide by 257, not 256)
-        # - float → uint8: detects range and scales appropriately
-        # - Preserves relative intensities without data loss
-        # - Warns if data will be clipped
-        print("  Using scikit-image img_as_ubyte for proper conversion")
-
-        try:
-            image = img_as_ubyte(image)
-        except ValueError as e:
-            # If conversion fails (e.g., out of range), fall back to clipping
-            print(f"  Warning: Conversion issue: {e}")
-            print("  Falling back to min-max rescaling within image range")
-            img_min = np.min(image)
-            img_max = np.max(image)
-            if img_max > img_min:
-                image = ((image - img_min) / (img_max - img_min) * 255).astype(
-                    np.uint8
-                )
-            else:
-                image = np.zeros_like(image, dtype=np.uint8)
+    # Cellpose 4 handles normalization internally via percentile-based normalization
+    # It accepts uint8, uint16, float32, float64 - no pre-conversion needed!
+    # The normalize=True parameter (default) will convert to float and normalize
+    # to 1st-99th percentile range internally
 
     # Handle TZYX data by processing each timepoint separately
     if "T" in dim_order and image.ndim == 4:
