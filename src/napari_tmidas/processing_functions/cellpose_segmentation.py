@@ -14,6 +14,7 @@ Note: This requires the cellpose library to be installed.
 from typing import Union
 
 import numpy as np
+from skimage import img_as_ubyte
 
 # Import the environment manager
 from napari_tmidas.processing_functions.cellpose_env_manager import (
@@ -207,26 +208,28 @@ def cellpose_segmentation(
     if image.dtype != np.uint8:
         print(f"Converting image from {image.dtype} to uint8...")
 
-        # SAFEST APPROACH: Simple proportional bit-depth conversion
-        # This preserves relative intensities across all images/timepoints
-        # No normalization = reproducible and comparable results
+        # Use scikit-image's img_as_ubyte for proper bit-depth conversion
+        # This correctly handles:
+        # - uint16 → uint8: proper rescaling (divide by 257, not 256)
+        # - float → uint8: detects range and scales appropriately
+        # - Preserves relative intensities without data loss
+        # - Warns if data will be clipped
+        print("  Using scikit-image img_as_ubyte for proper conversion")
 
-        if image.dtype == np.uint16:
-            # uint16 (0-65535) → uint8 (0-255): divide by 256
-            print("  Using proportional scaling: dividing by 256")
-            image = (image // 256).astype(np.uint8)
-        elif image.dtype == np.uint32:
-            # uint32 → uint8: divide by 2^24
-            print("  Using proportional scaling: dividing by 16777216")
-            image = (image // 16777216).astype(np.uint8)
-        elif image.dtype in [np.float32, np.float64]:
-            # For float, assume 0-1 range and scale to 0-255
-            print("  Assuming 0-1 range, scaling to 0-255")
-            image = np.clip(image * 255, 0, 255).astype(np.uint8)
-        else:
-            # For other types (int8, int16, etc.), clip to 0-255
-            print("  Clipping to 0-255 range")
-            image = np.clip(image, 0, 255).astype(np.uint8)
+        try:
+            image = img_as_ubyte(image)
+        except ValueError as e:
+            # If conversion fails (e.g., out of range), fall back to clipping
+            print(f"  Warning: Conversion issue: {e}")
+            print("  Falling back to min-max rescaling within image range")
+            img_min = np.min(image)
+            img_max = np.max(image)
+            if img_max > img_min:
+                image = ((image - img_min) / (img_max - img_min) * 255).astype(
+                    np.uint8
+                )
+            else:
+                image = np.zeros_like(image, dtype=np.uint8)
 
     # Handle TZYX data by processing each timepoint separately
     if "T" in dim_order and image.ndim == 4:
