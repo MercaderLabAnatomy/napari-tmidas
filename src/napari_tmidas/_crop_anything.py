@@ -1562,9 +1562,10 @@ class BatchCropAnything:
                     )
                     print("DEBUG: Rectangle processing complete!")
 
-                    # Clear the rectangle after processing
-                    if self.shapes_layer is not None:
-                        self.shapes_layer.data = []
+                    # Keep the rectangle visible after processing
+                    # Users can manually delete it if needed
+                    # if self.shapes_layer is not None:
+                    #     self.shapes_layer.data = []
                 else:
                     print("DEBUG: _sam2_state not available")
                     self.viewer.status = (
@@ -1711,9 +1712,10 @@ class BatchCropAnything:
                         ):
                             self._populate_label_table(self.label_table_widget)
 
-                        # Clear the rectangle after processing
-                        if self.shapes_layer is not None:
-                            self.shapes_layer.data = []
+                        # Keep the rectangle visible after processing
+                        # Users can manually delete it if needed
+                        # if self.shapes_layer is not None:
+                        #     self.shapes_layer.data = []
             else:
                 # Unexpected shape dimensions
                 print(
