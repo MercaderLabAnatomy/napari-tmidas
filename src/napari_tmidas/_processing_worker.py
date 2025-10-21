@@ -7,8 +7,33 @@ import os
 from typing import Any, List, Union
 
 import numpy as np
-import tifffile
-from qtpy.QtCore import QThread, Signal
+
+# Lazy imports for optional heavy dependencies
+try:
+    import tifffile
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    tifffile = None
+    _HAS_TIFFFILE = False
+
+try:
+    from qtpy.QtCore import QThread, Signal
+
+    _HAS_QTPY = True
+except ImportError:
+    # Create stubs to allow class definitions
+    class QThread:
+        def __init__(self):
+            pass
+
+        def run(self):
+            pass
+
+    def Signal(*args):
+        return None
+
+    _HAS_QTPY = False
 
 
 class ProcessingWorker(QThread):

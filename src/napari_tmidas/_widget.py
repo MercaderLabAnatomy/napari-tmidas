@@ -31,10 +31,47 @@ Replace code below according to your needs.
 
 from typing import TYPE_CHECKING
 
-from magicgui import magic_factory
-from magicgui.widgets import CheckBox, Container, create_widget
-from qtpy.QtWidgets import QHBoxLayout, QPushButton, QWidget
-from skimage.util import img_as_float
+# Lazy imports for optional heavy dependencies
+try:
+    from magicgui import magic_factory
+    from magicgui.widgets import CheckBox, Container, create_widget
+
+    _HAS_MAGICGUI = True
+except ImportError:
+    # Create stub decorator and stubs
+    def magic_factory(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return decorator
+
+    class Container:
+        pass
+
+    CheckBox = create_widget = None
+    _HAS_MAGICGUI = False
+
+try:
+    from qtpy.QtWidgets import QHBoxLayout, QPushButton, QWidget
+
+    _HAS_QTPY = True
+except ImportError:
+
+    class QWidget:
+        pass
+
+    QHBoxLayout = QPushButton = None
+    _HAS_QTPY = False
+
+try:
+    from skimage.util import img_as_float
+
+    _HAS_SKIMAGE = True
+except ImportError:
+    img_as_float = None
+    _HAS_SKIMAGE = False
 
 if TYPE_CHECKING:
     import napari

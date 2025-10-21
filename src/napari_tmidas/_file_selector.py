@@ -10,34 +10,130 @@ New functions can be added to the processing registry by decorating them with
 as the first argument, and any additional keyword arguments for parameters.
 """
 
+from __future__ import annotations
+
 import concurrent.futures
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-import napari
 import numpy as np
-import tifffile
-import zarr
-from magicgui import magicgui
-from qtpy.QtCore import Qt, QThread, Signal
-from qtpy.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
-    QFormLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QProgressBar,
-    QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
-from skimage.io import imread
+
+# Lazy imports for optional heavy dependencies
+if TYPE_CHECKING:
+    import napari
+    import tifffile
+    import zarr
+    from magicgui import magicgui
+    from qtpy.QtCore import Qt, QThread, Signal
+    from qtpy.QtWidgets import (
+        QComboBox,
+        QDoubleSpinBox,
+        QFormLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QProgressBar,
+        QPushButton,
+        QSpinBox,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+    from skimage.io import imread
+
+try:
+    import napari
+
+    _HAS_NAPARI = True
+except ImportError:
+    napari = None
+    _HAS_NAPARI = False
+
+try:
+    import tifffile
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    tifffile = None
+    _HAS_TIFFFILE = False
+
+try:
+    import zarr
+
+    _HAS_ZARR = True
+except ImportError:
+    zarr = None
+    _HAS_ZARR = False
+
+try:
+    from magicgui import magicgui
+
+    _HAS_MAGICGUI = True
+except ImportError:
+    # Create stub decorator
+    def magicgui(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return decorator
+
+    _HAS_MAGICGUI = False
+
+try:
+    from qtpy.QtCore import Qt, QThread, Signal
+    from qtpy.QtWidgets import (
+        QComboBox,
+        QDoubleSpinBox,
+        QFormLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QProgressBar,
+        QPushButton,
+        QSpinBox,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    _HAS_QTPY = True
+except ImportError:
+    Qt = QThread = Signal = None
+    QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
+    QHeaderView = QLabel = QLineEdit = QProgressBar = QPushButton = None
+    QSpinBox = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
+    _HAS_QTPY = False
+
+try:
+    from skimage.io import imread
+
+    _HAS_SKIMAGE = True
+except ImportError:
+    imread = None
+    _HAS_SKIMAGE = False
+
+# Create stub base classes when dependencies are missing
+if not _HAS_QTPY:
+    # Create minimal stubs to allow class definitions
+    class QTableWidget:
+        pass
+
+    class QThread:
+        pass
+
+    class QWidget:
+        pass
+
+    def Signal(*args):
+        return None
+
 
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
@@ -50,7 +146,9 @@ from napari_tmidas.processing_functions import (
 
 # Import cancellation functions for subprocess-based processing
 try:
-    from napari_tmidas.processing_functions.cellpose_env_manager import cancel_cellpose_processing
+    from napari_tmidas.processing_functions.cellpose_env_manager import (
+        cancel_cellpose_processing,
+    )
 except ImportError:
     cancel_cellpose_processing = None
 
@@ -1291,9 +1389,10 @@ def file_selector(
 
 
 # Create a modified file_selector with browse button
-file_selector = add_browse_button_to_folder_field(
-    file_selector, "input_folder"
-)
+if _HAS_MAGICGUI and _HAS_QTPY:
+    file_selector = add_browse_button_to_folder_field(
+        file_selector, "input_folder"
+    )
 
 
 # Processing worker for multithreading
@@ -1393,11 +1492,13 @@ class ProcessingWorker(QThread):
                         image = data
                         # Extract metadata if available
                         if isinstance(add_kwargs, dict):
-                            metadata = add_kwargs.get('metadata', {})
-                            if 'axes' in metadata:
+                            metadata = add_kwargs.get("metadata", {})
+                            if "axes" in metadata:
                                 print(f"Zarr axes: {metadata['axes']}")
-                            if 'channel_axis' in metadata:
-                                print(f"Channel axis: {metadata['channel_axis']}")
+                            if "channel_axis" in metadata:
+                                print(
+                                    f"Channel axis: {metadata['channel_axis']}"
+                                )
                         break
                 else:
                     # No image layer found, take first available
@@ -1412,21 +1513,19 @@ class ProcessingWorker(QThread):
                 image_dtype = np.float32
 
             # Get shape information for different array types
-            if hasattr(image, 'shape'):
+            if hasattr(image, "shape"):
                 shape_info = f"{image.shape}"
-            elif hasattr(image, '__array__'):
+            elif hasattr(image, "__array__"):
                 # For array-like objects
                 try:
                     arr = np.asarray(image)
                     shape_info = f"{arr.shape} (converted from array-like)"
-                except:
+                except (ValueError, TypeError, AttributeError):
                     shape_info = "unknown (array conversion failed)"
             else:
                 shape_info = "unknown (no shape attribute)"
 
-            print(
-                f"Original image shape: {shape_info}, dtype: {image_dtype}"
-            )
+            print(f"Original image shape: {shape_info}, dtype: {image_dtype}")
 
             # Check if this is a folder-processing function that shouldn't save individual files
             function_name = getattr(
@@ -1453,12 +1552,15 @@ class ProcessingWorker(QThread):
 
             # Apply processing with parameters
             # For zarr files, pass the original filepath to enable optimized processing
-            if filepath.lower().endswith('.zarr'):
+            if filepath.lower().endswith(".zarr"):
                 # Add filepath for zarr-aware processing functions
-                processing_params = {**self.param_values, '_source_filepath': filepath}
+                processing_params = {
+                    **self.param_values,
+                    "_source_filepath": filepath,
+                }
             else:
                 processing_params = self.param_values
-                
+
             processed_result = self.processing_func(image, **processing_params)
 
             # Check if result is points data (for spot detection functions)
@@ -2055,7 +2157,7 @@ class FileResultsWidget(QWidget):
         # Cancel any running cellpose subprocesses
         if cancel_cellpose_processing:
             cancel_cellpose_processing()
-            
+
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()  # Wait for the thread to finish
