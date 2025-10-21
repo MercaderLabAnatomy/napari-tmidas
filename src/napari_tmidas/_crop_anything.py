@@ -9,6 +9,7 @@ The plugin supports both 2D (YX) and 3D (TYX/ZYX) data.
 import contextlib
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -101,6 +102,7 @@ class BatchCropAnything:
         self.image_layer = None
         self.label_layer = None
         self.label_table_widget = None
+        self.shapes_layer = None
 
         # State tracking
         self.selected_labels = set()
@@ -108,6 +110,9 @@ class BatchCropAnything:
 
         # Segmentation parameters
         self.sensitivity = 50  # Default sensitivity (0-100 scale)
+
+        # Prompt mode: 'point' or 'box'
+        self.prompt_mode = "point"
 
         # Initialize the SAM2 model
         self._initialize_sam2()
@@ -671,13 +676,18 @@ class BatchCropAnything:
         self.obj_points = {}
         self.obj_labels = {}
 
-        # Set the image in the predictor for later use
+        # Set the image in the predictor for later use (2D mode only)
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
-        with (
-            torch.inference_mode(),
-            torch.autocast(device_type, dtype=torch.float32),
-        ):
-            self.predictor.set_image(resized_image)
+        if hasattr(self.predictor, "set_image"):
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type, dtype=torch.float32),
+            ):
+                self.predictor.set_image(resized_image)
+        else:
+            print(
+                "DEBUG: Skipping set_image - predictor doesn't support it (likely VideoPredictor)"
+            )
 
         # Update the label layer
         self._update_label_layer()
@@ -709,9 +719,7 @@ class BatchCropAnything:
             import tempfile
 
             temp_dir = tempfile.gettempdir()
-            mp4_path = os.path.join(
-                temp_dir, f"temp_volume_{os.path.basename(image_path)}.mp4"
-            )
+            mp4_path = None
 
             # If we need to save a modified version for MP4 conversion
             need_temp_tif = False
@@ -741,17 +749,37 @@ class BatchCropAnything:
                 imwrite(temp_tif_path, projected_volume)
                 need_temp_tif = True
 
-                # Convert the projected TIF to MP4
-                self.viewer.status = (
-                    "Converting projected 3D volume to MP4 format for SAM2..."
-                )
-                mp4_path = tif_to_mp4(temp_tif_path)
+                # Check if MP4 already exists
+                expected_mp4 = str(Path(temp_tif_path).with_suffix(".mp4"))
+                if os.path.exists(expected_mp4):
+                    self.viewer.status = (
+                        f"Using existing MP4: {os.path.basename(expected_mp4)}"
+                    )
+                    print(
+                        f"DEBUG: MP4 already exists, skipping conversion: {expected_mp4}"
+                    )
+                    mp4_path = expected_mp4
+                else:
+                    # Convert the projected TIF to MP4
+                    self.viewer.status = "Converting projected 3D volume to MP4 format for SAM2..."
+                    mp4_path = tif_to_mp4(temp_tif_path)
             else:
-                # Convert original volume to video format for SAM2
-                self.viewer.status = (
-                    "Converting 3D volume to MP4 format for SAM2..."
-                )
-                mp4_path = tif_to_mp4(image_path)
+                # Check if MP4 already exists for the original image
+                expected_mp4 = str(Path(image_path).with_suffix(".mp4"))
+                if os.path.exists(expected_mp4):
+                    self.viewer.status = (
+                        f"Using existing MP4: {os.path.basename(expected_mp4)}"
+                    )
+                    print(
+                        f"DEBUG: MP4 already exists, skipping conversion: {expected_mp4}"
+                    )
+                    mp4_path = expected_mp4
+                else:
+                    # Convert original volume to video format for SAM2
+                    self.viewer.status = (
+                        "Converting 3D volume to MP4 format for SAM2..."
+                    )
+                    mp4_path = tif_to_mp4(image_path)
 
             # Initialize SAM2 state with the video
             self.viewer.status = "Initializing SAM2 Video Predictor..."
@@ -1274,7 +1302,22 @@ class BatchCropAnything:
                 self._on_label_clicked
             )
 
-        # Create points layer for interaction if it doesn't exist
+        # Create or update interaction layers based on mode
+        if self.prompt_mode == "point":
+            self._ensure_points_layer()
+            self._remove_shapes_layer()
+        else:  # box mode
+            self._ensure_shapes_layer()
+            self._remove_points_layer()
+
+        # Update status
+        n_labels = len(np.unique(self.segmentation_result)) - (
+            1 if 0 in np.unique(self.segmentation_result) else 0
+        )
+        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {n_labels} segments"
+
+    def _ensure_points_layer(self):
+        """Ensure points layer exists and is properly configured."""
         points_layer = None
         for layer in list(self.viewer.layers):
             if (
@@ -1305,11 +1348,391 @@ class BatchCropAnything:
         # Make the points layer active to encourage interaction with it
         self.viewer.layers.selection.active = points_layer
 
-        # Update status
-        n_labels = len(np.unique(self.segmentation_result)) - (
-            1 if 0 in np.unique(self.segmentation_result) else 0
-        )
-        self.viewer.status = f"Loaded image {self.current_index + 1}/{len(self.images)} - Found {n_labels} segments"
+    def _ensure_shapes_layer(self):
+        """Ensure shapes layer exists and is properly configured."""
+        shapes_layer = None
+        for layer in list(self.viewer.layers):
+            if "Rectangles" in layer.name:
+                shapes_layer = layer
+                break
+
+        if shapes_layer is None:
+            # Initialize an empty shapes layer
+            shapes_layer = self.viewer.add_shapes(
+                None,
+                shape_type="rectangle",
+                edge_width=3,
+                edge_color="green",
+                face_color="transparent",
+                name="Rectangles (Draw to Segment)",
+            )
+
+        # Store reference
+        self.shapes_layer = shapes_layer
+
+        # Initialize processing flag to prevent re-entry
+        if not hasattr(self, "_processing_rectangle"):
+            self._processing_rectangle = False
+
+        # Always ensure the event is connected (disconnect old ones first to avoid duplicates)
+        # Remove any existing callbacks
+        with contextlib.suppress(Exception):
+            shapes_layer.events.data.disconnect()
+
+        # Connect shape added event
+        @shapes_layer.events.data.connect
+        def on_shape_added(event):
+            print(
+                f"DEBUG: Shape event triggered! Shapes: {len(shapes_layer.data)}, Processing: {self._processing_rectangle}"
+            )
+
+            # Ignore if we're already processing or if there are no shapes
+            if self._processing_rectangle:
+                print("DEBUG: Already processing a rectangle, ignoring event")
+                return
+
+            if len(shapes_layer.data) == 0:
+                print("DEBUG: No shapes present, ignoring event")
+                return
+
+            # Only process if we have exactly 1 shape (newly drawn)
+            if len(shapes_layer.data) == 1:
+                print("DEBUG: New shape detected, processing...")
+                # Set flag to prevent re-entry
+                self._processing_rectangle = True
+                try:
+                    # Get the shape
+                    self._on_rectangle_added(shapes_layer.data[-1])
+                finally:
+                    # Always reset flag
+                    self._processing_rectangle = False
+            else:
+                print(
+                    f"DEBUG: Multiple shapes present ({len(shapes_layer.data)}), skipping"
+                )
+
+        # Make the shapes layer active
+        self.viewer.layers.selection.active = shapes_layer
+
+    def _remove_points_layer(self):
+        """Remove points layer when not in point mode."""
+        for layer in list(self.viewer.layers):
+            if "Points" in layer.name and "Object" not in layer.name:
+                if hasattr(layer, "mouse_drag_callbacks"):
+                    layer.mouse_drag_callbacks.clear()
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(layer)
+
+    def _remove_shapes_layer(self):
+        """Remove shapes layer when not in box mode."""
+        for layer in list(self.viewer.layers):
+            if "Rectangles" in layer.name:
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(layer)
+        self.shapes_layer = None
+
+    def _on_rectangle_added(self, rectangle_coords):
+        """Handle rectangle selection for segmentation."""
+        print("DEBUG: _on_rectangle_added called!")
+        device_type = "cuda" if self.device.type == "cuda" else "cpu"
+        try:
+            # Rectangle coords are in the form of a 4x2 or 4x3 array (corners)
+            # Convert to bounding box format [x_min, y_min, x_max, y_max]
+
+            # Debug info
+            print(f"DEBUG: Rectangle coords: {rectangle_coords}")
+            print(f"DEBUG: Rectangle coords shape: {rectangle_coords.shape}")
+            print(f"DEBUG: use_3d flag: {self.use_3d}")
+            print(
+                f"DEBUG: Has predictor: {hasattr(self, 'predictor') and self.predictor is not None}"
+            )
+            if hasattr(self, "predictor") and self.predictor is not None:
+                print(
+                    f"DEBUG: Predictor type: {type(self.predictor).__name__}"
+                )
+            else:
+                print("DEBUG: No predictor available!")
+                self.viewer.status = "Error: Predictor not initialized"
+                return
+
+            # Check if we're in 3D mode (use the flag, not coordinate shape)
+            # In 3D mode, even when drawing on a 2D slice, we get (4, 2) coords
+            # but we need to treat it as 3D with propagation
+            if (
+                self.use_3d
+                and len(rectangle_coords.shape) == 2
+                and rectangle_coords.shape[0] == 4
+            ):
+                print("DEBUG: Processing as 3D rectangle (will propagate)")
+
+                # Get current frame/slice
+                t = int(self.viewer.dims.current_step[0])
+                print(f"DEBUG: Current frame/slice: {t}")
+
+                # Get Y and X bounds from 2D coordinates
+                if rectangle_coords.shape[1] == 3:
+                    # If we somehow got 3D coords (T/Z, Y, X)
+                    y_coords = rectangle_coords[:, 1]
+                    x_coords = rectangle_coords[:, 2]
+                elif rectangle_coords.shape[1] == 2:
+                    # More common: 2D coords (Y, X) when drawing on a slice
+                    y_coords = rectangle_coords[:, 0]
+                    x_coords = rectangle_coords[:, 1]
+                else:
+                    print(
+                        f"DEBUG: Unexpected coordinate dimensions: {rectangle_coords.shape[1]}"
+                    )
+                    self.viewer.status = "Error: Unexpected rectangle format"
+                    return
+
+                y_min, y_max = int(min(y_coords)), int(max(y_coords))
+                x_min, x_max = int(min(x_coords)), int(max(x_coords))
+
+                box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
+                print(f"DEBUG: Box coordinates: {box}")
+
+                # Use SAM2 with box prompt
+                if not hasattr(self, "next_obj_id"):
+                    self.next_obj_id = 1
+                obj_id = self.next_obj_id
+                self.next_obj_id += 1
+
+                # Store box for this object
+                if not hasattr(self, "obj_boxes"):
+                    self.obj_boxes = {}
+                self.obj_boxes[obj_id] = box
+
+                # Perform segmentation with 3D propagation
+                if (
+                    hasattr(self, "_sam2_state")
+                    and self._sam2_state is not None
+                ):
+                    self.viewer.status = (
+                        f"Segmenting object {obj_id} with box at frame {t}..."
+                    )
+                    print(f"DEBUG: Starting segmentation for object {obj_id}")
+
+                    _, out_obj_ids, out_mask_logits = (
+                        self.predictor.add_new_points_or_box(
+                            inference_state=self._sam2_state,
+                            frame_idx=t,
+                            obj_id=obj_id,
+                            box=box,
+                        )
+                    )
+
+                    print("DEBUG: Segmentation complete, processing mask")
+                    # Update current frame
+                    mask = (out_mask_logits[0] > 0.0).cpu().numpy()
+                    if mask.ndim > 2:
+                        mask = mask.squeeze()
+
+                    # Resize if needed
+                    if mask.shape != self.segmentation_result[t].shape:
+                        from skimage.transform import resize
+
+                        mask = resize(
+                            mask.astype(float),
+                            self.segmentation_result[t].shape,
+                            order=0,
+                            preserve_range=True,
+                            anti_aliasing=False,
+                        ).astype(bool)
+
+                    # Update segmentation
+                    self.segmentation_result[t][
+                        mask & (self.segmentation_result[t] == 0)
+                    ] = obj_id
+
+                    print(f"DEBUG: Starting propagation for object {obj_id}")
+                    # Propagate to all frames
+                    self._propagate_mask_for_current_object(obj_id, t)
+
+                    # Update UI
+                    print("DEBUG: Updating label layer")
+                    self._update_label_layer()
+                    if (
+                        hasattr(self, "label_table_widget")
+                        and self.label_table_widget is not None
+                    ):
+                        self._populate_label_table(self.label_table_widget)
+
+                    self.viewer.status = (
+                        f"Segmented and propagated object {obj_id} from box"
+                    )
+                    print("DEBUG: Rectangle processing complete!")
+
+                    # Clear the rectangle after processing
+                    if self.shapes_layer is not None:
+                        self.shapes_layer.data = []
+                else:
+                    print("DEBUG: _sam2_state not available")
+                    self.viewer.status = (
+                        "Error: 3D segmentation state not initialized"
+                    )
+
+            elif (
+                not self.use_3d
+                and len(rectangle_coords.shape) == 2
+                and rectangle_coords.shape[1] == 2
+            ):
+                # 2D case: rectangle_coords shape is (4, 2) for Y, X
+                if rectangle_coords.shape[0] == 4:
+                    # Get Y and X bounds
+                    y_coords = rectangle_coords[:, 0]
+                    x_coords = rectangle_coords[:, 1]
+                    y_min, y_max = int(min(y_coords)), int(max(y_coords))
+                    x_min, x_max = int(min(x_coords)), int(max(x_coords))
+
+                    box = np.array(
+                        [x_min, y_min, x_max, y_max], dtype=np.float32
+                    )
+
+                    # Use SAM2 with box prompt
+                    if not hasattr(self, "next_obj_id"):
+                        self.next_obj_id = 1
+                    obj_id = self.next_obj_id
+                    self.next_obj_id += 1
+
+                    # Store box for this object
+                    if not hasattr(self, "obj_boxes"):
+                        self.obj_boxes = {}
+                    self.obj_boxes[obj_id] = box
+
+                    # Perform segmentation
+                    if (
+                        hasattr(self, "predictor")
+                        and self.predictor is not None
+                    ):
+                        # Make sure image is loaded
+                        if self.current_image_for_segmentation is None:
+                            self.viewer.status = (
+                                "No image loaded for segmentation"
+                            )
+                            return
+
+                        # Prepare image for SAM2
+                        image = self.current_image_for_segmentation
+                        if len(image.shape) == 2:
+                            image = np.stack([image] * 3, axis=-1)
+                        elif len(image.shape) == 3 and image.shape[2] == 1:
+                            image = np.concatenate([image] * 3, axis=2)
+                        elif len(image.shape) == 3 and image.shape[2] > 3:
+                            image = image[:, :, :3]
+
+                        if image.dtype != np.uint8:
+                            image = (image / np.max(image) * 255).astype(
+                                np.uint8
+                            )
+
+                        # Set the image in the predictor (only for ImagePredictor, not VideoPredictor)
+                        if hasattr(self.predictor, "set_image"):
+                            self.predictor.set_image(image)
+                        else:
+                            self.viewer.status = "Error: Rectangle mode requires Image Predictor (2D mode)"
+                            return
+
+                        self.viewer.status = (
+                            f"Segmenting object {obj_id} with box..."
+                        )
+
+                        with (
+                            torch.inference_mode(),
+                            torch.autocast(device_type),
+                        ):
+                            masks, scores, _ = self.predictor.predict(
+                                box=box,
+                                multimask_output=False,
+                            )
+
+                            # Get the mask
+                            if len(masks) > 0:
+                                best_mask = masks[0]
+
+                                # Resize if needed
+                                if (
+                                    best_mask.shape
+                                    != self.segmentation_result.shape
+                                ):
+                                    from skimage.transform import resize
+
+                                    best_mask = resize(
+                                        best_mask.astype(float),
+                                        self.segmentation_result.shape,
+                                        order=0,
+                                        preserve_range=True,
+                                        anti_aliasing=False,
+                                    ).astype(bool)
+
+                                # Apply mask (only overwrite background)
+                                mask_condition = np.logical_and(
+                                    best_mask, (self.segmentation_result == 0)
+                                )
+                                self.segmentation_result[mask_condition] = (
+                                    obj_id
+                                )
+
+                                # Update label info
+                                area = np.sum(
+                                    self.segmentation_result == obj_id
+                                )
+                                y_indices, x_indices = np.where(
+                                    self.segmentation_result == obj_id
+                                )
+                                center_y = (
+                                    np.mean(y_indices)
+                                    if len(y_indices) > 0
+                                    else 0
+                                )
+                                center_x = (
+                                    np.mean(x_indices)
+                                    if len(x_indices) > 0
+                                    else 0
+                                )
+
+                                self.label_info[obj_id] = {
+                                    "area": area,
+                                    "center_y": center_y,
+                                    "center_x": center_x,
+                                    "score": float(scores[0]),
+                                }
+
+                                self.viewer.status = (
+                                    f"Segmented object {obj_id} from box"
+                                )
+                            else:
+                                self.viewer.status = "No valid mask produced"
+
+                        # Update the UI
+                        self._update_label_layer()
+                        if (
+                            hasattr(self, "label_table_widget")
+                            and self.label_table_widget is not None
+                        ):
+                            self._populate_label_table(self.label_table_widget)
+
+                        # Clear the rectangle after processing
+                        if self.shapes_layer is not None:
+                            self.shapes_layer.data = []
+            else:
+                # Unexpected shape dimensions
+                print(
+                    f"DEBUG: Unexpected rectangle shape: {rectangle_coords.shape}"
+                )
+                self.viewer.status = f"Error: Unexpected rectangle dimensions {rectangle_coords.shape}. Expected (4,2) for 2D or (4,3) for 3D."
+
+        except (
+            IndexError,
+            KeyError,
+            ValueError,
+            RuntimeError,
+            TypeError,
+        ) as e:
+            import traceback
+
+            self.viewer.status = f"Error in rectangle handling: {str(e)}"
+            print("DEBUG: Exception in _on_rectangle_added:")
+            traceback.print_exc()
 
     def _on_points_clicked(self, layer, event):
         """Handle clicks on the points layer for adding/removing points."""
@@ -1691,8 +2114,14 @@ class BatchCropAnything:
                     if image.dtype != np.uint8:
                         image = (image / np.max(image) * 255).astype(np.uint8)
 
-                    # Set the image in the predictor
-                    self.predictor.set_image(image)
+                    # Set the image in the predictor (only for ImagePredictor, not VideoPredictor)
+                    if hasattr(self.predictor, "set_image"):
+                        self.predictor.set_image(image)
+                    else:
+                        self.viewer.status = (
+                            "Error: Point mode in 2D requires Image Predictor"
+                        )
+                        return
 
                     # Use only points for current object
                     points = np.array(
@@ -1936,7 +2365,15 @@ class BatchCropAnything:
         if self.predictor is not None:
             # Prepare image
             image = self._prepare_image_for_sam2()
-            self.predictor.set_image(image)
+
+            # Set the image in the predictor (only for ImagePredictor, not VideoPredictor)
+            if hasattr(self.predictor, "set_image"):
+                self.predictor.set_image(image)
+            else:
+                self.viewer.status = (
+                    "Error: This operation requires Image Predictor (2D mode)"
+                )
+                return
 
             # Predict
             device_type = "cuda" if self.device.type == "cuda" else "cpu"
@@ -2512,14 +2949,19 @@ class BatchCropAnything:
     def reset_sam2_state(self):
         """Reset SAM2 predictor state for 2D segmentation."""
         if not self.use_3d and hasattr(self, "prepared_sam2_image"):
-            # Re-set the image in the predictor
+            # Re-set the image in the predictor (only for ImagePredictor)
             device_type = "cuda" if self.device.type == "cuda" else "cpu"
             try:
-                with (
-                    torch.inference_mode(),
-                    torch.autocast(device_type, dtype=torch.float32),
-                ):
-                    self.predictor.set_image(self.prepared_sam2_image)
+                if hasattr(self.predictor, "set_image"):
+                    with (
+                        torch.inference_mode(),
+                        torch.autocast(device_type, dtype=torch.float32),
+                    ):
+                        self.predictor.set_image(self.prepared_sam2_image)
+                else:
+                    print(
+                        "DEBUG: reset_sam2_state - predictor doesn't have set_image method"
+                    )
             except (RuntimeError, AssertionError, TypeError, ValueError) as e:
                 print(f"Error resetting SAM2 state: {e}")
                 # If there's an error, try to reinitialize
@@ -2543,7 +2985,8 @@ def create_crop_widget(processor):
             "<ul>"
             "<li><b>Navigate to the FIRST SLICE</b> where your object appears (use the time/Z slider)</li>"
             "<li><b>Switch to 2D view</b> (click 2D icon in napari, NOT 3D view)</li>"
-            "<li>Select <b>Points layer</b> and click on objects to segment them</li>"
+            "<li><b>Point Mode:</b> Select Points layer and click on objects to segment them</li>"
+            "<li><b>Rectangle Mode:</b> Draw rectangles around objects to segment them</li>"
             "<li>Segmentation will automatically propagate to all slices</li>"
             "</ul><br>"
             "<b>General Controls:</b><br>"
@@ -2557,10 +3000,10 @@ def create_crop_widget(processor):
     else:
         instructions_text = (
             f"<b>Processing {dimension_type} data</b><br><br>"
+            "<b>Point Mode:</b> Click on objects to segment them. Use Shift+click for negative points.<br>"
+            "<b>Rectangle Mode:</b> Draw rectangles around objects to segment them.<br><br>"
             "<ul>"
-            "<li>Select <b>Points layer</b> and click on objects to segment them</li>"
-            "<li>Use <b>Shift+click</b> for negative points (to refine segmentation)</li>"
-            "<li>Click on existing objects in <b>Segmentation layer</b> to select for cropping</li>"
+            "<li>Click on existing objects in <b>Segmentation layer</b> to select them for cropping</li>"
             "<li>Press <b>CTRL+click</b> on labels in <b>Segmentation layer</b> to delete them</li>"
             "<li>Press <b>'Crop'</b> to save selected objects to disk</li>"
             "</ul>"
@@ -2570,16 +3013,34 @@ def create_crop_widget(processor):
     instructions_label.setWordWrap(True)
     layout.addWidget(instructions_label)
 
-    # Add a button to ensure points layer is active
-    activate_button = QPushButton("Make Points Layer Active")
+    # Add mode selector
+    mode_layout = QHBoxLayout()
+    mode_label = QLabel("<b>Prompt Mode:</b>")
+    mode_layout.addWidget(mode_label)
+
+    point_mode_button = QPushButton("Points")
+    point_mode_button.setCheckable(True)
+    point_mode_button.setChecked(True)
+    mode_layout.addWidget(point_mode_button)
+
+    box_mode_button = QPushButton("Rectangle")
+    box_mode_button.setCheckable(True)
+    box_mode_button.setChecked(False)
+    mode_layout.addWidget(box_mode_button)
+
+    mode_layout.addStretch()
+    layout.addLayout(mode_layout)
+
+    # Add a button to ensure active layer is correct
+    activate_button = QPushButton("Make Prompt Layer Active")
     activate_button.clicked.connect(
-        lambda: processor._ensure_points_layer_active()
+        lambda: processor._ensure_active_prompt_layer()
     )
     layout.addWidget(activate_button)
 
-    # Add a "Clear Points" button to reset prompts
-    clear_points_button = QPushButton("Clear Points")
-    layout.addWidget(clear_points_button)
+    # Add a "Clear Prompts" button to reset prompts
+    clear_prompts_button = QPushButton("Clear Prompts")
+    layout.addWidget(clear_prompts_button)
 
     # Create label table
     label_table = processor.create_label_table(crop_widget)
@@ -2628,38 +3089,61 @@ def create_crop_widget(processor):
         # Create new table
         label_table = processor.create_label_table(crop_widget)
         label_table.setMinimumHeight(200)
-        layout.insertWidget(3, label_table)  # Insert after clear points button
+        layout.insertWidget(
+            3, label_table
+        )  # Insert after clear prompts button
         return label_table
 
-    # Add helper method to ensure points layer is active
-    def _ensure_points_layer_active():
-        points_layer = None
-        for layer in list(processor.viewer.layers):
-            if "Points" in layer.name:
-                points_layer = layer
-                break
+    # Add helper method to ensure active prompt layer is selected based on mode
+    def _ensure_active_prompt_layer():
+        if processor.prompt_mode == "point":
+            points_layer = None
+            for layer in list(processor.viewer.layers):
+                if "Points" in layer.name and "Object" not in layer.name:
+                    points_layer = layer
+                    break
 
-        if points_layer is not None:
-            processor.viewer.layers.selection.active = points_layer
-            if processor.use_3d:
+            if points_layer is not None:
+                processor.viewer.layers.selection.active = points_layer
+                if processor.use_3d:
+                    status_label.setText(
+                        "Points layer active - Navigate to FIRST SLICE of object, ensure 2D view, then click"
+                    )
+                else:
+                    status_label.setText(
+                        "Points layer is now active - click to add points"
+                    )
+            else:
                 status_label.setText(
-                    "Points layer active - Navigate to FIRST SLICE of object, ensure 2D view, then click"
+                    "No points layer found. Please load an image first."
+                )
+        else:  # box mode
+            shapes_layer = None
+            for layer in list(processor.viewer.layers):
+                if "Rectangles" in layer.name:
+                    shapes_layer = layer
+                    break
+
+            if shapes_layer is not None:
+                processor.viewer.layers.selection.active = shapes_layer
+                status_label.setText(
+                    "Rectangles layer is now active - draw rectangles"
                 )
             else:
                 status_label.setText(
-                    "Points layer is now active - click to add points"
+                    "No rectangles layer found. Please load an image first."
                 )
-        else:
-            status_label.setText(
-                "No points layer found. Please load an image first."
-            )
 
-    processor._ensure_points_layer_active = _ensure_points_layer_active
+    processor._ensure_active_prompt_layer = _ensure_active_prompt_layer
 
-    def on_clear_points_clicked():
-        # Find the main points layer and clear its data instead of removing it
+    # Keep the old method for backward compatibility
+    processor._ensure_points_layer_active = _ensure_active_prompt_layer
+
+    def on_clear_prompts_clicked():
+        # Find and clear/remove prompt layers based on mode
         main_points_layer = None
         object_points_layers = []
+        shapes_layer = None
 
         for layer in list(processor.viewer.layers):
             if "Points" in layer.name:
@@ -2667,6 +3151,8 @@ def create_crop_widget(processor):
                     object_points_layers.append(layer)
                 else:
                     main_points_layer = layer
+            elif "Rectangles" in layer.name:
+                shapes_layer = layer
 
         # Remove object-specific point layers (these are created dynamically)
         for layer in object_points_layers:
@@ -2675,6 +3161,10 @@ def create_crop_widget(processor):
                 layer.mouse_drag_callbacks.clear()
             with contextlib.suppress(ValueError):
                 processor.viewer.layers.remove(layer)
+
+        # Clear shapes layer
+        if shapes_layer is not None:
+            shapes_layer.data = []
 
         # Clear data from main points layer instead of removing it
         if main_points_layer is not None:
@@ -2706,6 +3196,10 @@ def create_crop_widget(processor):
                 processor.obj_points = {}
                 processor.obj_labels = {}
 
+            # Reset box tracking
+            if hasattr(processor, "obj_boxes"):
+                processor.obj_boxes = {}
+
             # Reset object ID counters
             if hasattr(processor, "current_obj_id"):
                 # Find the highest existing label ID
@@ -2726,18 +3220,21 @@ def create_crop_widget(processor):
                 processor.sam2_points_by_obj = {}
                 processor.sam2_labels_by_obj = {}
 
+            # Reset box tracking
+            if hasattr(processor, "obj_boxes"):
+                processor.obj_boxes = {}
+
             if hasattr(processor, "points_data"):
                 processor.points_data = {}
                 processor.points_labels = {}
 
             # Note: We don't reset _sam2_state for 3D as it needs to maintain video state
 
-        # Make the main points layer active
-        if main_points_layer is not None:
-            processor.viewer.layers.selection.active = main_points_layer
+        # Make the appropriate prompt layer active based on mode
+        _ensure_active_prompt_layer()
 
         status_label.setText(
-            "Cleared all points. Click on the image to add new segmentation points."
+            "Cleared all prompts. Ready to add new segmentation prompts."
         )
 
     def on_select_all_clicked():
@@ -2761,8 +3258,8 @@ def create_crop_widget(processor):
             )
 
     def on_next_clicked():
-        # Clear points before moving to next image
-        on_clear_points_clicked()
+        # Clear prompts before moving to next image
+        on_clear_prompts_clicked()
 
         if not processor.next_image():
             next_button.setEnabled(False)
@@ -2772,11 +3269,11 @@ def create_crop_widget(processor):
             status_label.setText(
                 f"Showing image {processor.current_index + 1}/{len(processor.images)}"
             )
-            processor._ensure_points_layer_active()
+            processor._ensure_active_prompt_layer()
 
     def on_prev_clicked():
-        # Clear points before moving to previous image
-        on_clear_points_clicked()
+        # Clear prompts before moving to previous image
+        on_clear_prompts_clicked()
 
         if not processor.previous_image():
             prev_button.setEnabled(False)
@@ -2786,15 +3283,33 @@ def create_crop_widget(processor):
             status_label.setText(
                 f"Showing image {processor.current_index + 1}/{len(processor.images)}"
             )
-            processor._ensure_points_layer_active()
+            processor._ensure_active_prompt_layer()
 
-    clear_points_button.clicked.connect(on_clear_points_clicked)
+    def on_point_mode_clicked():
+        processor.prompt_mode = "point"
+        point_mode_button.setChecked(True)
+        box_mode_button.setChecked(False)
+        processor._update_label_layer()
+        status_label.setText("Point mode active - click on objects to segment")
+
+    def on_box_mode_clicked():
+        processor.prompt_mode = "box"
+        point_mode_button.setChecked(False)
+        box_mode_button.setChecked(True)
+        processor._update_label_layer()
+        status_label.setText(
+            "Rectangle mode active - draw rectangles around objects"
+        )
+
+    clear_prompts_button.clicked.connect(on_clear_prompts_clicked)
     select_all_button.clicked.connect(on_select_all_clicked)
     clear_selection_button.clicked.connect(on_clear_selection_clicked)
     crop_button.clicked.connect(on_crop_clicked)
     next_button.clicked.connect(on_next_clicked)
     prev_button.clicked.connect(on_prev_clicked)
-    activate_button.clicked.connect(_ensure_points_layer_active)
+    activate_button.clicked.connect(_ensure_active_prompt_layer)
+    point_mode_button.clicked.connect(on_point_mode_clicked)
+    box_mode_button.clicked.connect(on_box_mode_clicked)
 
     return crop_widget
 
