@@ -50,7 +50,9 @@ from napari_tmidas.processing_functions import (
 
 # Import cancellation functions for subprocess-based processing
 try:
-    from napari_tmidas.processing_functions.cellpose_env_manager import cancel_cellpose_processing
+    from napari_tmidas.processing_functions.cellpose_env_manager import (
+        cancel_cellpose_processing,
+    )
 except ImportError:
     cancel_cellpose_processing = None
 
@@ -75,6 +77,38 @@ except ImportError:
     print(
         "Tip: Install dask for better performance with large datasets: pip install dask"
     )
+
+
+def is_label_image(filename: str) -> bool:
+    """
+    Determine if a file should be treated as a label image based on its filename.
+
+    This function checks for common suffixes used by processing functions that
+    produce label or binary mask outputs.
+
+    Parameters:
+    -----------
+    filename : str
+        The filename (or full path) to check
+
+    Returns:
+    --------
+    bool
+        True if the file should be treated as labels, False otherwise
+    """
+    label_suffixes = [
+        "labels",
+        "semantic",
+        "_binary",
+        "_inverted",
+        "_thresh",
+        "_otsu_semantic",
+        "_otsu_labels",
+        "_instance",
+        "_rm_small",
+    ]
+    filename_lower = filename.lower()
+    return any(suffix in filename_lower for suffix in label_suffixes)
 
 
 def load_zarr_with_napari_ome_zarr(
@@ -743,8 +777,8 @@ class ProcessedFilesTableWidget(QTableWidget):
 
             # Single channel image
             base_filename = os.path.basename(filepath)
-            # check if label image by checking file name
-            is_label = "labels" in base_filename or "semantic" in base_filename
+            # check if label image by checking file name for label-related suffixes
+            is_label = is_label_image(base_filename)
 
             if is_label:
                 if hasattr(image, "astype"):
@@ -1112,7 +1146,7 @@ class ProcessedFilesTableWidget(QTableWidget):
             # Single channel processed image
             filename = os.path.basename(filepath)
             # Check if filename contains label indicators
-            is_label = "labels" in filename or "semantic" in filename
+            is_label = is_label_image(filename)
 
             # Add the layer using the appropriate method
             if is_label:
@@ -1393,11 +1427,13 @@ class ProcessingWorker(QThread):
                         image = data
                         # Extract metadata if available
                         if isinstance(add_kwargs, dict):
-                            metadata = add_kwargs.get('metadata', {})
-                            if 'axes' in metadata:
+                            metadata = add_kwargs.get("metadata", {})
+                            if "axes" in metadata:
                                 print(f"Zarr axes: {metadata['axes']}")
-                            if 'channel_axis' in metadata:
-                                print(f"Channel axis: {metadata['channel_axis']}")
+                            if "channel_axis" in metadata:
+                                print(
+                                    f"Channel axis: {metadata['channel_axis']}"
+                                )
                         break
                 else:
                     # No image layer found, take first available
@@ -1412,21 +1448,19 @@ class ProcessingWorker(QThread):
                 image_dtype = np.float32
 
             # Get shape information for different array types
-            if hasattr(image, 'shape'):
+            if hasattr(image, "shape"):
                 shape_info = f"{image.shape}"
-            elif hasattr(image, '__array__'):
+            elif hasattr(image, "__array__"):
                 # For array-like objects
                 try:
                     arr = np.asarray(image)
                     shape_info = f"{arr.shape} (converted from array-like)"
-                except:
+                except (ValueError, TypeError, AttributeError):
                     shape_info = "unknown (array conversion failed)"
             else:
                 shape_info = "unknown (no shape attribute)"
 
-            print(
-                f"Original image shape: {shape_info}, dtype: {image_dtype}"
-            )
+            print(f"Original image shape: {shape_info}, dtype: {image_dtype}")
 
             # Check if this is a folder-processing function that shouldn't save individual files
             function_name = getattr(
@@ -1453,12 +1487,15 @@ class ProcessingWorker(QThread):
 
             # Apply processing with parameters
             # For zarr files, pass the original filepath to enable optimized processing
-            if filepath.lower().endswith('.zarr'):
+            if filepath.lower().endswith(".zarr"):
                 # Add filepath for zarr-aware processing functions
-                processing_params = {**self.param_values, '_source_filepath': filepath}
+                processing_params = {
+                    **self.param_values,
+                    "_source_filepath": filepath,
+                }
             else:
                 processing_params = self.param_values
-                
+
             processed_result = self.processing_func(image, **processing_params)
 
             # Check if result is points data (for spot detection functions)
@@ -1619,10 +1656,10 @@ class ProcessingWorker(QThread):
                     # For very large files, use BigTIFF format
                     use_bigtiff = size_gb > 2.0
 
-                    if (
-                        "labels" in channel_filename
-                        or "semantic" in channel_filename
-                    ):
+                    # Check if this is a label image by checking filename
+                    is_label = is_label_image(channel_filename)
+
+                    if is_label:
                         # Choose appropriate integer type based on data range
                         if data_max <= 255:
                             save_dtype = np.uint8
@@ -1683,10 +1720,10 @@ class ProcessingWorker(QThread):
                 )
                 print(f"Data range: {data_min} to {data_max}")
 
-                if (
-                    "labels" in new_filename_base
-                    or "semantic" in new_filename_base
-                ):
+                # Check if this is a label image by checking filename
+                is_label = is_label_image(new_filename_base)
+
+                if is_label:
                     save_dtype = np.uint32
                     print(
                         f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -2055,7 +2092,7 @@ class FileResultsWidget(QWidget):
         # Cancel any running cellpose subprocesses
         if cancel_cellpose_processing:
             cancel_cellpose_processing()
-            
+
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()  # Wait for the thread to finish

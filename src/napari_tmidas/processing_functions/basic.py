@@ -16,14 +16,14 @@ from napari_tmidas._registry import BatchProcessingRegistry
 @BatchProcessingRegistry.register(
     name="Labels to Binary",
     suffix="_binary",
-    description="Convert multi-label images to binary masks (all non-zero labels become 1)",
+    description="Convert multi-label images to binary masks (all non-zero labels become 255)",
 )
 def labels_to_binary(image: np.ndarray) -> np.ndarray:
     """
     Convert multi-label images to binary masks.
 
     This function takes a label image (where different regions have different label values)
-    and converts it to a binary mask (where all labeled regions have a value of 1 and
+    and converts it to a binary mask (where all labeled regions have a value of 255 and
     background has a value of 0).
 
     Parameters:
@@ -34,14 +34,36 @@ def labels_to_binary(image: np.ndarray) -> np.ndarray:
     Returns:
     --------
     numpy.ndarray
-        Binary mask with 1 for all non-zero labels and 0 for background
+        Binary mask with 255 for all non-zero labels and 0 for background
     """
-    # Make a copy of the input image to avoid modifying the original
-    binary_mask = image.copy()
+    # Return 255 for all non-zero values, 0 for zero values
+    return np.where(image > 0, 255, 0).astype(np.uint8)
 
-    binary_mask = (binary_mask > 0).astype(np.uint32)
 
-    return binary_mask
+@BatchProcessingRegistry.register(
+    name="Invert Binary/Labels",
+    suffix="_inverted",
+    description="Invert label or binary images (all non-zero values become 0, all zero values become 255)",
+)
+def invert_binary_labels(image: np.ndarray) -> np.ndarray:
+    """
+    Invert label or binary images.
+
+    This function inverts the image by converting all non-zero values to 0
+    and all zero values to 255. Useful for inverting binary masks or label images.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input label or binary image array
+
+    Returns:
+    --------
+    numpy.ndarray
+        Inverted image with 255 for all previously zero values and 0 for all previously non-zero values
+    """
+    # Create inverted mask: zero values become 255, non-zero values become 0
+    return np.where(image == 0, 255, 0).astype(np.uint8)
 
 
 @BatchProcessingRegistry.register(

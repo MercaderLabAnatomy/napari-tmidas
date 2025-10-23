@@ -54,7 +54,8 @@ if SKIMAGE_AVAILABLE:
 
         image = skimage.img_as_ubyte(image)  # convert to 8-bit
         thresh = skimage.filters.threshold_otsu(image)
-        return (image > thresh).astype(np.uint32)
+        # Return 255 for values above threshold, 0 for values below
+        return np.where(image > thresh, 255, 0).astype(np.uint8)
 
     # instance segmentation
     @BatchProcessingRegistry.register(
@@ -93,7 +94,9 @@ if SKIMAGE_AVAILABLE:
         """
         # convert to 8-bit
         image = skimage.img_as_ubyte(image)
-        return image > threshold
+        # Return 255 for values above threshold, 0 for values below
+        # This ensures the binary image is visible when viewed as a regular image
+        return np.where(image > threshold, 255, 0).astype(np.uint8)
 
     # remove small objects
     @BatchProcessingRegistry.register(
