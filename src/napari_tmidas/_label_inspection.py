@@ -12,11 +12,49 @@ import os
 import sys
 
 import numpy as np
-from magicgui import magicgui
-from napari.layers import Labels
-from napari.viewer import Viewer
-from qtpy.QtWidgets import QFileDialog, QMessageBox, QPushButton
-from skimage.io import imread  # , imsave
+
+# Lazy imports for optional heavy dependencies
+try:
+    from magicgui import magicgui
+
+    _HAS_MAGICGUI = True
+except ImportError:
+    # Create stub decorator
+    def magicgui(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return decorator
+
+    _HAS_MAGICGUI = False
+
+try:
+    from napari.layers import Labels
+    from napari.viewer import Viewer
+
+    _HAS_NAPARI = True
+except ImportError:
+    Labels = None
+    Viewer = None
+    _HAS_NAPARI = False
+
+try:
+    from qtpy.QtWidgets import QFileDialog, QMessageBox, QPushButton
+
+    _HAS_QTPY = True
+except ImportError:
+    QFileDialog = QMessageBox = QPushButton = None
+    _HAS_QTPY = False
+
+try:
+    from skimage.io import imread  # , imsave
+
+    _HAS_SKIMAGE = True
+except ImportError:
+    imread = None
+    _HAS_SKIMAGE = False
 
 sys.path.append("src/napari_tmidas")
 
