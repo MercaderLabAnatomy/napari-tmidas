@@ -6,9 +6,24 @@ import concurrent.futures
 import os
 import traceback
 
-import dask.array as da
 import numpy as np
-import tifffile
+
+# Lazy imports for optional heavy dependencies
+try:
+    import dask.array as da
+
+    _HAS_DASK = True
+except ImportError:
+    da = None
+    _HAS_DASK = False
+
+try:
+    import tifffile
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    tifffile = None
+    _HAS_TIFFFILE = False
 
 from napari_tmidas._registry import BatchProcessingRegistry
 
@@ -707,7 +722,13 @@ def split_tzyx_stack(
 # Monkey patch ProcessingWorker.process_file to handle parallel TZYX splitting
 try:
     # Import tifffile here to ensure it's available for the monkey patch
-    import tifffile
+    if not _HAS_TIFFFILE:
+        try:
+            import tifffile
+
+            _HAS_TIFFFILE = True
+        except ImportError:
+            pass  # tifffile not available, skip monkey patch
 
     from napari_tmidas._file_selector import ProcessingWorker
 

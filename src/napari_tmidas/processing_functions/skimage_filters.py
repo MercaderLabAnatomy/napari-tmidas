@@ -19,7 +19,14 @@ except ImportError:
 import contextlib
 import os
 
-import pandas as pd
+# Lazy imports for optional heavy dependencies
+try:
+    import pandas as pd
+
+    _HAS_PANDAS = True
+except ImportError:
+    pd = None
+    _HAS_PANDAS = False
 
 from napari_tmidas._file_selector import ProcessingWorker
 from napari_tmidas._registry import BatchProcessingRegistry
@@ -408,6 +415,23 @@ if SKIMAGE_AVAILABLE:
         print(f"Warning: Could not apply CSV export patch: {e}")
         print(
             "Region properties will be extracted but CSV files may not be saved"
+        )
+
+else:
+    # Export stub functions that raise ImportError when called
+    def invert_image(*args, **kwargs):
+        raise ImportError(
+            "scikit-image is not available. Please install scikit-image to use this function."
+        )
+
+    def equalize_histogram(*args, **kwargs):
+        raise ImportError(
+            "scikit-image is not available. Please install scikit-image to use this function."
+        )
+
+    def otsu_thresholding(*args, **kwargs):
+        raise ImportError(
+            "scikit-image is not available. Please install scikit-image to use this function."
         )
 
 

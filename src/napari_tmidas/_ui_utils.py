@@ -4,7 +4,14 @@ Common UI utilities for napari widgets.
 
 import os
 
-from qtpy.QtWidgets import QFileDialog, QPushButton
+# Lazy imports for optional heavy dependencies
+try:
+    from qtpy.QtWidgets import QFileDialog, QPushButton
+
+    _HAS_QTPY = True
+except ImportError:
+    QFileDialog = QPushButton = None
+    _HAS_QTPY = False
 
 
 def add_browse_button_to_folder_field(widget, folder_field_name: str):

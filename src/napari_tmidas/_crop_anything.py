@@ -12,28 +12,91 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import requests
-import torch
-from magicgui import magicgui
-from napari.layers import Labels
-from napari.viewer import Viewer
-from qtpy.QtCore import Qt
-from qtpy.QtWidgets import (
-    QCheckBox,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
-from skimage.io import imread
-from skimage.transform import resize
-from tifffile import imwrite
+
+# Lazy imports for optional heavy dependencies
+try:
+    import requests
+
+    _HAS_REQUESTS = True
+except ImportError:
+    requests = None
+    _HAS_REQUESTS = False
+
+try:
+    import torch
+
+    _HAS_TORCH = True
+except ImportError:
+    torch = None
+    _HAS_TORCH = False
+
+try:
+    from magicgui import magicgui
+
+    _HAS_MAGICGUI = True
+except ImportError:
+    # Create stub decorator
+    def magicgui(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return decorator
+
+    _HAS_MAGICGUI = False
+
+try:
+    from napari.layers import Labels
+    from napari.viewer import Viewer
+
+    _HAS_NAPARI = True
+except ImportError:
+    Labels = None
+    Viewer = None
+    _HAS_NAPARI = False
+
+try:
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import (
+        QCheckBox,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QMessageBox,
+        QPushButton,
+        QScrollArea,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    _HAS_QTPY = True
+except ImportError:
+    Qt = None
+    QCheckBox = QHBoxLayout = QHeaderView = QLabel = QMessageBox = None
+    QPushButton = QScrollArea = QTableWidget = QTableWidgetItem = None
+    QVBoxLayout = QWidget = None
+    _HAS_QTPY = False
+
+try:
+    from skimage.io import imread
+    from skimage.transform import resize
+
+    _HAS_SKIMAGE = True
+except ImportError:
+    imread = None
+    resize = None
+    _HAS_SKIMAGE = False
+
+try:
+    from tifffile import imwrite
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    imwrite = None
+    _HAS_TIFFFILE = False
 
 from napari_tmidas._file_selector import (
     load_image_file as load_any_image,
@@ -1562,9 +1625,10 @@ class BatchCropAnything:
                     )
                     print("DEBUG: Rectangle processing complete!")
 
-                    # Clear the rectangle after processing
-                    if self.shapes_layer is not None:
-                        self.shapes_layer.data = []
+                    # Keep the rectangle visible after processing
+                    # Users can manually delete it if needed
+                    # if self.shapes_layer is not None:
+                    #     self.shapes_layer.data = []
                 else:
                     print("DEBUG: _sam2_state not available")
                     self.viewer.status = (
@@ -1711,9 +1775,10 @@ class BatchCropAnything:
                         ):
                             self._populate_label_table(self.label_table_widget)
 
-                        # Clear the rectangle after processing
-                        if self.shapes_layer is not None:
-                            self.shapes_layer.data = []
+                        # Keep the rectangle visible after processing
+                        # Users can manually delete it if needed
+                        # if self.shapes_layer is not None:
+                        #     self.shapes_layer.data = []
             else:
                 # Unexpected shape dimensions
                 print(

@@ -55,3 +55,15 @@ if SCIPY_AVAILABLE:
         Apply median filter for noise reduction
         """
         return ndimage.median_filter(image, size=size)
+
+else:
+    # Export stub functions that raise ImportError when called
+    def gaussian_blur(*args, **kwargs):
+        raise ImportError(
+            "SciPy is not available. Please install scipy to use this function."
+        )
+
+    def median_filter(*args, **kwargs):
+        raise ImportError(
+            "SciPy is not available. Please install scipy to use this function."
+        )

@@ -3,9 +3,24 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import cv2
 import numpy as np
-import tifffile
+
+# Lazy imports for optional heavy dependencies
+try:
+    import cv2
+
+    _HAS_CV2 = True
+except ImportError:
+    cv2 = None
+    _HAS_CV2 = False
+
+try:
+    import tifffile
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    tifffile = None
+    _HAS_TIFFFILE = False
 
 
 def tif_to_mp4(

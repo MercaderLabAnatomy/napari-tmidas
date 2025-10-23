@@ -10,34 +10,130 @@ New functions can be added to the processing registry by decorating them with
 as the first argument, and any additional keyword arguments for parameters.
 """
 
+from __future__ import annotations
+
 import concurrent.futures
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-import napari
 import numpy as np
-import tifffile
-import zarr
-from magicgui import magicgui
-from qtpy.QtCore import Qt, QThread, Signal
-from qtpy.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
-    QFormLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QProgressBar,
-    QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
-from skimage.io import imread
+
+# Lazy imports for optional heavy dependencies
+if TYPE_CHECKING:
+    import napari
+    import tifffile
+    import zarr
+    from magicgui import magicgui
+    from qtpy.QtCore import Qt, QThread, Signal
+    from qtpy.QtWidgets import (
+        QComboBox,
+        QDoubleSpinBox,
+        QFormLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QProgressBar,
+        QPushButton,
+        QSpinBox,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+    from skimage.io import imread
+
+try:
+    import napari
+
+    _HAS_NAPARI = True
+except ImportError:
+    napari = None
+    _HAS_NAPARI = False
+
+try:
+    import tifffile
+
+    _HAS_TIFFFILE = True
+except ImportError:
+    tifffile = None
+    _HAS_TIFFFILE = False
+
+try:
+    import zarr
+
+    _HAS_ZARR = True
+except ImportError:
+    zarr = None
+    _HAS_ZARR = False
+
+try:
+    from magicgui import magicgui
+
+    _HAS_MAGICGUI = True
+except ImportError:
+    # Create stub decorator
+    def magicgui(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return decorator
+
+    _HAS_MAGICGUI = False
+
+try:
+    from qtpy.QtCore import Qt, QThread, Signal
+    from qtpy.QtWidgets import (
+        QComboBox,
+        QDoubleSpinBox,
+        QFormLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QProgressBar,
+        QPushButton,
+        QSpinBox,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    _HAS_QTPY = True
+except ImportError:
+    Qt = QThread = Signal = None
+    QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
+    QHeaderView = QLabel = QLineEdit = QProgressBar = QPushButton = None
+    QSpinBox = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
+    _HAS_QTPY = False
+
+try:
+    from skimage.io import imread
+
+    _HAS_SKIMAGE = True
+except ImportError:
+    imread = None
+    _HAS_SKIMAGE = False
+
+# Create stub base classes when dependencies are missing
+if not _HAS_QTPY:
+    # Create minimal stubs to allow class definitions
+    class QTableWidget:
+        pass
+
+    class QThread:
+        pass
+
+    class QWidget:
+        pass
+
+    def Signal(*args):
+        return None
+
 
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
@@ -1325,9 +1421,10 @@ def file_selector(
 
 
 # Create a modified file_selector with browse button
-file_selector = add_browse_button_to_folder_field(
-    file_selector, "input_folder"
-)
+if _HAS_MAGICGUI and _HAS_QTPY:
+    file_selector = add_browse_button_to_folder_field(
+        file_selector, "input_folder"
+    )
 
 
 # Processing worker for multithreading

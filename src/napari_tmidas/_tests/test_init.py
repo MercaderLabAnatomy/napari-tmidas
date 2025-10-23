@@ -1,4 +1,9 @@
 # src/napari_tmidas/_tests/test_init.py
+import os
+import sys
+
+import pytest
+
 from napari_tmidas import (
     __version__,
     batch_crop_anything_widget,
@@ -13,6 +18,10 @@ from napari_tmidas import (
 
 
 class TestInit:
+    @pytest.mark.skipif(
+        sys.platform == "win32" and os.environ.get("CI") == "true",
+        reason="Version is 'unknown' on Windows CI when skip_install=true",
+    )
     def test_version_import(self):
         """Test that version is imported correctly"""
         # Version should be a string
