@@ -482,3 +482,272 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
 
     # Convert the rescaled image to uint8
     return skimage.img_as_ubyte(img_rescaled)
+
+
+# ============================================================================
+# Bright Region Extraction Functions
+# ============================================================================
+
+if SKIMAGE_AVAILABLE:
+
+    @BatchProcessingRegistry.register(
+        name="White Top-Hat (Extract Bright Features)",
+        suffix="_tophat",
+        description="Extract bright features from background using morphological white top-hat transform",
+        parameters={
+            "footprint_size": {
+                "type": int,
+                "default": 15,
+                "min": 3,
+                "max": 101,
+                "description": "Size of structuring element (larger removes bigger background features)",
+            }
+        },
+    )
+    def white_tophat(
+        image: np.ndarray, footprint_size: int = 15
+    ) -> np.ndarray:
+        """
+        Apply white top-hat transform to extract bright regions.
+
+        The white top-hat transform extracts bright features that are smaller than
+        the structuring element. It works by subtracting a morphological opening
+        from the original image, effectively removing background and keeping only
+        bright peaks and spots.
+
+        Parameters:
+        -----------
+        image : numpy.ndarray
+            Input image array
+        footprint_size : int
+            Size of the structuring element (disk). Larger values remove broader
+            background variations and keep only the brightest local features.
+
+        Returns:
+        --------
+        numpy.ndarray
+            Image with bright features extracted and background removed
+        """
+        # Create circular structuring element
+        footprint = skimage.morphology.disk(footprint_size)
+        return skimage.morphology.white_tophat(image, footprint=footprint)
+
+    @BatchProcessingRegistry.register(
+        name="Percentile Threshold (Keep Brightest)",
+        suffix="_percentile",
+        description="Keep only pixels above a brightness percentile, zero out the rest",
+        parameters={
+            "percentile": {
+                "type": float,
+                "default": 90.0,
+                "min": 0.0,
+                "max": 100.0,
+                "description": "Keep pixels brighter than this percentile (0-100)",
+            },
+            "output_type": {
+                "type": str,
+                "default": "original",
+                "options": ["original", "binary"],
+                "description": "Output original values or binary mask",
+            },
+        },
+    )
+    def percentile_threshold(
+        image: np.ndarray,
+        percentile: float = 90.0,
+        output_type: str = "original",
+    ) -> np.ndarray:
+        """
+        Keep only pixels above a certain brightness percentile.
+
+        This function calculates the specified percentile of pixel intensities
+        and keeps only pixels brighter than that threshold. Darker pixels are
+        set to zero.
+
+        Parameters:
+        -----------
+        image : numpy.ndarray
+            Input image array
+        percentile : float
+            Percentile threshold (0-100). Higher values keep fewer, brighter pixels.
+        output_type : str
+            'original' returns the original pixel values for pixels above threshold,
+            'binary' returns a binary mask (255 for above threshold, 0 otherwise)
+
+        Returns:
+        --------
+        numpy.ndarray
+            Image with only bright regions preserved
+        """
+        # Calculate the percentile threshold
+        threshold = np.percentile(image, percentile)
+
+        if output_type == "binary":
+            # Return binary mask
+            return np.where(image > threshold, 255, 0).astype(np.uint8)
+        else:
+            # Return original values above threshold, zero elsewhere
+            result = image.copy()
+            result[image <= threshold] = 0
+            return result
+
+    @BatchProcessingRegistry.register(
+        name="Rolling Ball Background Subtraction",
+        suffix="_rollingball",
+        description="Remove uneven background using rolling ball algorithm (like ImageJ)",
+        parameters={
+            "radius": {
+                "type": int,
+                "default": 50,
+                "min": 5,
+                "max": 200,
+                "description": "Radius of rolling ball (larger = remove broader background)",
+            }
+        },
+    )
+    def rolling_ball_background(
+        image: np.ndarray, radius: int = 50
+    ) -> np.ndarray:
+        """
+        Remove background using rolling ball algorithm.
+
+        This algorithm estimates and removes uneven background by simulating
+        a ball rolling under the image surface. It's particularly effective
+        for fluorescence microscopy images with uneven illumination.
+
+        Parameters:
+        -----------
+        image : numpy.ndarray
+            Input image array
+        radius : int
+            Radius of the rolling ball. Should be larger than the largest
+            feature you want to keep. Larger values remove broader background
+            variations.
+
+        Returns:
+        --------
+        numpy.ndarray
+            Background-subtracted image with bright features preserved
+        """
+        from skimage.restoration import rolling_ball
+
+        # Estimate background
+        background = rolling_ball(image, radius=radius)
+
+        # Subtract background and clip to valid range
+        result = image.astype(np.float32) - background
+        result = np.clip(result, 0, None)
+
+        # Convert back to original dtype range if needed
+        if image.dtype == np.uint8:
+            result = np.clip(result, 0, 255).astype(np.uint8)
+        elif image.dtype == np.uint16:
+            result = np.clip(result, 0, 65535).astype(np.uint16)
+
+        return result
+
+    @BatchProcessingRegistry.register(
+        name="H-Maxima Transform",
+        suffix="_hmaxima",
+        description="Suppress all maxima with height less than h (keeps only prominent bright peaks)",
+        parameters={
+            "h": {
+                "type": float,
+                "default": 10.0,
+                "min": 0.1,
+                "max": 255.0,
+                "description": "Height threshold (suppress maxima smaller than this)",
+            }
+        },
+    )
+    def h_maxima_transform(image: np.ndarray, h: float = 10.0) -> np.ndarray:
+        """
+        Apply H-maxima transform to extract prominent bright peaks.
+
+        The H-maxima transform suppresses all local maxima whose height
+        (difference from surrounding pixels) is less than h. This is excellent
+        for finding bright spots and peaks while ignoring small intensity
+        variations.
+
+        Parameters:
+        -----------
+        image : numpy.ndarray
+            Input image array
+        h : float
+            Height threshold. Local maxima with peak height less than h
+            will be suppressed. Larger values keep only more prominent peaks.
+
+        Returns:
+        --------
+        numpy.ndarray
+            Image with only prominent bright peaks preserved
+        """
+        from skimage.morphology import h_maxima
+
+        return h_maxima(image, h=h)
+
+    @BatchProcessingRegistry.register(
+        name="Adaptive Threshold (Bright Bias)",
+        suffix="_adaptive_bright",
+        description="Adaptive thresholding biased to keep bright regions",
+        parameters={
+            "block_size": {
+                "type": int,
+                "default": 35,
+                "min": 3,
+                "max": 201,
+                "description": "Size of local neighborhood (must be odd)",
+            },
+            "offset": {
+                "type": float,
+                "default": -10.0,
+                "min": -128.0,
+                "max": 128.0,
+                "description": "Constant subtracted from mean (negative = keep more bright pixels)",
+            },
+        },
+    )
+    def adaptive_threshold_bright(
+        image: np.ndarray, block_size: int = 35, offset: float = -10.0
+    ) -> np.ndarray:
+        """
+        Apply adaptive thresholding with bias toward bright regions.
+
+        Unlike global thresholding, adaptive thresholding calculates a threshold
+        for each pixel based on its local neighborhood. The negative offset
+        biases the threshold to keep more bright pixels.
+
+        Parameters:
+        -----------
+        image : numpy.ndarray
+            Input image array
+        block_size : int
+            Size of the local neighborhood for threshold calculation. Must be odd.
+            Larger values consider broader neighborhoods.
+        offset : float
+            Value subtracted from the local mean. Negative values (like -10)
+            lower the threshold, keeping more bright pixels.
+
+        Returns:
+        --------
+        numpy.ndarray
+            Binary image (255 for bright regions, 0 elsewhere)
+        """
+        # Ensure block_size is odd
+        if block_size % 2 == 0:
+            block_size += 1
+
+        # Convert to uint8 if needed
+        if image.dtype != np.uint8:
+            image = skimage.img_as_ubyte(image)
+
+        # Apply adaptive thresholding
+        threshold = skimage.filters.threshold_local(
+            image, block_size=block_size, offset=offset
+        )
+
+        # Create binary mask
+        binary = image > threshold
+
+        # Return as uint8 (255/0)
+        return (binary * 255).astype(np.uint8)

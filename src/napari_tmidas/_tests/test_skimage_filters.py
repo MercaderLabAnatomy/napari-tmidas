@@ -2,8 +2,13 @@
 import numpy as np
 
 from napari_tmidas.processing_functions.skimage_filters import (
+    adaptive_threshold_bright,
+    h_maxima_transform,
     invert_image,
+    percentile_threshold,
+    rolling_ball_background,
     simple_thresholding,
+    white_tophat,
 )
 
 
@@ -67,3 +72,101 @@ class TestSkimageFilters:
         assert (
             np.sum(result_high == 255) < np.prod(result_high.shape) * 0.3
         )  # Most pixels below 200
+
+
+class TestBrightRegionExtraction:
+    """Test suite for bright region extraction functions"""
+
+    def test_white_tophat_basic(self):
+        """Test white top-hat transform extracts bright features"""
+        # Create image with bright spot on dark background
+        image = np.zeros((100, 100), dtype=np.uint8)
+        image[40:60, 40:60] = 200  # Bright square
+        image[45:55, 45:55] = 255  # Brighter center
+
+        result = white_tophat(image, footprint_size=15)
+
+        # Result should have bright features extracted
+        assert result.shape == image.shape
+        assert result.max() > 0  # Should have some bright regions
+        assert result.sum() < image.sum()  # Background removed
+
+    def test_percentile_threshold_original(self):
+        """Test percentile thresholding with original values"""
+        # Create image with gradient
+        image = np.arange(0, 256, dtype=np.uint8).reshape(16, 16)
+
+        result = percentile_threshold(
+            image, percentile=90, output_type="original"
+        )
+
+        # Only top 10% should remain
+        assert result.shape == image.shape
+        assert np.sum(result > 0) < image.size * 0.15  # Allow some margin
+        assert result.max() == image.max()  # Original max value preserved
+
+    def test_percentile_threshold_binary(self):
+        """Test percentile thresholding with binary output"""
+        image = np.random.randint(0, 256, size=(50, 50), dtype=np.uint8)
+
+        result = percentile_threshold(
+            image, percentile=80, output_type="binary"
+        )
+
+        # Should be binary
+        assert result.dtype == np.uint8
+        assert set(np.unique(result)).issubset({0, 255})
+
+    def test_rolling_ball_background_subtraction(self):
+        """Test rolling ball background subtraction"""
+        # Create image with uneven background and bright spot
+        x, y = np.meshgrid(np.arange(100), np.arange(100))
+        background = (50 + 30 * np.sin(x / 20) + 30 * np.sin(y / 20)).astype(
+            np.uint8
+        )
+        image = background.copy()
+        image[40:60, 40:60] += 150  # Add bright feature
+
+        result = rolling_ball_background(image, radius=30)
+
+        # Background should be reduced
+        assert result.shape == image.shape
+        # Center of bright spot should be brighter in result than in corners
+        assert result[50, 50] > result[10, 10]
+
+    def test_h_maxima_transform(self):
+        """Test H-maxima transform suppresses small peaks"""
+        # Create image with peaks of different heights
+        image = np.zeros((100, 100), dtype=np.uint8)
+        image[20, 20] = 100  # Small peak
+        image[50, 50] = 200  # Large peak
+        image[80, 80] = 80  # Very small peak
+
+        result = h_maxima_transform(image, h=50.0)
+
+        # Should suppress small peaks, keep large ones
+        assert result.shape == image.shape
+        # Large peak should remain prominent
+        assert result[50, 50] > result[20, 20]
+
+    def test_adaptive_threshold_bright(self):
+        """Test adaptive thresholding with bright bias"""
+        # Create image with varying brightness
+        image = np.random.randint(0, 256, size=(100, 100), dtype=np.uint8)
+
+        result = adaptive_threshold_bright(image, block_size=35, offset=-10.0)
+
+        # Should be binary
+        assert result.dtype == np.uint8
+        assert set(np.unique(result)).issubset({0, 255})
+        assert result.shape == image.shape
+
+    def test_adaptive_threshold_even_blocksize(self):
+        """Test that even block size is handled correctly"""
+        image = np.random.randint(0, 256, size=(50, 50), dtype=np.uint8)
+
+        # Should handle even block size by making it odd
+        result = adaptive_threshold_bright(image, block_size=34, offset=0)
+
+        assert result.shape == image.shape
+        assert result.dtype == np.uint8
