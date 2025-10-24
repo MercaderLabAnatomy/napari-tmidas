@@ -112,6 +112,13 @@ def transpose_dimensions(img, dim_order):
         #     "max": 3,
         #     "description": "Second channel: 0=none, 1=green, 2=red, 3=blue",
         # },
+        "diameter": {
+            "type": float,
+            "default": 0.0,
+            "min": 0.0,
+            "max": 200.0,
+            "description": "Optional. Only required if your ROI diameter is outside the range 7.5–120. Set to 0 to leave unset (recommended for most users). Cellpose-SAM is trained for diameters in this range.",
+        },
         "flow_threshold": {
             "type": float,
             "default": 0.4,
@@ -167,6 +174,7 @@ def cellpose_segmentation(
     flow3D_smooth: int = 0,
     tile_norm_blocksize: int = 128,
     batch_size: int = 32,
+    diameter: float = 0.0,
     _source_filepath: str = None,  # Hidden parameter for zarr optimization
 ) -> np.ndarray:
     """
@@ -203,6 +211,8 @@ def cellpose_segmentation(
     numpy.ndarray
         Segmented image with instance labels
     """
+    # Diameter parameter guidance:
+    # Cellpose-SAM is trained for ROI diameters 7.5–120. Only set diameter if your images have objects outside this range (e.g., diameter <7.5 or >120). Otherwise, leave as None.
     # Cellpose 4 handles normalization internally via percentile-based normalization
     # It accepts uint8, uint16, float32, float64 - no pre-conversion needed!
     # The normalize=True parameter (default) will convert to float and normalize
@@ -282,6 +292,7 @@ def cellpose_segmentation(
             "anisotropy": anisotropy,
             "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
             "batch_size": batch_size,
+            "diameter": diameter,
             "use_gpu": True,  # Let cellpose environment detect GPU
             "do_3D": is_3d,
             "z_axis": 0 if is_3d else None,
@@ -299,6 +310,7 @@ def cellpose_segmentation(
             "anisotropy": anisotropy,
             "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
             "batch_size": batch_size,
+            "diameter": diameter,
             "use_gpu": True,  # Let cellpose environment detect GPU
             "do_3D": is_3d,
             "z_axis": 0 if is_3d else None,
