@@ -522,48 +522,6 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
 if SKIMAGE_AVAILABLE:
 
     @BatchProcessingRegistry.register(
-        name="White Top-Hat (Extract Bright Features)",
-        suffix="_tophat",
-        description="Extract bright features from background using morphological white top-hat transform",
-        parameters={
-            "footprint_size": {
-                "type": int,
-                "default": 15,
-                "min": 3,
-                "max": 101,
-                "description": "Size of structuring element (larger removes bigger background features)",
-            }
-        },
-    )
-    def white_tophat(
-        image: np.ndarray, footprint_size: int = 15
-    ) -> np.ndarray:
-        """
-        Apply white top-hat transform to extract bright regions.
-
-        The white top-hat transform extracts bright features that are smaller than
-        the structuring element. It works by subtracting a morphological opening
-        from the original image, effectively removing background and keeping only
-        bright peaks and spots.
-
-        Parameters:
-        -----------
-        image : numpy.ndarray
-            Input image array
-        footprint_size : int
-            Size of the structuring element (disk). Larger values remove broader
-            background variations and keep only the brightest local features.
-
-        Returns:
-        --------
-        numpy.ndarray
-            Image with bright features extracted and background removed
-        """
-        # Create circular structuring element
-        footprint = skimage.morphology.disk(footprint_size)
-        return skimage.morphology.white_tophat(image, footprint=footprint)
-
-    @BatchProcessingRegistry.register(
         name="Percentile Threshold (Keep Brightest)",
         suffix="_percentile",
         description="Keep only pixels above a brightness percentile, zero out the rest",

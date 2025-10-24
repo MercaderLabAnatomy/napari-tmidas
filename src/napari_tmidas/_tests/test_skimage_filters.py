@@ -8,7 +8,6 @@ from napari_tmidas.processing_functions.skimage_filters import (
     resize_mask,
     rolling_ball_background,
     simple_thresholding,
-    white_tophat,
 )
 
 
@@ -88,20 +87,6 @@ class TestSkimageFilters:
 
 class TestBrightRegionExtraction:
     """Test suite for bright region extraction functions"""
-
-    def test_white_tophat_basic(self):
-        """Test white top-hat transform extracts bright features"""
-        # Create image with bright spot on dark background
-        image = np.zeros((100, 100), dtype=np.uint8)
-        image[40:60, 40:60] = 200  # Bright square
-        image[45:55, 45:55] = 255  # Brighter center
-
-        result = white_tophat(image, footprint_size=15)
-
-        # Result should have bright features extracted
-        assert result.shape == image.shape
-        assert result.max() > 0  # Should have some bright regions
-        assert result.sum() < image.sum()  # Background removed
 
     def test_percentile_threshold_original(self):
         """Test percentile thresholding with original values"""
