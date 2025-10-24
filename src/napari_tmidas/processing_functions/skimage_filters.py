@@ -33,6 +33,37 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
+    @BatchProcessingRegistry.register(
+        name="Resize Mask (Nearest)",
+        suffix="_resized",
+        description="Resize a mask using nearest-neighbor interpolation (order=0, anti_aliasing=False) to preserve mask integrity.",
+        parameters={
+            "output_shape": {
+                "type": "tuple",
+                "default": None,
+                "description": "Desired output shape as a tuple (e.g., (height, width)). If None, no resizing is performed.",
+            },
+        },
+    )
+    def resize_mask(mask: np.ndarray, output_shape=None) -> np.ndarray:
+        """
+        Resize a mask using nearest-neighbor interpolation to preserve mask integrity.
+        Uses skimage.transform.resize with order=0 and anti_aliasing=False.
+        """
+        if output_shape is None:
+            return mask
+        from skimage.transform import resize
+
+        resized = resize(
+            mask,
+            output_shape,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False,
+        )
+        # Ensure integer type for mask
+        return resized.astype(mask.dtype)
+
     # Equalize histogram
     @BatchProcessingRegistry.register(
         name="Equalize Histogram",
@@ -645,46 +676,6 @@ if SKIMAGE_AVAILABLE:
             result = np.clip(result, 0, 65535).astype(np.uint16)
 
         return result
-
-    @BatchProcessingRegistry.register(
-        name="H-Maxima Transform",
-        suffix="_hmaxima",
-        description="Suppress all maxima with height less than h (keeps only prominent bright peaks)",
-        parameters={
-            "h": {
-                "type": float,
-                "default": 10.0,
-                "min": 0.1,
-                "max": 255.0,
-                "description": "Height threshold (suppress maxima smaller than this)",
-            }
-        },
-    )
-    def h_maxima_transform(image: np.ndarray, h: float = 10.0) -> np.ndarray:
-        """
-        Apply H-maxima transform to extract prominent bright peaks.
-
-        The H-maxima transform suppresses all local maxima whose height
-        (difference from surrounding pixels) is less than h. This is excellent
-        for finding bright spots and peaks while ignoring small intensity
-        variations.
-
-        Parameters:
-        -----------
-        image : numpy.ndarray
-            Input image array
-        h : float
-            Height threshold. Local maxima with peak height less than h
-            will be suppressed. Larger values keep only more prominent peaks.
-
-        Returns:
-        --------
-        numpy.ndarray
-            Image with only prominent bright peaks preserved
-        """
-        from skimage.morphology import h_maxima
-
-        return h_maxima(image, h=h)
 
     @BatchProcessingRegistry.register(
         name="Adaptive Threshold (Bright Bias)",
