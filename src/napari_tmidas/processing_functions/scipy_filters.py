@@ -17,6 +17,38 @@ from napari_tmidas._registry import BatchProcessingRegistry
 if SCIPY_AVAILABLE:
 
     @BatchProcessingRegistry.register(
+        name="Resize Labels (Nearest, SciPy)",
+        suffix="_scaled",
+        description="Resize a label mask or label image by a scale factor using nearest-neighbor interpolation (scipy.ndimage.zoom, grid_mode=True) to preserve label integrity without shifting position.",
+        parameters={
+            "scale_factor": {
+                "type": "float",
+                "default": 1.0,
+                "min": 0.01,
+                "max": 10.0,
+                "description": "Factor by which to resize the label image (e.g., 0.8 for 80% size, 1.2 for 120% size). 1.0 means no resizing.",
+            },
+        },
+    )
+    def resize_labels(label_image: np.ndarray, scale_factor=1.0) -> np.ndarray:
+        """
+        Resize a label mask or label image by a scale factor using nearest-neighbor interpolation to preserve label integrity without shifting position.
+        """
+        scale_factor = float(scale_factor)
+        if scale_factor == 1.0:
+            return label_image
+        from scipy.ndimage import zoom
+
+        scaled_labels = zoom(
+            label_image,
+            zoom=scale_factor,
+            order=0,  # Nearest-neighbor interpolation
+            grid_mode=True,  # Prevents positional shift
+            mode="nearest",
+        ).astype(label_image.dtype)
+        return scaled_labels
+
+    @BatchProcessingRegistry.register(
         name="Gaussian Blur",
         suffix="_blurred",
         description="Apply Gaussian blur to the image",
