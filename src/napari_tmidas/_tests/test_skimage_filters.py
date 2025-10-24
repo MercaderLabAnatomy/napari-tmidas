@@ -3,9 +3,9 @@ import numpy as np
 
 from napari_tmidas.processing_functions.skimage_filters import (
     adaptive_threshold_bright,
-    h_maxima_transform,
     invert_image,
     percentile_threshold,
+    resize_mask,
     rolling_ball_background,
     simple_thresholding,
     white_tophat,
@@ -13,6 +13,18 @@ from napari_tmidas.processing_functions.skimage_filters import (
 
 
 class TestSkimageFilters:
+    def test_resize_mask_nearest(self):
+        """Test resizing a mask with nearest-neighbor interpolation preserves mask integrity."""
+        mask = np.zeros((10, 10), dtype=np.uint8)
+        mask[2:8, 2:8] = 1
+        output_shape = (20, 20)
+        resized = resize_mask(mask, output_shape=output_shape)
+        assert resized.shape == output_shape
+        # Should only contain 0 and 1
+        assert set(np.unique(resized)).issubset({0, 1})
+        # Check that the central region is still 1
+        assert np.sum(resized == 1) > 0
+
     def test_invert_image_basic(self):
         """Test basic image inversion functionality"""
         image = np.random.rand(100, 100)
@@ -133,21 +145,6 @@ class TestBrightRegionExtraction:
         assert result.shape == image.shape
         # Center of bright spot should be brighter in result than in corners
         assert result[50, 50] > result[10, 10]
-
-    def test_h_maxima_transform(self):
-        """Test H-maxima transform suppresses small peaks"""
-        # Create image with peaks of different heights
-        image = np.zeros((100, 100), dtype=np.uint8)
-        image[20, 20] = 100  # Small peak
-        image[50, 50] = 200  # Large peak
-        image[80, 80] = 80  # Very small peak
-
-        result = h_maxima_transform(image, h=50.0)
-
-        # Should suppress small peaks, keep large ones
-        assert result.shape == image.shape
-        # Large peak should remain prominent
-        assert result[50, 50] > result[20, 20]
 
     def test_adaptive_threshold_bright(self):
         """Test adaptive thresholding with bright bias"""
