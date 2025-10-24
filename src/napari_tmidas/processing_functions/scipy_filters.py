@@ -54,6 +54,7 @@ if SCIPY_AVAILABLE:
         import numpy as np
         from scipy.ndimage import zoom
 
+        scale_factor = float(scale_factor)
         if scale_factor == 1.0:
             return label_image.copy()
 
