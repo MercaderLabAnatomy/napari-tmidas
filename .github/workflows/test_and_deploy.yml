@@ -104,7 +104,7 @@ jobs:
       - name: Test with tox
         uses: aganders3/headless-gui@v2
         with:
-          run: python -m tox -- -m "not slow"
+          run: python -m tox -r -- -m "not slow"
         env:
           PLATFORM: ${{ matrix.platform }}
           QT_QPA_PLATFORM: offscreen
