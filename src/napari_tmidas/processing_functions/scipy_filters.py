@@ -30,23 +30,64 @@ if SCIPY_AVAILABLE:
             },
         },
     )
-    def resize_labels(label_image: np.ndarray, scale_factor=1.0) -> np.ndarray:
+    def resize_labels(
+        label_image: np.ndarray, scale_factor: float = 1.0
+    ) -> np.ndarray:
         """
-        Resize a label mask or label image by a scale factor using nearest-neighbor interpolation to preserve label integrity without shifting position.
+        Resize labeled objects while maintaining original array dimensions.
+
+        Objects are scaled isotropically and centered within the original
+        coordinate system, preserving spatial relationships with other data.
+
+        Parameters
+        ----------
+        label_image : np.ndarray
+            3D label image where each unique value represents a distinct object
+        scale_factor : float
+            Scaling factor (e.g., 0.8 = 80% size, 1.2 = 120% size)
+
+        Returns
+        -------
+        np.ndarray
+            Resized label image with same dimensions as input
         """
-        scale_factor = float(scale_factor)
-        if scale_factor == 1.0:
-            return label_image
+        import numpy as np
         from scipy.ndimage import zoom
 
-        scaled_labels = zoom(
+        if scale_factor == 1.0:
+            return label_image.copy()
+
+        original_shape = np.array(label_image.shape)
+
+        # Resize the labeled objects
+        scaled = zoom(
             label_image,
             zoom=scale_factor,
-            order=0,  # Nearest-neighbor interpolation
-            grid_mode=True,  # Prevents positional shift
-            mode="nearest",
+            order=0,  # Preserve label values
+            grid_mode=True,  # Consistent coordinate system
+            mode="constant",
+            cval=0,
         ).astype(label_image.dtype)
-        return scaled_labels
+
+        new_shape = np.array(scaled.shape)
+        result = np.zeros(original_shape, dtype=label_image.dtype)
+
+        # Center the resized objects in the original array
+        offset = ((original_shape - new_shape) / 2).astype(int)
+
+        if scale_factor < 1.0:
+            # Place smaller objects in center
+            slices = tuple(slice(o, o + s) for o, s in zip(offset, new_shape))
+            result[slices] = scaled
+        else:
+            # Extract center region from larger objects
+            slices = tuple(
+                slice(-o if o < 0 else 0, s - o if o < 0 else s)
+                for o, s in zip(offset, original_shape)
+            )
+            result = scaled[slices]
+
+        return result
 
     @BatchProcessingRegistry.register(
         name="Gaussian Blur",
