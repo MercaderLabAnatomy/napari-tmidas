@@ -34,35 +34,39 @@ from napari_tmidas._registry import BatchProcessingRegistry
 if SKIMAGE_AVAILABLE:
 
     @BatchProcessingRegistry.register(
-        name="Resize Mask (Nearest)",
-        suffix="_resized",
-        description="Resize a mask using nearest-neighbor interpolation (order=0, anti_aliasing=False) to preserve mask integrity.",
+        name="Resize Labels (Nearest)",
+        suffix="_scaled",
+        description="Resize a label mask or label image by a scale factor using nearest-neighbor interpolation (order=0, anti_aliasing=False) to preserve label integrity.",
         parameters={
-            "output_shape": {
-                "type": "tuple",
-                "default": None,
-                "description": "Desired output shape as a tuple (e.g., (height, width)). If None, no resizing is performed.",
+            "scale_factor": {
+                "type": "float",
+                "default": 1.0,
+                "min": 0.01,
+                "max": 10.0,
+                "description": "Factor by which to resize the label image (e.g., 0.8 for 80% size, 1.2 for 120% size). 1.0 means no resizing.",
             },
         },
     )
-    def resize_mask(mask: np.ndarray, output_shape=None) -> np.ndarray:
+    def resize_labels(label_image: np.ndarray, scale_factor=1.0) -> np.ndarray:
         """
-        Resize a mask using nearest-neighbor interpolation to preserve mask integrity.
-        Uses skimage.transform.resize with order=0 and anti_aliasing=False.
+        Resize a label mask or label image by a scale factor using nearest-neighbor interpolation to preserve label integrity.
         """
-        if output_shape is None:
-            return mask
+        if scale_factor == 1.0:
+            return label_image
+        import numpy as np
         from skimage.transform import resize
 
-        resized = resize(
-            mask,
-            output_shape,
+        new_shape = tuple(
+            (np.array(label_image.shape) * scale_factor).astype(int)
+        )
+        scaled_labels = resize(
+            label_image,
+            new_shape,
             order=0,
             preserve_range=True,
             anti_aliasing=False,
-        )
-        # Ensure integer type for mask
-        return resized.astype(mask.dtype)
+        ).astype(label_image.dtype)
+        return scaled_labels
 
     # Equalize histogram
     @BatchProcessingRegistry.register(
