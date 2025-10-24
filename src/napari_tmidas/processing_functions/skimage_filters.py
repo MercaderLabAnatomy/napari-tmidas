@@ -51,6 +51,7 @@ if SKIMAGE_AVAILABLE:
         """
         Resize a label mask or label image by a scale factor using nearest-neighbor interpolation to preserve label integrity.
         """
+        scale_factor = float(scale_factor)
         if scale_factor == 1.0:
             return label_image
         import numpy as np
