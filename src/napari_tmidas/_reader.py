@@ -1,9 +1,5 @@
 """
-This module is an example of a barebones numpy reader plugin for napari.
-
-It implements the Reader specification, but your plugin may choose to
-implement multiple readers or even other plugin contributions. see:
-https://napari.org/stable/plugins/guides.html?#readers
+This module implements a reader plugin for napari.
 """
 
 import numpy as np
@@ -29,12 +25,12 @@ def napari_get_reader(path):
         # so we are only going to look at the first file.
         path = path[0]
 
-    # if we know we cannot read the file, we immediately return None.
-    if not path.endswith(".npy"):
-        return None
+    # Support .npy files
+    if path.endswith(".npy"):
+        return reader_function
 
-    # otherwise we return the *function* that can read ``path``.
-    return reader_function
+    # if we know we cannot read the file, we immediately return None.
+    return None
 
 
 def reader_function(path):
