@@ -1674,7 +1674,11 @@ class ProcessingWorker(QThread):
                     len(processed_result) == 3
                     and self.output_suffix == "_layer"
                 ):
-                    layer_names = ["_inner", "_middle", "_outer"]
+                    layer_names = [
+                        "_inner_labels",
+                        "_middle_labels",
+                        "_outer_labels",
+                    ]
                     for idx, (img, layer_name) in enumerate(
                         zip(processed_result, layer_names)
                     ):
