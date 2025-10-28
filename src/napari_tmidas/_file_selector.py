@@ -175,39 +175,26 @@ except ImportError:
     )
 
 
-def is_label_image(filename: str) -> bool:
+def is_label_image(image: np.ndarray) -> bool:
     """
-    Determine if a file should be treated as a label image based on its filename.
+    Determine if an image should be treated as a label image based on its dtype.
 
-    This function checks for common suffixes used by processing functions that
-    produce label or binary mask outputs.
+    This function uses the same logic as Napari's guess_labels() function,
+    checking if the dtype is one of the integer types commonly used for labels.
 
     Parameters:
     -----------
-    filename : str
-        The filename (or full path) to check
+    image : np.ndarray
+        The image array to check
 
     Returns:
     --------
     bool
-        True if the file should be treated as labels, False otherwise
+        True if the image dtype suggests it's a label image, False otherwise
     """
-    label_suffixes = [
-        "labels",
-        "semantic",
-        "_binary",
-        "_inverted",
-        "_thresh",
-        "_otsu_semantic",
-        "_otsu_labels",
-        "_instance",
-        "_rm_small",
-        "_inner",
-        "_middle",
-        "_outer",
-    ]
-    filename_lower = filename.lower()
-    return any(suffix in filename_lower for suffix in label_suffixes)
+    if hasattr(image, "dtype"):
+        return image.dtype in (np.int32, np.uint32, np.int64, np.uint64)
+    return False
 
 
 def load_zarr_with_napari_ome_zarr(
@@ -876,8 +863,8 @@ class ProcessedFilesTableWidget(QTableWidget):
 
             # Single channel image
             base_filename = os.path.basename(filepath)
-            # check if label image by checking file name for label-related suffixes
-            is_label = is_label_image(base_filename)
+            # check if label image by checking image dtype
+            is_label = is_label_image(image)
 
             if is_label:
                 if hasattr(image, "astype"):
@@ -1244,8 +1231,8 @@ class ProcessedFilesTableWidget(QTableWidget):
 
             # Single channel processed image
             filename = os.path.basename(filepath)
-            # Check if filename contains label indicators
-            is_label = is_label_image(filename)
+            # Check if image dtype indicates labels
+            is_label = is_label_image(image)
 
             # Add the layer using the appropriate method
             if is_label:
@@ -1675,9 +1662,9 @@ class ProcessingWorker(QThread):
                     and self.output_suffix == "_layer"
                 ):
                     layer_names = [
-                        "_inner_labels",
-                        "_middle_labels",
-                        "_outer_labels",
+                        "_inner",
+                        "_middle",
+                        "_outer",
                     ]
                     for idx, (img, layer_name) in enumerate(
                         zip(processed_result, layer_names)
@@ -1712,37 +1699,19 @@ class ProcessingWorker(QThread):
                         # For very large files, use BigTIFF format
                         use_bigtiff = size_gb > 2.0
 
-                        # Check if this is a label image
-                        is_label = is_label_image(output_filename)
+                        # Layer subdivision outputs should always be saved as uint32
+                        # to ensure Napari auto-detects them as labels
+                        save_dtype = np.uint32
 
-                        if is_label:
-                            # Choose appropriate integer type based on data range
-                            if data_max <= 255:
-                                save_dtype = np.uint8
-                            elif data_max <= 65535:
-                                save_dtype = np.uint16
-                            else:
-                                save_dtype = np.uint32
-
-                            print(
-                                f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
-                            )
-                            tifffile.imwrite(
-                                output_path,
-                                img.astype(save_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
-                        else:
-                            print(
-                                f"Regular image, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
-                            )
-                            tifffile.imwrite(
-                                output_path,
-                                img.astype(image_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
+                        print(
+                            f"Saving layer {layer_name} as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                        )
+                        tifffile.imwrite(
+                            output_path,
+                            img.astype(save_dtype),
+                            compression="zlib",
+                            bigtiff=use_bigtiff,
+                        )
 
                         processed_files.append(output_path)
                 else:
@@ -1778,17 +1747,13 @@ class ProcessingWorker(QThread):
                         # For very large files, use BigTIFF format
                         use_bigtiff = size_gb > 2.0
 
-                        # Check if this is a label image
-                        is_label = is_label_image(output_filename)
+                        # Check if this is a label image based on dtype
+                        is_label = is_label_image(img)
 
                         if is_label:
-                            # Choose appropriate integer type based on data range
-                            if data_max <= 255:
-                                save_dtype = np.uint8
-                            elif data_max <= 65535:
-                                save_dtype = np.uint16
-                            else:
-                                save_dtype = np.uint32
+                            # For labels, always use uint32 to ensure Napari recognizes them
+                            # Napari auto-detects labels based on dtype (int32/uint32/int64/uint64)
+                            save_dtype = np.uint32
 
                             print(
                                 f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -1913,17 +1878,13 @@ class ProcessingWorker(QThread):
                     # For very large files, use BigTIFF format
                     use_bigtiff = size_gb > 2.0
 
-                    # Check if this is a label image by checking filename
-                    is_label = is_label_image(channel_filename)
+                    # Check if this is a label image based on dtype
+                    is_label = is_label_image(channel_image)
 
                     if is_label:
-                        # Choose appropriate integer type based on data range
-                        if data_max <= 255:
-                            save_dtype = np.uint8
-                        elif data_max <= 65535:
-                            save_dtype = np.uint16
-                        else:
-                            save_dtype = np.uint32
+                        # For labels, always use uint32 to ensure Napari recognizes them
+                        # Napari auto-detects labels based on dtype (int32/uint32/int64/uint64)
+                        save_dtype = np.uint32
 
                         print(
                             f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
@@ -1977,8 +1938,8 @@ class ProcessingWorker(QThread):
                 )
                 print(f"Data range: {data_min} to {data_max}")
 
-                # Check if this is a label image by checking filename
-                is_label = is_label_image(new_filename_base)
+                # Check if this is a label image based on dtype
+                is_label = is_label_image(processed_image)
 
                 if is_label:
                     save_dtype = np.uint32

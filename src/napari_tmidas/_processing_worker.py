@@ -179,9 +179,9 @@ class ProcessingWorker(QThread):
                     and self.output_suffix == "_layer"
                 ):
                     layer_names = [
-                        "_inner_labels",
-                        "_middle_labels",
-                        "_outer_labels",
+                        "_inner",
+                        "_middle",
+                        "_outer",
                     ]
                     for img, layer_name in zip(processed_image, layer_names):
                         if not isinstance(img, np.ndarray):
@@ -193,8 +193,8 @@ class ProcessingWorker(QThread):
                             self.output_folder, output_filename
                         )
 
-                        # Save the processed image
-                        save_image_file(img, output_path, image_dtype)
+                        # Save as uint32 to ensure Napari auto-detects as labels
+                        save_image_file(img, output_path, np.uint32)
                         processed_files.append(output_path)
                 else:
                     # Default behavior for other multi-output functions (e.g., channel splitting)
@@ -257,23 +257,16 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
     return np.random.rand(100, 100)
 
 
-def is_label_image(filename: str) -> bool:
-    """Check if filename indicates a label image"""
-    label_suffixes = [
-        "labels",
-        "semantic",
-        "_binary",
-        "_inverted",
-        "_thresh",
-        "_mask",
-        "_seg",
-        "segmentation",
-        "_inner",
-        "_middle",
-        "_outer",
-    ]
-    filename_lower = filename.lower()
-    return any(suffix in filename_lower for suffix in label_suffixes)
+def is_label_image(image: np.ndarray) -> bool:
+    """
+    Determine if an image should be treated as a label image based on its dtype.
+
+    This function uses the same logic as Napari's guess_labels() function,
+    checking if the dtype is one of the integer types commonly used for labels.
+    """
+    if hasattr(image, "dtype"):
+        return image.dtype in (np.int32, np.uint32, np.int64, np.uint64)
+    return False
 
 
 def save_image_file(image: np.ndarray, filepath: str, dtype=None):
@@ -289,33 +282,20 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
     # For very large files, use BigTIFF format
     use_bigtiff = size_gb > 2.0
 
-    # Check data range
-    data_max = np.max(image) if image.size > 0 else 0
-
-    # Check if this is a label image
-    is_label = is_label_image(filepath)
-
-    if is_label:
-        # Choose appropriate integer type based on data range
-        if data_max <= 255:
-            save_dtype = np.uint8
-        elif data_max <= 65535:
-            save_dtype = np.uint16
-        else:
-            save_dtype = np.uint32
-
-        tifffile.imwrite(
-            filepath,
-            image.astype(save_dtype),
-            compression="zlib",
-            bigtiff=use_bigtiff,
-        )
+    # Determine save dtype
+    if dtype is not None:
+        # Use explicitly provided dtype
+        save_dtype = dtype
+    elif is_label_image(image):
+        # Input is already a label dtype, preserve as uint32
+        save_dtype = np.uint32
     else:
-        # Use provided dtype or image's dtype
-        save_dtype = dtype if dtype is not None else image.dtype
-        tifffile.imwrite(
-            filepath,
-            image.astype(save_dtype),
-            compression="zlib",
-            bigtiff=use_bigtiff,
-        )
+        # Use image's dtype
+        save_dtype = image.dtype
+
+    tifffile.imwrite(
+        filepath,
+        image.astype(save_dtype),
+        compression="zlib",
+        bigtiff=use_bigtiff,
+    )
