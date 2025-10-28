@@ -202,6 +202,9 @@ def is_label_image(filename: str) -> bool:
         "_otsu_labels",
         "_instance",
         "_rm_small",
+        "_inner",
+        "_middle",
+        "_outer",
     ]
     filename_lower = filename.lower()
     return any(suffix in filename_lower for suffix in label_suffixes)
