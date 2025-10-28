@@ -93,7 +93,7 @@ if SCIPY_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Subdivide Labels into 3 Layers",
         suffix="_layer",
-        description="Subdivide each labeled object into 3 concentric layers of equal thickness (inner core, middle shell, outer shell). Each layer is saved as a separate file with _inner, _middle, and _outer suffixes.",
+        description="Subdivide each labeled object into 3 concentric layers of equal thickness (inner core, middle shell, outer shell). Each layer is saved as a separate file with _inner_labels, _middle_labels, and _outer_labels suffixes.",
         parameters={},
     )
     def subdivide_labels_3layers(label_image: np.ndarray) -> tuple:
@@ -101,9 +101,9 @@ if SCIPY_AVAILABLE:
         Subdivide labeled objects into 3 concentric layers of equal thickness.
 
         Creates three separate label images representing:
-        - Layer 1 (innermost): Core region at ~33% scale (saved as *_inner.tif)
-        - Layer 2 (middle): Shell between ~33% and ~67% scale (saved as *_middle.tif)
-        - Layer 3 (outermost): Shell between ~67% and 100% scale (saved as *_outer.tif)
+        - Layer 1 (innermost): Core region at ~33% scale (saved as *_inner_labels.tif)
+        - Layer 2 (middle): Shell between ~33% and ~67% scale (saved as *_middle_labels.tif)
+        - Layer 3 (outermost): Shell between ~67% and 100% scale (saved as *_outer_labels.tif)
 
         Parameters
         ----------

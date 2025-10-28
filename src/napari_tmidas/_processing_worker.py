@@ -178,7 +178,11 @@ class ProcessingWorker(QThread):
                     len(processed_image) == 3
                     and self.output_suffix == "_layer"
                 ):
-                    layer_names = ["_inner", "_middle", "_outer"]
+                    layer_names = [
+                        "_inner_labels",
+                        "_middle_labels",
+                        "_outer_labels",
+                    ]
                     for img, layer_name in zip(processed_image, layer_names):
                         if not isinstance(img, np.ndarray):
                             continue
