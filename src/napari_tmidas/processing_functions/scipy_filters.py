@@ -66,7 +66,7 @@ if SCIPY_AVAILABLE:
             zoom=scale_factor,
             order=0,  # Preserve label values
             grid_mode=True,  # Consistent coordinate system
-            mode="constant",
+            mode="grid-constant",
             cval=0,
         ).astype(label_image.dtype)
 
@@ -89,6 +89,85 @@ if SCIPY_AVAILABLE:
             result = scaled[slices]
 
         return result
+
+    @BatchProcessingRegistry.register(
+        name="Subdivide Labels into 3 Layers",
+        suffix="_layer",
+        description="Subdivide each labeled object into 3 concentric layers of equal thickness (inner core, middle shell, outer shell). Each layer is saved as a separate file with _inner, _middle, and _outer suffixes.",
+        parameters={},
+    )
+    def subdivide_labels_3layers(label_image: np.ndarray) -> tuple:
+        """
+        Subdivide labeled objects into 3 concentric layers of equal thickness.
+
+        Creates three separate label images representing:
+        - Layer 1 (innermost): Core region at ~33% scale (saved as *_inner.tif)
+        - Layer 2 (middle): Shell between ~33% and ~67% scale (saved as *_middle.tif)
+        - Layer 3 (outermost): Shell between ~67% and 100% scale (saved as *_outer.tif)
+
+        Parameters
+        ----------
+        label_image : np.ndarray
+            Label image where each unique value represents a distinct object
+
+        Returns
+        -------
+        tuple of np.ndarray
+            Three label images (layer1, layer2, layer3) with same dimensions as input
+        """
+        # Define scale factors for the three boundaries
+        # To get equal thickness, we need to think about the "radius" reduction
+        # For 3 equal layers, we want boundaries at 1.0, ~0.67, ~0.33
+        scale_middle = 0.67  # ~67% size
+        scale_inner = 0.33  # ~33% size
+
+        original_shape = np.array(label_image.shape)
+
+        # Helper function to create a scaled version centered in original space
+        def create_scaled_labels(scale_factor):
+            if scale_factor == 1.0:
+                return label_image.copy()
+
+            scaled = ndimage.zoom(
+                label_image,
+                zoom=scale_factor,
+                order=0,  # Preserve label values
+                grid_mode=True,  # Consistent coordinate system
+                mode="grid-constant",
+                cval=0,
+            ).astype(label_image.dtype)
+
+            new_shape = np.array(scaled.shape)
+            result = np.zeros(original_shape, dtype=label_image.dtype)
+
+            # Center the resized objects in the original array
+            offset = ((original_shape - new_shape) / 2).astype(int)
+            slices = tuple(slice(o, o + s) for o, s in zip(offset, new_shape))
+            result[slices] = scaled
+
+            return result
+
+        # Create the three scaled versions
+        full_labels = label_image.copy()  # Outer boundary (100%)
+        middle_labels = create_scaled_labels(
+            scale_middle
+        )  # Middle boundary (~67%)
+        inner_labels = create_scaled_labels(
+            scale_inner
+        )  # Inner boundary (~33%)
+
+        # Layer 3 (outermost shell): Full - Middle
+        layer3 = full_labels.copy()
+        layer3[middle_labels > 0] = 0
+
+        # Layer 2 (middle shell): Middle - Inner
+        layer2 = middle_labels.copy()
+        layer2[inner_labels > 0] = 0
+
+        # Layer 1 (innermost core): Inner
+        layer1 = inner_labels.copy()
+
+        return (layer1, layer2, layer3)
 
     @BatchProcessingRegistry.register(
         name="Gaussian Blur",

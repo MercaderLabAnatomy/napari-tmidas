@@ -173,21 +173,42 @@ class ProcessingWorker(QThread):
                 processed_files = []
                 base_name = os.path.splitext(os.path.basename(filepath))[0]
 
-                for idx, img in enumerate(processed_image):
-                    if not isinstance(img, np.ndarray):
-                        continue
+                # Check if this is a layer subdivision function (returns 3 outputs)
+                if (
+                    len(processed_image) == 3
+                    and self.output_suffix == "_layer"
+                ):
+                    layer_names = ["_inner", "_middle", "_outer"]
+                    for img, layer_name in zip(processed_image, layer_names):
+                        if not isinstance(img, np.ndarray):
+                            continue
 
-                    # Generate output filename
-                    output_filename = (
-                        f"{base_name}_ch{idx + 1}{self.output_suffix}"
-                    )
-                    output_path = os.path.join(
-                        self.output_folder, output_filename
-                    )
+                        # Generate output filename with layer name
+                        output_filename = f"{base_name}{layer_name}.tif"
+                        output_path = os.path.join(
+                            self.output_folder, output_filename
+                        )
 
-                    # Save the processed image
-                    save_image_file(img, output_path, image_dtype)
-                    processed_files.append(output_path)
+                        # Save the processed image
+                        save_image_file(img, output_path, image_dtype)
+                        processed_files.append(output_path)
+                else:
+                    # Default behavior for other multi-output functions (e.g., channel splitting)
+                    for idx, img in enumerate(processed_image):
+                        if not isinstance(img, np.ndarray):
+                            continue
+
+                        # Generate output filename
+                        output_filename = (
+                            f"{base_name}_ch{idx + 1}{self.output_suffix}"
+                        )
+                        output_path = os.path.join(
+                            self.output_folder, output_filename
+                        )
+
+                        # Save the processed image
+                        save_image_file(img, output_path, image_dtype)
+                        processed_files.append(output_path)
 
                 return {
                     "original_file": filepath,
@@ -232,8 +253,65 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
     return np.random.rand(100, 100)
 
 
+def is_label_image(filename: str) -> bool:
+    """Check if filename indicates a label image"""
+    label_suffixes = [
+        "labels",
+        "semantic",
+        "_binary",
+        "_inverted",
+        "_thresh",
+        "_mask",
+        "_seg",
+        "segmentation",
+        "_inner",
+        "_middle",
+        "_outer",
+    ]
+    filename_lower = filename.lower()
+    return any(suffix in filename_lower for suffix in label_suffixes)
+
+
 def save_image_file(image: np.ndarray, filepath: str, dtype=None):
     """
     Save image to file with proper format detection
     """
-    # This is a placeholder - the actual implementation would be moved from _file_selector.py
+    if not _HAS_TIFFFILE:
+        raise ImportError("tifffile is required to save images")
+
+    # Calculate approx file size in GB
+    size_gb = image.size * image.itemsize / (1024**3)
+
+    # For very large files, use BigTIFF format
+    use_bigtiff = size_gb > 2.0
+
+    # Check data range
+    data_max = np.max(image) if image.size > 0 else 0
+
+    # Check if this is a label image
+    is_label = is_label_image(filepath)
+
+    if is_label:
+        # Choose appropriate integer type based on data range
+        if data_max <= 255:
+            save_dtype = np.uint8
+        elif data_max <= 65535:
+            save_dtype = np.uint16
+        else:
+            save_dtype = np.uint32
+
+        tifffile.imwrite(
+            filepath,
+            image.astype(save_dtype),
+            compression="zlib",
+            bigtiff=use_bigtiff,
+        )
+    else:
+        # Use provided dtype or image's dtype
+        save_dtype = dtype if dtype is not None else image.dtype
+        tifffile.imwrite(
+            filepath,
+            image.astype(save_dtype),
+            compression="zlib",
+            bigtiff=use_bigtiff,
+        )

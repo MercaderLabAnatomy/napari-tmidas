@@ -1657,6 +1657,159 @@ class ProcessingWorker(QThread):
                     "processed_file": points_filepath,
                 }
 
+            # Handle functions that return multiple outputs (e.g., channel splitting, layer subdivision)
+            if (
+                isinstance(processed_result, (list, tuple))
+                and len(processed_result) > 1
+            ):
+                # Multiple outputs - save each as separate file
+                processed_files = []
+                base_name = os.path.splitext(os.path.basename(filepath))[0]
+
+                # Check if this is a layer subdivision function (returns 3 outputs)
+                if (
+                    len(processed_result) == 3
+                    and self.output_suffix == "_layer"
+                ):
+                    layer_names = ["_inner", "_middle", "_outer"]
+                    for idx, (img, layer_name) in enumerate(
+                        zip(processed_result, layer_names)
+                    ):
+                        if not isinstance(img, np.ndarray):
+                            continue
+
+                        # Remove singleton dimensions
+                        img = np.squeeze(img)
+
+                        # Generate output filename with layer name
+                        output_filename = f"{base_name}{layer_name}.tif"
+                        output_path = os.path.join(
+                            self.output_folder, output_filename
+                        )
+
+                        print(
+                            f"Layer {idx + 1} ({layer_name}) shape: {img.shape}"
+                        )
+
+                        # Calculate approx file size in GB
+                        size_gb = img.size * img.itemsize / (1024**3)
+                        print(f"Estimated file size: {size_gb:.2f} GB")
+
+                        # Check data range
+                        data_min = np.min(img) if img.size > 0 else 0
+                        data_max = np.max(img) if img.size > 0 else 0
+                        print(
+                            f"Layer {idx + 1} data range: {data_min} to {data_max}"
+                        )
+
+                        # For very large files, use BigTIFF format
+                        use_bigtiff = size_gb > 2.0
+
+                        # Check if this is a label image
+                        is_label = is_label_image(output_filename)
+
+                        if is_label:
+                            # Choose appropriate integer type based on data range
+                            if data_max <= 255:
+                                save_dtype = np.uint8
+                            elif data_max <= 65535:
+                                save_dtype = np.uint16
+                            else:
+                                save_dtype = np.uint32
+
+                            print(
+                                f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                            )
+                            tifffile.imwrite(
+                                output_path,
+                                img.astype(save_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
+                        else:
+                            print(
+                                f"Regular image, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                            )
+                            tifffile.imwrite(
+                                output_path,
+                                img.astype(image_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
+
+                        processed_files.append(output_path)
+                else:
+                    # Default behavior for other multi-output functions (e.g., channel splitting)
+                    for idx, img in enumerate(processed_result):
+                        if not isinstance(img, np.ndarray):
+                            continue
+
+                        # Remove singleton dimensions
+                        img = np.squeeze(img)
+
+                        # Generate output filename
+                        output_filename = (
+                            f"{base_name}_ch{idx + 1}{self.output_suffix}"
+                        )
+                        output_path = os.path.join(
+                            self.output_folder, output_filename
+                        )
+
+                        print(f"Output {idx + 1} shape: {img.shape}")
+
+                        # Calculate approx file size in GB
+                        size_gb = img.size * img.itemsize / (1024**3)
+                        print(f"Estimated file size: {size_gb:.2f} GB")
+
+                        # Check data range
+                        data_min = np.min(img) if img.size > 0 else 0
+                        data_max = np.max(img) if img.size > 0 else 0
+                        print(
+                            f"Output {idx + 1} data range: {data_min} to {data_max}"
+                        )
+
+                        # For very large files, use BigTIFF format
+                        use_bigtiff = size_gb > 2.0
+
+                        # Check if this is a label image
+                        is_label = is_label_image(output_filename)
+
+                        if is_label:
+                            # Choose appropriate integer type based on data range
+                            if data_max <= 255:
+                                save_dtype = np.uint8
+                            elif data_max <= 65535:
+                                save_dtype = np.uint16
+                            else:
+                                save_dtype = np.uint32
+
+                            print(
+                                f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                            )
+                            tifffile.imwrite(
+                                output_path,
+                                img.astype(save_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
+                        else:
+                            print(
+                                f"Regular image, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                            )
+                            tifffile.imwrite(
+                                output_path,
+                                img.astype(image_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
+
+                        processed_files.append(output_path)
+
+                return {
+                    "original_file": filepath,
+                    "processed_files": processed_files,
+                }
+
             # Handle as image data (original logic)
             processed_image = processed_result
 
