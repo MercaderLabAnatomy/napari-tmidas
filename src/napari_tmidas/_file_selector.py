@@ -1585,6 +1585,13 @@ class ProcessingWorker(QThread):
 
             processed_result = self.processing_func(image, **processing_params)
 
+            if processed_result is None:
+                # Allow processing functions to signal that this file should be skipped
+                print(
+                    "Processing function returned None; skipping save for this file."
+                )
+                return None
+
             # Check if result is points data (for spot detection functions)
             if (
                 isinstance(processed_result, np.ndarray)

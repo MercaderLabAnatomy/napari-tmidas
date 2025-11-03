@@ -1,6 +1,8 @@
 # src/napari_tmidas/_tests/test_scipy_filters.py
 import numpy as np
+import pytest
 
+from napari_tmidas.processing_functions import scipy_filters
 from napari_tmidas.processing_functions.scipy_filters import gaussian_blur
 
 
@@ -55,3 +57,51 @@ class TestScipyFilters:
         result = gaussian_blur(image, sigma=1.0)
         assert result.shape == image.shape
         assert result.dtype == image.dtype
+
+    @pytest.mark.skipif(
+        not scipy_filters.SCIPY_AVAILABLE, reason="SciPy is required"
+    )
+    def test_subdivide_labels_3layers_combined_output(self):
+        from napari_tmidas.processing_functions.scipy_filters import (
+            subdivide_labels_3layers,
+        )
+
+        label_image = np.zeros((9, 9), dtype=np.uint16)
+        label_image[2:7, 2:7] = 1
+
+        result = subdivide_labels_3layers(label_image)
+
+        assert result.shape == label_image.shape
+        unique_ids = set(np.unique(result))
+        assert unique_ids.issubset({0, 1, 2, 3})
+        assert {1, 2, 3}.issubset(unique_ids)
+
+    @pytest.mark.skipif(
+        not scipy_filters.SCIPY_AVAILABLE, reason="SciPy is required"
+    )
+    def test_subdivide_labels_3layers_dtype_promotion(self):
+        from napari_tmidas.processing_functions.scipy_filters import (
+            subdivide_labels_3layers,
+        )
+
+        label_image = np.zeros((9, 9), dtype=np.uint8)
+        label_image[2:7, 2:7] = 200
+
+        result = subdivide_labels_3layers(label_image)
+
+        assert result.dtype in (np.uint32, np.uint64)
+        assert result.max() == 200 + 2 * 200
+
+    @pytest.mark.skipif(
+        not scipy_filters.SCIPY_AVAILABLE, reason="SciPy is required"
+    )
+    def test_subdivide_labels_3layers_empty(self):
+        from napari_tmidas.processing_functions.scipy_filters import (
+            subdivide_labels_3layers,
+        )
+
+        label_image = np.zeros((5, 5, 5), dtype=np.uint16)
+
+        result = subdivide_labels_3layers(label_image)
+
+        np.testing.assert_array_equal(result, label_image)
