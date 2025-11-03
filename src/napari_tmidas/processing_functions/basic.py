@@ -3,10 +3,14 @@
 Basic image processing functions
 """
 import concurrent.futures
+import inspect
 import os
 import traceback
+import warnings
 
 import numpy as np
+
+from napari_tmidas._registry import BatchProcessingRegistry
 
 # Lazy imports for optional heavy dependencies
 try:
@@ -25,60 +29,349 @@ except ImportError:
     tifffile = None
     _HAS_TIFFFILE = False
 
-from napari_tmidas._registry import BatchProcessingRegistry
+
+def _to_array(data: np.ndarray) -> np.ndarray:
+    arr = np.asarray(data)
+    if arr.ndim == 0:
+        raise ValueError("Label images must have at least one dimension")
+    return arr
+
+
+def _nonzero_bounds(arr: np.ndarray) -> list[tuple[int, int]]:
+    if not np.any(arr):
+        return [(0, size) for size in arr.shape]
+
+    bounds: list[tuple[int, int]] = []
+    dims = range(arr.ndim)
+    for axis in dims:
+        reduction_axes = tuple(i for i in dims if i != axis)
+        axis_any = np.any(arr, axis=reduction_axes)
+        nonzero_idx = np.flatnonzero(axis_any)
+        if nonzero_idx.size == 0:
+            bounds.append((0, arr.shape[axis]))
+        else:
+            bounds.append((int(nonzero_idx[0]), int(nonzero_idx[-1]) + 1))
+    return bounds
+
+
+def _match_ndim(reference: np.ndarray, candidate: np.ndarray) -> np.ndarray:
+    result = np.asarray(candidate)
+    if result.ndim > reference.ndim:
+        axes = [idx for idx, size in enumerate(result.shape) if size == 1]
+        while axes and result.ndim > reference.ndim:
+            result = np.squeeze(result, axis=axes.pop())
+    if result.ndim > reference.ndim:
+        raise ValueError(
+            "Unable to align label images with differing numbers of non-singleton dimensions"
+        )
+    while result.ndim < reference.ndim:
+        result = result[np.newaxis, ...]
+    return result
+
+
+def _align_candidate(
+    reference: np.ndarray, candidate: np.ndarray
+) -> np.ndarray:
+    candidate = _match_ndim(reference, candidate)
+    if candidate.shape == reference.shape:
+        return candidate
+
+    aligned = np.zeros_like(reference)
+    if not np.any(candidate):
+        return aligned
+
+    ref_bounds = _nonzero_bounds(reference)
+    cand_bounds = _nonzero_bounds(candidate)
+
+    shifts: list[int] = []
+    for axis in range(reference.ndim):
+        ref_min, ref_max = ref_bounds[axis]
+        cand_min, cand_max = cand_bounds[axis]
+        ref_center = (ref_min + ref_max) / 2.0
+        cand_center = (cand_min + cand_max) / 2.0
+        shifts.append(int(round(ref_center - cand_center)))
+
+    target_slices: list[slice] = []
+    source_slices: list[slice] = []
+    for axis, shift in enumerate(shifts):
+        ref_len = reference.shape[axis]
+        cand_len = candidate.shape[axis]
+        ref_start = max(0, shift)
+        cand_start = max(0, -shift)
+        length = min(ref_len - ref_start, cand_len - cand_start)
+        if length <= 0:
+            return aligned
+        target_slices.append(slice(ref_start, ref_start + length))
+        source_slices.append(slice(cand_start, cand_start + length))
+
+    aligned[tuple(target_slices)] = candidate[tuple(source_slices)]
+    return aligned
 
 
 @BatchProcessingRegistry.register(
     name="Labels to Binary",
     suffix="_binary",
-    description="Convert multi-label images to binary masks (all non-zero labels become 255)",
+    description="Convert a label image to a binary mask (255 for non-zero, 0 otherwise)",
+    parameters={},
 )
 def labels_to_binary(image: np.ndarray) -> np.ndarray:
-    """
-    Convert multi-label images to binary masks.
-
-    This function takes a label image (where different regions have different label values)
-    and converts it to a binary mask (where all labeled regions have a value of 255 and
-    background has a value of 0).
-
-    Parameters:
-    -----------
-    image : numpy.ndarray
-        Input label image array
-
-    Returns:
-    --------
-    numpy.ndarray
-        Binary mask with 255 for all non-zero labels and 0 for background
-    """
-    # Return 255 for all non-zero values, 0 for zero values
-    return np.where(image > 0, 255, 0).astype(np.uint8)
+    arr = _to_array(image)
+    result = np.zeros(arr.shape, dtype=np.uint8)
+    np.copyto(result, 255, where=arr != 0)
+    return result
 
 
 @BatchProcessingRegistry.register(
-    name="Invert Binary/Labels",
+    name="Invert Binary Labels",
     suffix="_inverted",
-    description="Invert label or binary images (all non-zero values become 0, all zero values become 255)",
+    description="Invert a binary label image (non-zero becomes 0, zero becomes 255)",
+    parameters={},
 )
 def invert_binary_labels(image: np.ndarray) -> np.ndarray:
+    arr = _to_array(image)
+    result = np.zeros(arr.shape, dtype=np.uint8)
+    np.copyto(result, 255, where=arr == 0)
+    return result
+
+
+@BatchProcessingRegistry.register(
+    name="Mirror Labels",
+    suffix="_mirrored",
+    description="Mirror labels along an axis, offsetting mirrored labels to keep them distinct",
+    parameters={
+        "axis": {
+            "type": int,
+            "default": 0,
+            "description": "Axis along which to mirror the labels",
+        }
+    },
+)
+def mirror_labels(image: np.ndarray, axis: int = 0) -> np.ndarray:
+    arr = _to_array(image)
+    if arr.ndim == 0:
+        raise ValueError("Cannot mirror a scalar")
+    if not isinstance(axis, int):
+        raise TypeError("axis must be an integer")
+    if axis >= arr.ndim or axis < -arr.ndim:
+        raise ValueError(
+            f"Axis {axis} is out of bounds for an image with {arr.ndim} dimensions"
+        )
+
+    axis = axis % arr.ndim
+
+    flipped = np.flip(arr, axis=axis)
+    max_label = int(np.max(arr)) if arr.size else 0
+    if max_label > 0:
+        flipped = np.where(flipped != 0, flipped + max_label, 0)
+
+    reduction_axes = tuple(i for i in range(arr.ndim) if i != axis)
+    occupancy = np.sum(arr != 0, axis=reduction_axes, dtype=np.int64)
+    total = int(np.sum(occupancy))
+    axis_center = (arr.shape[axis] - 1) / 2.0
+    if total == 0:
+        prefer_original_first = True
+    else:
+        positions = np.arange(arr.shape[axis], dtype=np.float64)
+        center_of_mass = (
+            float(np.dot(occupancy.astype(np.float64), positions)) / total
+        )
+        prefer_original_first = center_of_mass >= axis_center
+
+    if prefer_original_first:
+        combined = np.concatenate([arr, flipped], axis=axis)
+    else:
+        combined = np.concatenate([flipped, arr], axis=axis)
+
+    return combined.astype(arr.dtype, copy=False)
+
+
+@BatchProcessingRegistry.register(
+    name="Intersect Label Images",
+    suffix="_intersected",
+    description="Compute the voxel-wise intersection of paired label images identified by suffix",
+    parameters={
+        "primary_suffix": {
+            "type": str,
+            "default": "_a.tif",
+            "description": "Suffix (including extension) of the primary label image",
+        },
+        "secondary_suffix": {
+            "type": str,
+            "default": "_b.tif",
+            "description": "Suffix (including extension) of the paired label image",
+        },
+    },
+)
+def intersect_label_images(
+    image: np.ndarray,
+    primary_suffix: str = "_a.tif",
+    secondary_suffix: str = "_b.tif",
+) -> np.ndarray:
+    """Return the intersection of two paired label images.
+
+    The function expects two label files that share a base name but differ by suffix.
+    When overlap occurs, the label IDs from the primary image are retained anywhere both
+    volumes contain non-zero voxels. Each pair is processed exactly once by treating the
+    file with ``primary_suffix`` as the active entry point; secondary label files are
+    skipped and left unchanged.
     """
-    Invert label or binary images.
 
-    This function inverts the image by converting all non-zero values to 0
-    and all zero values to 255. Useful for inverting binary masks or label images.
+    if not primary_suffix or not secondary_suffix:
+        raise ValueError(
+            "Both primary_suffix and secondary_suffix must be provided"
+        )
 
-    Parameters:
-    -----------
-    image : numpy.ndarray
-        Input label or binary image array
+    def _load_label_file(path: str) -> np.ndarray:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".npy":
+            return np.load(path)
+        if _HAS_TIFFFILE and ext in {".tif", ".tiff", ".ome.tif", ".ome.tiff"}:
+            return tifffile.imread(path)
 
-    Returns:
-    --------
+        try:
+            from skimage.io import imread
+        except (
+            ImportError
+        ) as exc:  # pragma: no cover - optional dependency path
+            raise ImportError(
+                "Install 'tifffile' or 'scikit-image' to load paired label images"
+            ) from exc
+
+        return imread(path)
+
+    current_file = None
+    for frame_info in inspect.stack():
+        frame_locals = frame_info.frame.f_locals
+        if "filepath" in frame_locals:
+            current_file = frame_locals["filepath"]
+            break
+
+    if current_file is None:
+        raise ValueError(
+            "Could not determine current file path for paired label lookup"
+        )
+
+    current_file = os.fspath(current_file)
+    folder_path = os.path.dirname(current_file)
+    filename = os.path.basename(current_file)
+
+    if filename.endswith(primary_suffix):
+        base_name = filename[: -len(primary_suffix)]
+        paired_suffix = secondary_suffix
+    elif filename.endswith(secondary_suffix):
+        warnings.warn(
+            (
+                f"Skipping secondary label image '{filename}'; only files ending with "
+                f"'{primary_suffix}' are processed by the 'Intersect Label Images' function."
+            ),
+            stacklevel=2,
+        )
+        return None
+    else:
+        raise ValueError(
+            f"Filename '{filename}' does not end with either '{primary_suffix}' or '{secondary_suffix}'"
+        )
+
+    paired_name = base_name + paired_suffix
+    paired_path = os.path.abspath(os.path.join(folder_path, paired_name))
+
+    if not os.path.exists(paired_path):
+        raise FileNotFoundError(f"Paired label image not found: {paired_path}")
+
+    current_array = _to_array(image)
+    paired_array = _to_array(_load_label_file(paired_path))
+
+    paired_aligned = _align_candidate(current_array, paired_array)
+
+    overlap_mask = (current_array != 0) & (paired_aligned != 0)
+    if not np.any(overlap_mask):
+        result_dtype = np.promote_types(
+            current_array.dtype, paired_aligned.dtype
+        )
+        return np.zeros(current_array.shape, dtype=result_dtype)
+
+    result_dtype = np.promote_types(current_array.dtype, paired_aligned.dtype)
+    result = np.zeros(current_array.shape, dtype=result_dtype)
+    np.copyto(
+        result,
+        current_array.astype(result_dtype, copy=False),
+        where=overlap_mask,
+    )
+
+    return result
+
+
+@BatchProcessingRegistry.register(
+    name="Keep Slice Range by Area",
+    suffix="_area_range",
+    description="Keep only slices between the minimum and maximum non-zero area along the chosen axis",
+    parameters={
+        "axis": {
+            "type": int,
+            "default": 0,
+            "description": "Axis index representing the slice dimension (negative values count from the end)",
+        }
+    },
+)
+def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Return only the slices between the minimum-area and maximum-area slices (inclusive).
+
+    The per-slice area is measured as the number of non-zero pixels in the slice. When all slices
+    share the same area, the original volume is returned unchanged. Useful for trimming empty
+    leading/trailing slices while preserving the region between the smallest and largest occupied
+    slices.
+
+    Parameters
+    ----------
+    image:
+        3D (or higher dimensional) label image as a NumPy array.
+    axis:
+        Axis index corresponding to the slice dimension that should be evaluated.
+
+    Returns
+    -------
     numpy.ndarray
-        Inverted image with 255 for all previously zero values and 0 for all previously non-zero values
+        Volume containing only the slices between the minimum and maximum area slices (inclusive).
     """
-    # Create inverted mask: zero values become 255, non-zero values become 0
-    return np.where(image == 0, 255, 0).astype(np.uint8)
+
+    if image.ndim < 3:
+        raise ValueError(
+            "Slice range trimming requires an array with at least 3 dimensions"
+        )
+    if not isinstance(axis, int):
+        raise TypeError("axis must be provided as an integer")
+    if axis >= image.ndim or axis < -image.ndim:
+        raise ValueError(
+            f"Axis {axis} is out of bounds for an image with {image.ndim} dimensions"
+        )
+
+    axis = axis % image.ndim
+
+    if image.shape[axis] == 0:
+        raise ValueError(
+            "Cannot determine slice range on an axis with zero length"
+        )
+
+    reduction_axes = tuple(i for i in range(image.ndim) if i != axis)
+    # Count non-zero pixels per slice to determine occupied area per slice
+    slice_areas = np.sum(image != 0, axis=reduction_axes, dtype=np.int64)
+
+    if slice_areas.size == 0:
+        return image.copy()
+
+    if slice_areas.min() == slice_areas.max():
+        return image.copy()
+
+    min_idx = int(np.argmin(slice_areas))
+    max_idx = int(np.argmax(slice_areas))
+
+    start = min(min_idx, max_idx)
+    end = max(min_idx, max_idx)
+
+    slicer = [slice(None)] * image.ndim
+    slicer[axis] = slice(start, end + 1)
+
+    return image[tuple(slicer)].copy()
 
 
 @BatchProcessingRegistry.register(
@@ -441,17 +734,12 @@ def merge_channels(
     from skimage.io import imread
 
     current_file = None
-    output_folder = None
 
     for frame_info in inspect.stack():
         frame_locals = frame_info.frame.f_locals
         if "filepath" in frame_locals:
             current_file = frame_locals["filepath"]
-        if "self" in frame_locals:
-            obj = frame_locals["self"]
-            if hasattr(obj, "output_folder"):
-                output_folder = obj.output_folder
-                break
+            break
 
     if current_file is None:
         raise ValueError("Could not determine current file path")
@@ -476,10 +764,6 @@ def merge_channels(
     print(f"\n📐 Current image shape: {image.shape}")
     print(f"✅ Found channel {channel_num} in file: {filename}")
 
-    # Only process if this is the first channel in the set
-    if channel_num != 0:
-        return image
-
     # Find all related channel files
     all_files = os.listdir(folder_path)
     channel_files = {}
@@ -500,6 +784,15 @@ def merge_channels(
     if num_channels < 2:
         print(
             f"⚠️  Only found {num_channels} channel(s). Need at least 2 for merging."
+        )
+        return image
+
+    # Determine which channel acts as the primary trigger for merging
+    primary_channel = sorted_channels[0]
+
+    if channel_num != primary_channel:
+        print(
+            f"ℹ️  Channel {channel_num} is not the primary channel ({primary_channel}); skipping merge for this file."
         )
         return image
 
@@ -535,17 +828,8 @@ def merge_channels(
         f"✨ Merged shape: {merged.shape} (channels added as last dimension)"
     )
 
-    # Save the merged result
-    if output_folder:
-        # Remove channel pattern from base name for output
-        output_base = filename[: match.start()] + filename[match.end() :]
-        output_base = os.path.splitext(output_base)[0]
-        output_path = os.path.join(output_folder, f"{output_base}_merged.tif")
-        tifffile.imwrite(output_path, merged, compression="zlib")
-        print(f"💾 Saved merged image: {output_path}")
-
-    # Return original to skip individual saving
-    return image
+    # Return merged array so downstream steps receive the combined channels
+    return merged
 
 
 @BatchProcessingRegistry.register(

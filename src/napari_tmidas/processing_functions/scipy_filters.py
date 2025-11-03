@@ -92,28 +92,26 @@ if SCIPY_AVAILABLE:
 
     @BatchProcessingRegistry.register(
         name="Subdivide Labels into 3 Layers",
-        suffix="_layer",
-        description="Subdivide each labeled object into 3 concentric layers of equal thickness (inner core, middle shell, outer shell). Each layer is saved as a separate file with _inner_labels, _middle_labels, and _outer_labels suffixes.",
+        suffix="_layers",
+        description="Subdivide each labeled object into 3 concentric layers and return a single label image where each layer receives a unique ID offset.",
         parameters={},
     )
-    def subdivide_labels_3layers(label_image: np.ndarray) -> tuple:
-        """
-        Subdivide labeled objects into 3 concentric layers of equal thickness.
+    def subdivide_labels_3layers(label_image: np.ndarray) -> np.ndarray:
+        """Subdivide labeled objects into three concentric layers.
 
-        Creates three separate label images representing:
-        - Layer 1 (innermost): Core region at ~33% scale (saved as *_inner_labels.tif)
-        - Layer 2 (middle): Shell between ~33% and ~67% scale (saved as *_middle_labels.tif)
-        - Layer 3 (outermost): Shell between ~67% and 100% scale (saved as *_outer_labels.tif)
+        Each object is partitioned into inner, middle, and outer shells of approximately
+        equal thickness. The layers are combined into a single label image using
+        non-overlapping ID ranges so they remain distinguishable.
 
         Parameters
         ----------
         label_image : np.ndarray
-            Label image where each unique value represents a distinct object
+            Label image where each unique value represents a distinct object.
 
         Returns
         -------
-        tuple of np.ndarray
-            Three label images (layer1, layer2, layer3) with same dimensions as input
+        numpy.ndarray
+            Single label image containing all three layers with unique label IDs.
         """
         # Define scale factors for the three boundaries
         # To get equal thickness, we need to think about the "radius" reduction
@@ -167,7 +165,48 @@ if SCIPY_AVAILABLE:
         # Layer 1 (innermost core): Inner
         layer1 = inner_labels.copy()
 
-        return (layer1, layer2, layer3)
+        max_label = int(label_image.max()) if label_image.size else 0
+        if max_label == 0:
+            return np.zeros_like(label_image)
+
+        if np.issubdtype(label_image.dtype, np.integer):
+            max_needed = max_label * 3
+            dtype_choices = [label_image.dtype, np.uint32, np.uint64]
+            for dtype in dtype_choices:
+                try:
+                    info = np.iinfo(dtype)
+                except ValueError:
+                    continue
+                if max_needed <= info.max:
+                    result_dtype = dtype
+                    break
+            else:
+                result_dtype = np.uint64
+        else:
+            result_dtype = np.uint32
+
+        result = np.zeros(label_image.shape, dtype=result_dtype)
+
+        layer1_mask = layer1 > 0
+        if np.any(layer1_mask):
+            result[layer1_mask] = layer1[layer1_mask].astype(
+                result_dtype, copy=False
+            )
+
+        layer2_mask = layer2 > 0
+        if np.any(layer2_mask):
+            result[layer2_mask] = (
+                layer2[layer2_mask].astype(result_dtype, copy=False)
+                + max_label
+            )
+
+        layer3_mask = layer3 > 0
+        if np.any(layer3_mask):
+            result[layer3_mask] = layer3[layer3_mask].astype(
+                result_dtype, copy=False
+            ) + (2 * max_label)
+
+        return result
 
     @BatchProcessingRegistry.register(
         name="Gaussian Blur",
