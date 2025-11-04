@@ -197,9 +197,9 @@ class TestBasicProcessing:
             mirror_labels(image, axis=2)
 
     def test_keep_slice_range_by_area_basic(self):
-        """Keep slices between minimum and maximum area along default axis"""
+        """Keep label content between minimum and maximum area, preserving shape"""
         volume = np.zeros((5, 4, 4), dtype=np.int32)
-        volume[0, 0, 0] = 1  # area 1
+        volume[0, 0, 0] = 1  # area 1 (min)
         volume[1, :2, :2] = 1  # area 4
         volume[2, :3, :3] = 1  # area 9 (max)
         volume[3, :1, :3] = 1  # area 3
@@ -207,22 +207,34 @@ class TestBasicProcessing:
 
         result = keep_slice_range_by_area(volume)
 
-        assert result.shape == (3, 4, 4)
-        np.testing.assert_array_equal(result, volume[0:3])
+        # Shape should be preserved
+        assert result.shape == (5, 4, 4)
+        # Content between min (slice 0) and max (slice 2) should be kept
+        np.testing.assert_array_equal(result[0:3], volume[0:3])
+        # Content after max should be zeroed
+        np.testing.assert_array_equal(result[3:], np.zeros((2, 4, 4)))
 
     def test_keep_slice_range_by_area_with_axis(self):
-        """Axis parameter allows trimming along any dimension"""
-        base = np.zeros((5, 4, 4), dtype=np.uint16)
-        base[0, 0, 0] = 1
-        base[1, :2, :2] = 1
-        base[2, :3, :3] = 1
-        reordered = base.transpose(1, 0, 2)
+        """Axis parameter allows zeroing content along any dimension while preserving shape"""
+        # Create volume with different areas along axis 1
+        volume = np.zeros((4, 5, 3), dtype=np.uint16)
+        volume[:2, 0, :2] = 1  # slice 0: area = 2*2 = 4
+        volume[:, 1, :] = 1  # slice 1: area = 4*3 = 12 (max)
+        volume[:3, 2, :] = 1  # slice 2: area = 3*3 = 9
+        volume[:2, 3, :2] = 1  # slice 3: area = 2*2 = 4
+        volume[0, 4, 0] = 1  # slice 4: area = 1 (min)
 
-        result = keep_slice_range_by_area(reordered, axis=1)
+        result = keep_slice_range_by_area(volume, axis=1)
 
-        expected = reordered[:, 0:3, :]
-        assert result.shape == expected.shape
-        np.testing.assert_array_equal(result, expected)
+        # Shape should be preserved
+        assert result.shape == volume.shape
+        # Min area is at slice 4, max area is at slice 1, so range is 1-4 (inclusive)
+        # Slice 0 should be zeroed (before the range)
+        np.testing.assert_array_equal(
+            result[:, 0, :], np.zeros((4, 3), dtype=np.uint16)
+        )
+        # Slices 1-4 should be kept
+        np.testing.assert_array_equal(result[:, 1:5, :], volume[:, 1:5, :])
 
     def test_keep_slice_range_by_area_uniform(self):
         """Uniform area returns the original volume"""
@@ -231,6 +243,42 @@ class TestBasicProcessing:
         result = keep_slice_range_by_area(volume)
 
         np.testing.assert_array_equal(result, volume)
+
+    def test_keep_slice_range_by_area_shape_preserved(self):
+        """Verify that output shape matches input shape (critical for image-label alignment)"""
+        # Simulate a label volume with 100 z-slices where labels exist in slices 20-80
+        volume = np.zeros((100, 50, 50), dtype=np.uint32)
+        volume[20, :10, :10] = 1  # Sparse content at slice 20 (min area)
+        for i in range(21, 80):
+            volume[i, :30, :30] = i  # Denser content in middle slices
+        volume[79, :, :] = 100  # Maximum content at slice 79 (max area)
+        # Slices 0-19 and 80-99 should be empty and get zeroed
+
+        result = keep_slice_range_by_area(volume, axis=0)
+
+        # Critical: shape must be preserved to maintain alignment with image data
+        assert result.shape == (
+            100,
+            50,
+            50,
+        ), "Output shape must match input shape"
+
+        # Slices before min (0-19) should be zeroed
+        assert np.all(
+            result[:20] == 0
+        ), "Slices before min-area slice should be zeroed"
+
+        # Slices between min and max (20-79) should be preserved
+        np.testing.assert_array_equal(
+            result[20:80],
+            volume[20:80],
+            err_msg="Label content in range should be preserved",
+        )
+
+        # Slices after max (80-99) should be zeroed
+        assert np.all(
+            result[80:] == 0
+        ), "Slices after max-area slice should be zeroed"
 
     def test_keep_slice_range_by_area_invalid_dims(self):
         """At least 3 dimensions are required"""

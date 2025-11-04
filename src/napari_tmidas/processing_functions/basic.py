@@ -304,7 +304,7 @@ def intersect_label_images(
 @BatchProcessingRegistry.register(
     name="Keep Slice Range by Area",
     suffix="_area_range",
-    description="Keep only slices between the minimum and maximum non-zero area along the chosen axis",
+    description="Zero out label content outside the min/max area slice range (preserves image shape for alignment)",
     parameters={
         "axis": {
             "type": int,
@@ -314,12 +314,12 @@ def intersect_label_images(
     },
 )
 def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
-    """Return only the slices between the minimum-area and maximum-area slices (inclusive).
+    """Keep label content only between the minimum-area and maximum-area slices (inclusive).
 
     The per-slice area is measured as the number of non-zero pixels in the slice. When all slices
-    share the same area, the original volume is returned unchanged. Useful for trimming empty
-    leading/trailing slices while preserving the region between the smallest and largest occupied
-    slices.
+    share the same area, the original volume is returned unchanged. This function preserves the
+    original image dimensions but zeros out label content outside the detected range, ensuring
+    alignment with corresponding image data is maintained.
 
     Parameters
     ----------
@@ -331,7 +331,8 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        Volume containing only the slices between the minimum and maximum area slices (inclusive).
+        Volume with the same shape as input, but with label content zeroed outside the
+        minimum and maximum area slice range (inclusive).
     """
 
     if image.ndim < 3:
@@ -368,10 +369,22 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
     start = min(min_idx, max_idx)
     end = max(min_idx, max_idx)
 
-    slicer = [slice(None)] * image.ndim
-    slicer[axis] = slice(start, end + 1)
+    # Create a copy of the full image to preserve shape
+    result = image.copy()
 
-    return image[tuple(slicer)].copy()
+    # Zero out slices before the start
+    if start > 0:
+        before_slicer = [slice(None)] * image.ndim
+        before_slicer[axis] = slice(0, start)
+        result[tuple(before_slicer)] = 0
+
+    # Zero out slices after the end
+    if end < image.shape[axis] - 1:
+        after_slicer = [slice(None)] * image.ndim
+        after_slicer[axis] = slice(end + 1, None)
+        result[tuple(after_slicer)] = 0
+
+    return result
 
 
 @BatchProcessingRegistry.register(
