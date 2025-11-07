@@ -105,3 +105,52 @@ class TestScipyFilters:
         result = subdivide_labels_3layers(label_image)
 
         np.testing.assert_array_equal(result, label_image)
+
+    @pytest.mark.skipif(
+        not scipy_filters.SCIPY_AVAILABLE, reason="SciPy is required"
+    )
+    def test_subdivide_labels_3layers_half_body(self):
+        from napari_tmidas.processing_functions.scipy_filters import (
+            subdivide_labels_3layers,
+        )
+
+        # Create a simple half-spheroid-like object
+        label_image = np.zeros((20, 20, 20), dtype=np.uint16)
+        # Fill upper half with a sphere-like object
+        for z in range(10, 20):
+            for y in range(20):
+                for x in range(20):
+                    if (z - 15) ** 2 + (y - 10) ** 2 + (x - 10) ** 2 <= 25:
+                        label_image[z, y, x] = 1
+
+        # Test with half-body mode disabled (default)
+        result_normal = subdivide_labels_3layers(
+            label_image, is_half_body=False
+        )
+        assert result_normal.shape == label_image.shape
+        unique_normal = np.unique(result_normal)
+        assert len(unique_normal) > 1  # Should have background + layers
+
+        # Test with half-body mode enabled (cut along Z-axis = 0)
+        result_half_body = subdivide_labels_3layers(
+            label_image, is_half_body=True, cut_axis=0
+        )
+        assert result_half_body.shape == label_image.shape
+        unique_half = np.unique(result_half_body)
+        assert len(unique_half) > 1  # Should have background + layers
+
+        # Half-body mode should create different layer distributions
+        # The cut surface (z=10 plane) should show multiple layers
+        cut_surface_normal = result_normal[10, :, :]
+        cut_surface_half = result_half_body[10, :, :]
+
+        # In half-body mode, the cut surface should have more variety of layers
+        assert len(np.unique(cut_surface_half[cut_surface_half > 0])) >= len(
+            np.unique(cut_surface_normal[cut_surface_normal > 0])
+        )
+
+        # Test invalid cut_axis
+        with pytest.raises(ValueError):
+            subdivide_labels_3layers(
+                label_image, is_half_body=True, cut_axis=5
+            )
