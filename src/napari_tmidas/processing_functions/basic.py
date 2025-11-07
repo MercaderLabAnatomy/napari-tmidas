@@ -137,7 +137,7 @@ def invert_binary_labels(image: np.ndarray) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Mirror Labels",
     suffix="_mirrored",
-    description="Mirror labels along an axis, offsetting mirrored labels to keep them distinct",
+    description="Mirror labels at their largest slice area along an axis, keeping original image shape",
     parameters={
         "axis": {
             "type": int,
@@ -159,30 +159,46 @@ def mirror_labels(image: np.ndarray, axis: int = 0) -> np.ndarray:
 
     axis = axis % arr.ndim
 
-    flipped = np.flip(arr, axis=axis)
-    max_label = int(np.max(arr)) if arr.size else 0
-    if max_label > 0:
-        flipped = np.where(flipped != 0, flipped + max_label, 0)
-
+    # Find the slice with the largest area (most non-zero pixels)
     reduction_axes = tuple(i for i in range(arr.ndim) if i != axis)
-    occupancy = np.sum(arr != 0, axis=reduction_axes, dtype=np.int64)
-    total = int(np.sum(occupancy))
-    axis_center = (arr.shape[axis] - 1) / 2.0
-    if total == 0:
-        prefer_original_first = True
-    else:
-        positions = np.arange(arr.shape[axis], dtype=np.float64)
-        center_of_mass = (
-            float(np.dot(occupancy.astype(np.float64), positions)) / total
-        )
-        prefer_original_first = center_of_mass >= axis_center
+    slice_areas = np.sum(arr != 0, axis=reduction_axes, dtype=np.int64)
 
-    if prefer_original_first:
-        combined = np.concatenate([arr, flipped], axis=axis)
-    else:
-        combined = np.concatenate([flipped, arr], axis=axis)
+    if slice_areas.size == 0 or np.max(slice_areas) == 0:
+        # No labels to mirror, return copy
+        return arr.copy()
 
-    return combined.astype(arr.dtype, copy=False)
+    # Find the index of the slice with maximum area
+    max_area_idx = int(np.argmax(slice_areas))
+
+    # Create result array (same shape as input)
+    result = np.zeros_like(arr)
+
+    # Get max label value for offset
+    max_label = int(np.max(arr)) if arr.size else 0
+
+    # Mirror labels from the max_area_idx position
+    for i in range(arr.shape[axis]):
+        # Calculate the mirrored position relative to max_area_idx
+        mirrored_i = 2 * max_area_idx - i
+
+        # Create slicers for current position i and mirrored position
+        slicer_i = [slice(None)] * arr.ndim
+        slicer_i[axis] = i
+        slicer_i = tuple(slicer_i)
+
+        # If mirrored position is within bounds, copy and offset the labels
+        if 0 <= mirrored_i < arr.shape[axis]:
+            slicer_mirrored = [slice(None)] * arr.ndim
+            slicer_mirrored[axis] = mirrored_i
+            slicer_mirrored = tuple(slicer_mirrored)
+
+            # Copy mirrored slice with offset labels
+            mirrored_slice = arr[slicer_mirrored]
+            result[slicer_i] = np.where(
+                mirrored_slice != 0, mirrored_slice + max_label, 0
+            )
+
+    return result.astype(arr.dtype, copy=False)
 
 
 @BatchProcessingRegistry.register(
@@ -511,7 +527,7 @@ def max_z_projection_tzyx(image: np.ndarray) -> np.ndarray:
 
 @BatchProcessingRegistry.register(
     name="Split Color Channels",
-    suffix="_split_color_channels",
+    suffix="_split",
     description="Splits the color channels of the image",
     parameters={
         "num_channels": {

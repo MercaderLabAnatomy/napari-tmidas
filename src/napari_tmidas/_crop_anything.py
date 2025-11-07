@@ -739,6 +739,14 @@ class BatchCropAnything:
         self.obj_points = {}
         self.obj_labels = {}
 
+        # Reset SAM2-specific tracking dictionaries for 2D mode
+        self.sam2_points_by_obj = {}
+        self.sam2_labels_by_obj = {}
+        self._sam2_next_obj_id = 1
+        print(
+            "DEBUG: Reset _sam2_next_obj_id to 1 in _generate_2d_segmentation"
+        )
+
         # Set the image in the predictor for later use (2D mode only)
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
         if hasattr(self.predictor, "set_image"):
@@ -867,9 +875,16 @@ class BatchCropAnything:
 
             # Store needed state for 3D processing
             self._sam2_next_obj_id = 1
+            print(
+                "DEBUG: Reset _sam2_next_obj_id to 1 in _generate_3d_segmentation"
+            )
             self._sam2_prompts = (
                 {}
             )  # Store prompts for each object (points, labels, box)
+
+            # Reset SAM2-specific tracking dictionaries for 3D mode
+            self.sam2_points_by_obj = {}
+            self.sam2_labels_by_obj = {}
 
             # Update the label layer with empty segmentation
             self._update_label_layer()
@@ -960,6 +975,9 @@ class BatchCropAnything:
                 # Create new object for positive points on background
                 ann_obj_id = self._sam2_next_obj_id
                 if point_label > 0 and label_id == 0:
+                    print(
+                        f"DEBUG: Incrementing _sam2_next_obj_id from {self._sam2_next_obj_id} to {self._sam2_next_obj_id + 1}"
+                    )
                     self._sam2_next_obj_id += 1
 
             # Find or create points layer for this object
@@ -1554,11 +1572,14 @@ class BatchCropAnything:
                 box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
                 print(f"DEBUG: Box coordinates: {box}")
 
-                # Use SAM2 with box prompt
-                if not hasattr(self, "next_obj_id"):
-                    self.next_obj_id = 1
-                obj_id = self.next_obj_id
-                self.next_obj_id += 1
+                # Use SAM2 with box prompt - use _sam2_next_obj_id for 3D mode
+                if not hasattr(self, "_sam2_next_obj_id"):
+                    self._sam2_next_obj_id = 1
+                obj_id = self._sam2_next_obj_id
+                self._sam2_next_obj_id += 1
+                print(
+                    f"DEBUG: Box mode - using object ID {obj_id}, next will be {self._sam2_next_obj_id}"
+                )
 
                 # Store box for this object
                 if not hasattr(self, "obj_boxes"):
@@ -1652,11 +1673,14 @@ class BatchCropAnything:
                         [x_min, y_min, x_max, y_max], dtype=np.float32
                     )
 
-                    # Use SAM2 with box prompt
+                    # Use SAM2 with box prompt - use next_obj_id for 2D mode
                     if not hasattr(self, "next_obj_id"):
                         self.next_obj_id = 1
                     obj_id = self.next_obj_id
                     self.next_obj_id += 1
+                    print(
+                        f"DEBUG: 2D Box mode - using object ID {obj_id}, next will be {self.next_obj_id}"
+                    )
 
                     # Store box for this object
                     if not hasattr(self, "obj_boxes"):
@@ -2987,17 +3011,14 @@ class BatchCropAnything:
             # Save cropped image
             image_path = self.images[self.current_index]
             base_name, ext = os.path.splitext(image_path)
-            label_str = "_".join(
-                str(lid) for lid in sorted(self.selected_labels)
-            )
-            output_path = f"{base_name}_sam2_cropped_{label_str}.tif"
+            output_path = f"{base_name}_sam2_cropped.tif"
 
             # Save using tifffile with explicit parameters for best compatibility
             imwrite(output_path, cropped_image, compression="zlib")
             self.viewer.status = f"Saved cropped image to {output_path}"
 
             # Save the label image with exact same dimensions as original
-            label_output_path = f"{base_name}_sam2_labels_{label_str}.tif"
+            label_output_path = f"{base_name}_sam2_labels.tif"
             imwrite(label_output_path, label_image, compression="zlib")
             self.viewer.status += f"\nSaved label mask to {label_output_path}"
 
