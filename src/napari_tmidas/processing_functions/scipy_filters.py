@@ -94,9 +94,24 @@ if SCIPY_AVAILABLE:
         name="Subdivide Labels into 3 Layers",
         suffix="_layers",
         description="Subdivide each labeled object into 3 concentric layers and return a single label image where each layer receives a unique ID offset.",
-        parameters={},
+        parameters={
+            "is_half_body": {
+                "type": bool,
+                "default": False,
+                "description": "Enable this if the object is cut in half (e.g., half-spheroid). This will create layers as if it were a full body, so the cut surface shows inner/middle/outer layers.",
+            },
+            "cut_axis": {
+                "type": int,
+                "default": 0,
+                "min": 0,
+                "max": 2,
+                "description": "For half-bodies: which axis the object is cut along (0=Z, 1=Y, 2=X). Only the cut axis will be scaled 2x, not all dimensions.",
+            },
+        },
     )
-    def subdivide_labels_3layers(label_image: np.ndarray) -> np.ndarray:
+    def subdivide_labels_3layers(
+        label_image: np.ndarray, is_half_body: bool = False, cut_axis: int = 0
+    ) -> np.ndarray:
         """Subdivide labeled objects into three concentric layers.
 
         Each object is partitioned into inner, middle, and outer shells of approximately
@@ -107,6 +122,16 @@ if SCIPY_AVAILABLE:
         ----------
         label_image : np.ndarray
             Label image where each unique value represents a distinct object.
+        is_half_body : bool, optional
+            If True, treats the object as a half-body (e.g., half-spheroid cut at a plane).
+            Only the specified cut_axis will be scaled by 2x (not all dimensions) to avoid
+            excessive memory usage. The cut surface will then show all three layers
+            (inner, middle, outer) as if it were the interior of a complete object.
+            Default is False.
+        cut_axis : int, optional
+            For half-bodies: specifies which axis the object is cut along (0=Z, 1=Y, 2=X).
+            Only this axis will be scaled 2x to virtually complete the object. For a
+            hemisphere cut horizontally, use axis 0 (Z). Default is 0.
 
         Returns
         -------
@@ -121,32 +146,75 @@ if SCIPY_AVAILABLE:
 
         original_shape = np.array(label_image.shape)
 
-        # Helper function to create a scaled version centered in original space
+        # Store information for mapping back to original coordinates
+        half_body_offset = None  # If it's a half-body, we need to virtually "complete" the object first
+        # by mirroring it along the cut axis to create a full object
+        if is_half_body:
+            # Validate cut_axis
+            if cut_axis < 0 or cut_axis >= label_image.ndim:
+                raise ValueError(
+                    f"cut_axis must be between 0 and {label_image.ndim - 1}, got {cut_axis}"
+                )
+
+            # Find bounding box of the object along cut_axis
+            axes_to_sum = tuple(
+                i for i in range(label_image.ndim) if i != cut_axis
+            )
+            projection = np.sum(label_image > 0, axis=axes_to_sum)
+            nonzero_indices = np.where(projection > 0)[0]
+
+            if len(nonzero_indices) == 0:
+                # Empty image
+                return np.zeros_like(label_image)
+
+            # Get bounding box along cut axis
+            bbox_start = nonzero_indices[0]
+            bbox_end = nonzero_indices[-1] + 1
+
+            # Extract just the object portion along cut_axis
+            extract_slices = [slice(None)] * label_image.ndim
+            extract_slices[cut_axis] = slice(bbox_start, bbox_end)
+            object_portion = label_image[tuple(extract_slices)]
+
+            # Mirror this portion to create a complete object
+            flipped = np.flip(object_portion, axis=cut_axis)
+            work_image = np.concatenate(
+                [flipped, object_portion], axis=cut_axis
+            )
+            work_shape = np.array(work_image.shape)
+
+            # Remember the offset for mapping back
+            half_body_offset = bbox_start
+        else:
+            work_image = label_image
+            work_shape = original_shape
+
+        # Helper function to create a scaled version centered in working space
         def create_scaled_labels(scale_factor):
             if scale_factor == 1.0:
-                return label_image.copy()
+                return work_image.copy()
 
             scaled = ndimage.zoom(
-                label_image,
+                work_image,
                 zoom=scale_factor,
                 order=0,  # Preserve label values
                 grid_mode=True,  # Consistent coordinate system
                 mode="grid-constant",
                 cval=0,
-            ).astype(label_image.dtype)
+            ).astype(work_image.dtype)
 
             new_shape = np.array(scaled.shape)
-            result = np.zeros(original_shape, dtype=label_image.dtype)
+            result = np.zeros(work_shape, dtype=work_image.dtype)
 
-            # Center the resized objects in the original array
-            offset = ((original_shape - new_shape) / 2).astype(int)
+            # Center the resized objects in the working array
+            offset = ((work_shape - new_shape) / 2).astype(int)
             slices = tuple(slice(o, o + s) for o, s in zip(offset, new_shape))
             result[slices] = scaled
 
             return result
 
         # Create the three scaled versions
-        full_labels = label_image.copy()  # Outer boundary (100%)
+        full_labels = work_image.copy()  # Outer boundary (100%)
         middle_labels = create_scaled_labels(
             scale_middle
         )  # Middle boundary (~67%)
@@ -185,7 +253,7 @@ if SCIPY_AVAILABLE:
         else:
             result_dtype = np.uint32
 
-        result = np.zeros(label_image.shape, dtype=result_dtype)
+        result = np.zeros(work_shape, dtype=result_dtype)
 
         layer1_mask = layer1 > 0
         if np.any(layer1_mask):
@@ -205,6 +273,24 @@ if SCIPY_AVAILABLE:
             result[layer3_mask] = layer3[layer3_mask].astype(
                 result_dtype, copy=False
             ) + (2 * max_label)
+
+        # If half-body mode, extract back the original half and place in original coordinates
+        if is_half_body:
+            # Extract the second half (the original object portion with all layers)
+            slices = [slice(None)] * result.ndim
+            mid_point = work_shape[cut_axis] // 2
+            slices[cut_axis] = slice(mid_point, work_shape[cut_axis])
+            result_object = result[tuple(slices)]
+
+            # Place back into original volume at original position
+            final_result = np.zeros(original_shape, dtype=result.dtype)
+            place_slices = [slice(None)] * result.ndim
+            place_slices[cut_axis] = slice(
+                half_body_offset,
+                half_body_offset + result_object.shape[cut_axis],
+            )
+            final_result[tuple(place_slices)] = result_object
+            result = final_result
 
         return result
 
