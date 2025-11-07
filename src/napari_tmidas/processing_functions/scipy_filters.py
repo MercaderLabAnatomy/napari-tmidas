@@ -147,7 +147,10 @@ if SCIPY_AVAILABLE:
         original_shape = np.array(label_image.shape)
 
         # Store information for mapping back to original coordinates
-        half_body_offset = None  # If it's a half-body, we need to virtually "complete" the object first
+        half_body_offset = None
+        cut_at_beginning = None
+
+        # If it's a half-body, we need to virtually "complete" the object first
         # by mirroring it along the cut axis to create a full object
         if is_half_body:
             # Validate cut_axis
@@ -176,11 +179,30 @@ if SCIPY_AVAILABLE:
             extract_slices[cut_axis] = slice(bbox_start, bbox_end)
             object_portion = label_image[tuple(extract_slices)]
 
+            # Determine which end has the cut surface (max area)
+            # by checking areas at both ends of the object portion
+            object_projection = np.sum(object_portion > 0, axis=axes_to_sum)
+            first_slice_area = object_projection[0]
+            last_slice_area = object_projection[-1]
+
             # Mirror this portion to create a complete object
             flipped = np.flip(object_portion, axis=cut_axis)
-            work_image = np.concatenate(
-                [flipped, object_portion], axis=cut_axis
-            )
+
+            if first_slice_area >= last_slice_area:
+                # Cut surface is at the beginning, so concatenate [flipped, original]
+                # This places the cut surface (the first slice) in the middle
+                work_image = np.concatenate(
+                    [flipped, object_portion], axis=cut_axis
+                )
+                cut_at_beginning = True
+            else:
+                # Cut surface is at the end, so concatenate [original, flipped]
+                # This places the cut surface (the last slice) in the middle
+                work_image = np.concatenate(
+                    [object_portion, flipped], axis=cut_axis
+                )
+                cut_at_beginning = False
+
             work_shape = np.array(work_image.shape)
 
             # Remember the offset for mapping back
@@ -276,10 +298,19 @@ if SCIPY_AVAILABLE:
 
         # If half-body mode, extract back the original half and place in original coordinates
         if is_half_body:
-            # Extract the second half (the original object portion with all layers)
+            # Extract the appropriate half depending on where the cut surface was
             slices = [slice(None)] * result.ndim
             mid_point = work_shape[cut_axis] // 2
-            slices[cut_axis] = slice(mid_point, work_shape[cut_axis])
+
+            if cut_at_beginning:
+                # Cut surface was at the beginning, we concatenated [flipped, original]
+                # So extract the second half to get back the original
+                slices[cut_axis] = slice(mid_point, work_shape[cut_axis])
+            else:
+                # Cut surface was at the end, we concatenated [original, flipped]
+                # So extract the first half to get back the original
+                slices[cut_axis] = slice(0, mid_point)
+
             result_object = result[tuple(slices)]
 
             # Place back into original volume at original position
