@@ -61,6 +61,108 @@ def calculate_coloc_size(
     return int(size)
 
 
+def calculate_intensity_stats(intensity_image, mask):
+    """
+    Calculate intensity statistics for a masked region.
+
+    Args:
+        intensity_image: Raw intensity image
+        mask: Boolean mask defining the region
+
+    Returns:
+        dict: Dictionary with mean, median, std, max, min intensity
+    """
+    # Get intensity values within the mask
+    intensity_values = intensity_image[mask]
+
+    if len(intensity_values) == 0:
+        return {"mean": 0.0, "median": 0.0, "std": 0.0, "max": 0.0, "min": 0.0}
+
+    stats = {
+        "mean": float(np.mean(intensity_values)),
+        "median": float(np.median(intensity_values)),
+        "std": float(np.std(intensity_values)),
+        "max": float(np.max(intensity_values)),
+        "min": float(np.min(intensity_values)),
+    }
+
+    return stats
+
+
+def count_positive_objects(
+    image_c2,
+    intensity_c3,
+    mask_roi,
+    threshold_method="percentile",
+    threshold_value=75.0,
+):
+    """
+    Count Channel 2 objects that are positive for Channel 3 signal.
+
+    Args:
+        image_c2: Label image of Channel 2 (e.g., nuclei)
+        intensity_c3: Intensity image of Channel 3 (e.g., KI67)
+        mask_roi: Boolean mask for the ROI from Channel 1
+        threshold_method: 'percentile' or 'absolute'
+        threshold_value: Threshold value (0-100 for percentile, or absolute intensity)
+
+    Returns:
+        dict: Dictionary with counts and threshold info
+    """
+    # Get all unique Channel 2 objects in the ROI
+    c2_in_roi = image_c2 * mask_roi
+    c2_labels = np.unique(c2_in_roi)
+    c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+    if len(c2_labels) == 0:
+        return {
+            "total_c2_objects": 0,
+            "positive_c2_objects": 0,
+            "negative_c2_objects": 0,
+            "percent_positive": 0.0,
+            "threshold_used": 0.0,
+        }
+
+    # Calculate threshold
+    if threshold_method == "percentile":
+        # Calculate threshold from all Channel 3 intensity values within ROI where Channel 2 exists
+        mask_c2_in_roi = c2_in_roi > 0
+        intensity_in_c2 = intensity_c3[mask_c2_in_roi]
+        if len(intensity_in_c2) > 0:
+            threshold = float(np.percentile(intensity_in_c2, threshold_value))
+        else:
+            threshold = 0.0
+    else:  # absolute
+        threshold = threshold_value
+
+    # Count positive objects
+    positive_count = 0
+    for label_id in c2_labels:
+        # Get mask for this specific Channel 2 object
+        mask_c2_obj = (image_c2 == label_id) & mask_roi
+
+        # Get mean intensity of Channel 3 in this Channel 2 object
+        intensity_in_obj = intensity_c3[mask_c2_obj]
+        if len(intensity_in_obj) > 0:
+            mean_intensity = float(np.mean(intensity_in_obj))
+            if mean_intensity >= threshold:
+                positive_count += 1
+
+    total_count = int(len(c2_labels))
+    negative_count = total_count - positive_count
+    percent_positive = (
+        (positive_count / total_count * 100) if total_count > 0 else 0.0
+    )
+
+    return {
+        "total_c2_objects": total_count,
+        "positive_c2_objects": positive_count,
+        "negative_c2_objects": negative_count,
+        "percent_positive": percent_positive,
+        "threshold_used": threshold,
+    }
+
+
 def process_single_roi(
     label_id,
     image_c1,
@@ -68,19 +170,60 @@ def process_single_roi(
     image_c3=None,
     get_sizes=False,
     roi_sizes=None,
+    channel2_is_labels=True,
+    channel3_is_labels=True,
+    image_c2_intensity=None,
+    image_c3_intensity=None,
+    count_positive=False,
+    threshold_method="percentile",
+    threshold_value=75.0,
 ):
-    """Process a single ROI for colocalization analysis."""
+    """
+    Process a single ROI for colocalization analysis.
+
+    Args:
+        label_id: Label ID to process
+        image_c1: First channel image (ROI labels)
+        image_c2: Second channel image (object labels or intensity)
+        image_c3: Third channel image (labels or intensity, optional)
+        get_sizes: Whether to calculate size statistics
+        roi_sizes: Pre-calculated ROI sizes dict
+        channel2_is_labels: If True, treat channel 2 as labels; if False, as intensity
+        channel3_is_labels: If True, treat channel 3 as labels; if False, as intensity
+        image_c2_intensity: Separate intensity image for channel 2 (optional)
+        image_c3_intensity: Separate intensity image for channel 3 (optional)
+        count_positive: Count positive objects (only applicable when one channel is labels and another is intensity)
+        threshold_method: 'percentile' or 'absolute' for positive counting
+        threshold_value: Threshold value for positive counting
+    """
     # Create masks once
     mask_roi = image_c1 == label_id
-    mask_c2 = image_c2 != 0
-
-    # Calculate counts
-    c2_in_c1_count = count_unique_nonzero(image_c2, mask_roi & mask_c2)
 
     # Build the result dictionary
-    result = {"label_id": int(label_id), "ch2_in_ch1_count": c2_in_c1_count}
+    result = {"label_id": int(label_id)}
 
-    # Add size information if requested
+    # Handle Channel 2 based on whether it's labels or intensity
+    if channel2_is_labels:
+        mask_c2 = image_c2 != 0
+        # Calculate counts
+        c2_in_c1_count = count_unique_nonzero(image_c2, mask_roi & mask_c2)
+        result["ch2_in_ch1_count"] = c2_in_c1_count
+    else:
+        # Channel 2 is intensity - calculate intensity statistics
+        intensity_img = (
+            image_c2_intensity if image_c2_intensity is not None else image_c2
+        )
+        stats_c2 = calculate_intensity_stats(intensity_img, mask_roi)
+        result.update(
+            {
+                "ch2_in_ch1_mean": stats_c2["mean"],
+                "ch2_in_ch1_median": stats_c2["median"],
+                "ch2_in_ch1_std": stats_c2["std"],
+                "ch2_in_ch1_max": stats_c2["max"],
+            }
+        )
+
+    # Add size information if requested (only for label-based channels)
     if get_sizes:
         if roi_sizes is None:
             roi_sizes = {}
@@ -89,44 +232,154 @@ def process_single_roi(
             roi_sizes[label_id] = area
 
         size = roi_sizes.get(int(label_id), 0)
-        c2_in_c1_size = calculate_coloc_size(image_c1, image_c2, label_id)
+        result["ch1_size"] = size
 
-        result.update({"ch1_size": size, "ch2_in_ch1_size": c2_in_c1_size})
+        if channel2_is_labels:
+            c2_in_c1_size = calculate_coloc_size(image_c1, image_c2, label_id)
+            result["ch2_in_ch1_size"] = c2_in_c1_size
 
     # Handle third channel if present
     if image_c3 is not None:
-        mask_c3 = image_c3 != 0
+        if channel3_is_labels:
+            # Original behavior: count objects in channel 3
+            mask_c3 = image_c3 != 0
 
-        # Calculate third channel statistics
-        c3_in_c2_in_c1_count = count_unique_nonzero(
-            image_c3, mask_roi & mask_c2 & mask_c3
-        )
-        c3_not_in_c2_but_in_c1_count = count_unique_nonzero(
-            image_c3, mask_roi & ~mask_c2 & mask_c3
-        )
+            if channel2_is_labels:
+                # Both ch2 and ch3 are labels - original 3-channel label mode
+                mask_c2 = image_c2 != 0
 
-        result.update(
-            {
-                "ch3_in_ch2_in_ch1_count": c3_in_c2_in_c1_count,
-                "ch3_not_in_ch2_but_in_ch1_count": c3_not_in_c2_but_in_c1_count,
-            }
-        )
+                # Calculate third channel statistics
+                c3_in_c2_in_c1_count = count_unique_nonzero(
+                    image_c3, mask_roi & mask_c2 & mask_c3
+                )
+                c3_not_in_c2_but_in_c1_count = count_unique_nonzero(
+                    image_c3, mask_roi & ~mask_c2 & mask_c3
+                )
 
-        # Add size information for third channel if requested
-        if get_sizes:
-            c3_in_c2_in_c1_size = calculate_coloc_size(
-                image_c1, image_c2, label_id, mask_c2=True, image_c3=image_c3
+                result.update(
+                    {
+                        "ch3_in_ch2_in_ch1_count": c3_in_c2_in_c1_count,
+                        "ch3_not_in_ch2_but_in_ch1_count": c3_not_in_c2_but_in_c1_count,
+                    }
+                )
+
+                # Add size information for third channel if requested
+                if get_sizes:
+                    c3_in_c2_in_c1_size = calculate_coloc_size(
+                        image_c1,
+                        image_c2,
+                        label_id,
+                        mask_c2=True,
+                        image_c3=image_c3,
+                    )
+                    c3_not_in_c2_but_in_c1_size = calculate_coloc_size(
+                        image_c1,
+                        image_c2,
+                        label_id,
+                        mask_c2=False,
+                        image_c3=image_c3,
+                    )
+
+                    result.update(
+                        {
+                            "ch3_in_ch2_in_ch1_size": c3_in_c2_in_c1_size,
+                            "ch3_not_in_ch2_but_in_c1_size": c3_not_in_c2_but_in_c1_size,
+                        }
+                    )
+            else:
+                # Ch2 is intensity, Ch3 is labels - count Ch3 objects in Ch1
+                c3_in_c1_count = count_unique_nonzero(
+                    image_c3, mask_roi & mask_c3
+                )
+                result["ch3_in_ch1_count"] = c3_in_c1_count
+
+                if get_sizes:
+                    c3_in_c1_size = calculate_coloc_size(
+                        image_c1, image_c3, label_id
+                    )
+                    result["ch3_in_ch1_size"] = c3_in_c1_size
+        else:
+            # Channel 3 is intensity
+            intensity_img = (
+                image_c3_intensity
+                if image_c3_intensity is not None
+                else image_c3
             )
-            c3_not_in_c2_but_in_c1_size = calculate_coloc_size(
-                image_c1, image_c2, label_id, mask_c2=False, image_c3=image_c3
-            )
 
-            result.update(
-                {
-                    "ch3_in_ch2_in_ch1_size": c3_in_c2_in_c1_size,
-                    "ch3_not_in_ch2_but_in_ch1_size": c3_not_in_c2_but_in_c1_size,
-                }
-            )
+            if channel2_is_labels:
+                # Ch2 is labels, Ch3 is intensity - original intensity mode
+                mask_c2 = image_c2 != 0
+
+                # Calculate intensity where c2 is present in c1
+                mask_c2_in_c1 = mask_roi & mask_c2
+                stats_c2_in_c1 = calculate_intensity_stats(
+                    intensity_img, mask_c2_in_c1
+                )
+
+                # Calculate intensity where c2 is NOT present in c1
+                mask_not_c2_in_c1 = mask_roi & ~mask_c2
+                stats_not_c2_in_c1 = calculate_intensity_stats(
+                    intensity_img, mask_not_c2_in_c1
+                )
+
+                # Add intensity statistics to result
+                result.update(
+                    {
+                        "ch3_in_ch2_in_ch1_mean": stats_c2_in_c1["mean"],
+                        "ch3_in_ch2_in_ch1_median": stats_c2_in_c1["median"],
+                        "ch3_in_ch2_in_ch1_std": stats_c2_in_c1["std"],
+                        "ch3_in_ch2_in_ch1_max": stats_c2_in_c1["max"],
+                        "ch3_not_in_ch2_but_in_ch1_mean": stats_not_c2_in_c1[
+                            "mean"
+                        ],
+                        "ch3_not_in_ch2_but_in_ch1_median": stats_not_c2_in_c1[
+                            "median"
+                        ],
+                        "ch3_not_in_ch2_but_in_ch1_std": stats_not_c2_in_c1[
+                            "std"
+                        ],
+                        "ch3_not_in_ch2_but_in_ch1_max": stats_not_c2_in_c1[
+                            "max"
+                        ],
+                    }
+                )
+
+                # Count positive Channel 2 objects if requested
+                if count_positive:
+                    positive_counts = count_positive_objects(
+                        image_c2,
+                        intensity_img,
+                        mask_roi,
+                        threshold_method,
+                        threshold_value,
+                    )
+                    result.update(
+                        {
+                            "ch2_in_ch1_positive_for_ch3_count": positive_counts[
+                                "positive_c2_objects"
+                            ],
+                            "ch2_in_ch1_negative_for_ch3_count": positive_counts[
+                                "negative_c2_objects"
+                            ],
+                            "ch2_in_ch1_percent_positive_for_ch3": positive_counts[
+                                "percent_positive"
+                            ],
+                            "ch3_threshold_used": positive_counts[
+                                "threshold_used"
+                            ],
+                        }
+                    )
+            else:
+                # Both Ch2 and Ch3 are intensity - just add Ch3 stats to Ch1 ROIs
+                stats_c3 = calculate_intensity_stats(intensity_img, mask_roi)
+                result.update(
+                    {
+                        "ch3_in_ch1_mean": stats_c3["mean"],
+                        "ch3_in_ch1_median": stats_c3["median"],
+                        "ch3_in_ch1_std": stats_c3["std"],
+                        "ch3_in_ch1_max": stats_c3["max"],
+                    }
+                )
 
     return result
 
@@ -145,27 +398,70 @@ def process_single_roi(
 #             "type": str,
 #             "default": "median",
 #             "description": "Method for size calculation (median or sum)",
+#         "channel2_is_labels": {
+#             "type": bool,
+#             "default": True,
+#             "description": "Treat channel 2 as labels (True) or intensity (False)",
+#         },
+#         "channel3_is_labels": {
+#             "type": bool,
+#             "default": True,
+#             "description": "Treat channel 3 as labels (True) or intensity (False)",
+#         },
+#         "count_positive": {
+#             "type": bool,
+#             "default": False,
+#             "description": "Count positive objects (when one channel is labels and another is intensity)",
+#         },
+#         "threshold_method": {
+#             "type": str,
+#             "default": "percentile",
+#             "description": "Threshold method: 'percentile' or 'absolute'",
+#         },
+#         "threshold_value": {
+#             "type": float,
+#             "default": 75.0,
+#             "description": "Threshold value for positive counting",
 #         },
 #     },
 # )
-def roi_colocalization(image, get_sizes=False, size_method="median"):
+def roi_colocalization(
+    image,
+    get_sizes=False,
+    size_method="median",
+    channel2_is_labels=True,
+    channel3_is_labels=True,
+    count_positive=False,
+    threshold_method="percentile",
+    threshold_value=75.0,
+):
     """
-    Calculate colocalization between channels for a multi-channel label image.
+    Calculate colocalization between channels for a multi-channel label/intensity image.
 
     This function takes a multi-channel image where each channel contains
-    labeled objects (segmentation masks). It analyzes how objects in one channel
-    overlap with objects in the other channels, and returns detailed statistics
-    about their colocalization relationships.
+    labeled objects (segmentation masks) or intensity values. It analyzes how
+    objects in one channel overlap with objects in the other channels, and
+    returns detailed statistics about their colocalization relationships.
 
     Parameters:
     -----------
     image : numpy.ndarray
         Input image array, should have shape corresponding to a multichannel
-        label image (e.g., [n_channels, height, width]).
+        image (e.g., [n_channels, height, width]).
     get_sizes : bool, optional
-        Whether to calculate size statistics for overlapping regions.
+        Whether to calculate size statistics for overlapping regions (only for label channels).
     size_method : str, optional
         Method for calculating size statistics ('median' or 'sum').
+    channel2_is_labels : bool, optional
+        If True, treat channel 2 as labeled objects. If False, treat as intensity image.
+    channel3_is_labels : bool, optional
+        If True, treat channel 3 as labeled objects. If False, treat as intensity image.
+    count_positive : bool, optional
+        Count Channel 2 objects positive for Channel 3 signal (only when channel3_is_labels=False).
+    threshold_method : str, optional
+        Method for positive threshold: 'percentile' or 'absolute'.
+    threshold_value : float, optional
+        Threshold value (0-100 for percentile, or absolute intensity value).
 
     Returns:
     --------
@@ -191,6 +487,16 @@ def roi_colocalization(image, get_sizes=False, size_method="median"):
     image_c1, image_c2 = channels[:2]
     image_c3 = channels[2] if n_channels > 2 else None
 
+    # Handle intensity images for channel 2 and 3
+    image_c2_intensity = None
+    image_c3_intensity = None
+
+    if not channel2_is_labels:
+        image_c2_intensity = image_c2
+
+    if image_c3 is not None and not channel3_is_labels:
+        image_c3_intensity = image_c3
+
     # Get unique label IDs in image_c1
     label_ids = get_nonzero_labels(image_c1)
 
@@ -206,7 +512,19 @@ def roi_colocalization(image, get_sizes=False, size_method="median"):
 
     for label_id in label_ids:
         result = process_single_roi(
-            label_id, image_c1, image_c2, image_c3, get_sizes, roi_sizes
+            label_id,
+            image_c1,
+            image_c2,
+            image_c3,
+            get_sizes,
+            roi_sizes,
+            channel2_is_labels,
+            channel3_is_labels,
+            image_c2_intensity,
+            image_c3_intensity,
+            count_positive,
+            threshold_method,
+            threshold_value,
         )
         results.append(result)
 
@@ -224,17 +542,41 @@ def roi_colocalization(image, get_sizes=False, size_method="median"):
     # Fill first channel with original labels
     output[0] = image_c1
 
-    # Fill second channel with ch1 labels where ch2 overlaps
-    for label_id in label_ids:
-        mask = (image_c1 == label_id) & (image_c2 != 0)
-        if np.any(mask):
-            output[1][mask] = label_id
+    # Fill second channel based on whether it's labels or intensity
+    if channel2_is_labels:
+        # Fill with ch1 labels where ch2 overlaps
+        for label_id in label_ids:
+            mask = (image_c1 == label_id) & (image_c2 != 0)
+            if np.any(mask):
+                output[1][mask] = label_id
+    else:
+        # For intensity-based channel 2, show the intensity values within ch1 ROIs
+        for label_id in label_ids:
+            mask = image_c1 == label_id
+            if np.any(mask):
+                output[1][mask] = image_c2[mask]
 
     # Fill third channel with ch1 labels where ch3 overlaps (if applicable)
     if image_c3 is not None and output_channels > 2:
-        for label_id in label_ids:
-            mask = (image_c1 == label_id) & (image_c3 != 0)
-            if np.any(mask):
-                output[2][mask] = label_id
+        if channel3_is_labels:
+            # For label-based channel 3, show overlap
+            if channel2_is_labels:
+                # Ch2 is labels - show ch3 overlap with ch2 in ch1
+                for label_id in label_ids:
+                    mask = (image_c1 == label_id) & (image_c3 != 0)
+                    if np.any(mask):
+                        output[2][mask] = label_id
+            else:
+                # Ch2 is intensity - just show ch3 overlap with ch1
+                for label_id in label_ids:
+                    mask = (image_c1 == label_id) & (image_c3 != 0)
+                    if np.any(mask):
+                        output[2][mask] = label_id
+        else:
+            # For intensity-based channel 3, show the intensity values
+            for label_id in label_ids:
+                mask = image_c1 == label_id
+                if np.any(mask):
+                    output[2][mask] = image_c3[mask]
 
     return output

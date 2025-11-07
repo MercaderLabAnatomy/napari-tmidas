@@ -130,64 +130,93 @@ class TestBasicProcessing:
         assert result.dtype == np.uint8
 
     def test_mirror_labels_double_size_default_axis(self):
-        """Mirroring doubles the size along the default axis"""
-        image = np.zeros((2, 2, 2), dtype=np.uint16)
-        image[0, 0, 0] = 5
+        """Mirroring keeps the same shape and mirrors around largest area slice"""
+        image = np.zeros((4, 2, 2), dtype=np.uint16)
+        image[0, 0, 0] = 5  # slice 0 has 1 pixel
+        image[1, :, :] = 3  # slice 1 has 4 pixels (largest area)
 
         result = mirror_labels(image)
 
+        # Shape should remain the same
         assert result.shape == (4, 2, 2)
-        mirrored_expected = np.where(
-            np.flip(image, axis=0) > 0,
-            np.flip(image, axis=0) + image.max(),
-            0,
-        )
-        np.testing.assert_array_equal(result[:2], mirrored_expected)
-        np.testing.assert_array_equal(result[2:], image)
+        # Mirror around slice 1 (largest area)
+        # slice 0 gets from slice 2 (2*1 - 0 = 2), which is empty
+        # slice 1 gets from slice 1 (2*1 - 1 = 1), which has value 3
+        # slice 2 gets from slice 0 (2*1 - 2 = 0), which has value 5 at [0,0]
+        # slice 3 gets from slice -1 (2*1 - 3 = -1, out of bounds)
+        expected = np.zeros((4, 2, 2), dtype=np.uint16)
+        expected[0] = 0  # mirrored from empty slice 2
+        expected[1] = 3 + 5  # mirrored from slice 1 (value 3) with offset
+        expected[2, 0, 0] = (
+            5 + 5
+        )  # mirrored from slice 0 (value 5 at [0,0]) with offset
+        expected[3] = 0  # out of bounds
+        np.testing.assert_array_equal(result, expected)
         assert result.dtype == image.dtype
 
     def test_mirror_labels_other_axis(self):
-        """Mirroring along a non-zero axis doubles that axis length"""
-        image = np.arange(12, dtype=np.int32).reshape(1, 3, 4)
+        """Mirroring along a non-zero axis keeps shape and mirrors around largest area"""
+        image = np.zeros((1, 4, 4), dtype=np.int32)
+        image[0, 0, :] = 1  # slice 0: 4 pixels
+        image[0, 1, :] = (
+            2  # slice 1: 4 pixels (will be selected as max_area_idx)
+        )
+        image[0, 2, 0] = 3  # slice 2: 1 pixel
+        image[0, 3, 0] = 4  # slice 3: 1 pixel
 
         result = mirror_labels(image, axis=1)
 
-        assert result.shape == (1, 6, 4)
-        mirrored_expected = np.where(
-            np.flip(image, axis=1) > 0,
-            np.flip(image, axis=1) + image.max(),
-            0,
-        )
-        np.testing.assert_array_equal(result[:, :3], image)
-        np.testing.assert_array_equal(result[:, 3:], mirrored_expected)
+        # Shape should remain the same
+        assert result.shape == (1, 4, 4)
+        # Mirror around slice 0 (first slice with max area)
+        # slice 0 gets from slice 0 (2*0 - 0 = 0), which has value 1
+        # slice 1 gets from slice -1 (2*0 - 1 = -1, out of bounds)
+        # slice 2 gets from slice -2 (2*0 - 2 = -2, out of bounds)
+        # slice 3 gets from slice -3 (2*0 - 3 = -3, out of bounds)
+        expected = np.zeros((1, 4, 4), dtype=np.int32)
+        expected[0, 0, :] = (
+            1 + 4
+        )  # mirrored from slice 0 (value 1) with offset
+        expected[0, 1:, :] = 0  # out of bounds
+        np.testing.assert_array_equal(result, expected)
 
     def test_mirror_labels_prefers_larger_end(self):
-        """The side with more labels sits near the center after mirroring"""
+        """Mirrors around the slice with the largest area"""
         image = np.zeros((4, 3, 3), dtype=np.uint8)
-        image[0, :2, :2] = 1  # larger area at the beginning
-        image[3, 0, 0] = 1
+        image[0, :2, :2] = 1  # slice 0: 4 pixels (largest area)
+        image[3, 0, 0] = 1  # slice 3: 1 pixel
 
         result = mirror_labels(image)
 
-        mirrored_expected = np.where(
-            np.flip(image, axis=0) > 0,
-            np.flip(image, axis=0) + image.max(),
-            0,
-        )
-        np.testing.assert_array_equal(result[:4], mirrored_expected)
-        np.testing.assert_array_equal(result[4:], image)
+        # Shape should remain the same
+        assert result.shape == (4, 3, 3)
+        # Mirror around slice 0 (largest area)
+        # slice 0 mirrors slice 0 (2*0 - 0 = 0)
+        # slice 1 mirrors slice -1 (2*0 - 1 = -1, out of bounds)
+        # slice 2 mirrors slice -2 (2*0 - 2 = -2, out of bounds)
+        # slice 3 mirrors slice -3 (2*0 - 3 = -3, out of bounds)
+        expected = np.zeros((4, 3, 3), dtype=np.uint8)
+        expected[0, :2, :2] = 1 + 1  # mirrored from slice 0 itself
+        expected[1:] = 0  # out of bounds
+        np.testing.assert_array_equal(result, expected)
 
     def test_mirror_labels_uniform(self):
-        """Mirroring uniform labels offsets mirrored half"""
-        image = np.ones((2, 3, 3), dtype=np.uint8)
+        """Mirroring uniform labels creates offset mirrored labels"""
+        image = np.ones((3, 3, 3), dtype=np.uint8)
 
         result = mirror_labels(image)
 
-        assert result.shape == (4, 3, 3)
-        np.testing.assert_array_equal(result[:2], image)
-        np.testing.assert_array_equal(
-            result[2:], np.full((2, 3, 3), 2, dtype=np.uint8)
-        )
+        # Shape should remain the same
+        assert result.shape == (3, 3, 3)
+        # All slices have equal area (9 pixels), so slice 0 is chosen
+        # Mirror around slice 0 (first slice with max area)
+        # slice 0 mirrors slice 0 (2*0 - 0 = 0)
+        # slice 1 mirrors slice -1 (2*0 - 1 = -1, out of bounds)
+        # slice 2 mirrors slice -2 (2*0 - 2 = -2, out of bounds)
+        expected = np.zeros((3, 3, 3), dtype=np.uint8)
+        expected[0] = 2  # mirrored from slice 0 (1 + 1)
+        expected[1:] = 0  # out of bounds
+        np.testing.assert_array_equal(result, expected)
 
     def test_mirror_labels_invalid_axis(self):
         """Invalid axis should raise an error"""

@@ -11,7 +11,6 @@ and can optionally calculate sizes of these overlapping regions.
 import concurrent.futures
 
 # contextlib is used to suppress exceptions
-import contextlib
 import csv
 import os
 from collections import defaultdict
@@ -100,9 +99,9 @@ def group_files_by_common_substring(file_lists, channels):
 
         # If matches were found for all channels, add them to the group
         if len(matched_files) == len(channels):
-            # Strip suffixes from the common substring
-            stripped_common_substring = common_substring.rsplit("_", 1)[0]
-            groups[stripped_common_substring] = {
+            # Use the full common substring as the key (don't strip it yet)
+            # This prevents different file pairs from overwriting each other
+            groups[common_substring] = {
                 channel: file_lists[channel][
                     base_files[channel].index(matched_files[channel])
                 ]
@@ -134,6 +133,12 @@ class ColocalizationWorker(QThread):
         get_sizes=False,
         size_method="median",
         output_folder=None,
+        channel2_is_labels=True,
+        channel3_is_labels=True,
+        count_positive=False,
+        threshold_method="percentile",
+        threshold_value=75.0,
+        save_images=True,
     ):
         super().__init__()
         self.file_pairs = file_pairs
@@ -141,6 +146,12 @@ class ColocalizationWorker(QThread):
         self.get_sizes = get_sizes
         self.size_method = size_method
         self.output_folder = output_folder
+        self.channel2_is_labels = channel2_is_labels
+        self.channel3_is_labels = channel3_is_labels
+        self.count_positive = count_positive
+        self.threshold_method = threshold_method
+        self.threshold_value = threshold_value
+        self.save_images = save_images
         self.stop_requested = False
         self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
@@ -167,30 +178,94 @@ class ColocalizationWorker(QThread):
                 header = [
                     "Filename",
                     f"{self.channel_names[0]}_label_id",
-                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_count",
                 ]
 
-                if self.get_sizes:
+                # Add Channel 2 columns based on whether it's labels or intensity
+                if self.channel2_is_labels:
+                    header.append(
+                        f"{self.channel_names[1]}_in_{self.channel_names[0]}_count"
+                    )
+                else:
+                    # Channel 2 is intensity
                     header.extend(
                         [
-                            f"{self.channel_names[0]}_size",
-                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_size",
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_mean",
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_median",
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_std",
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_max",
                         ]
                     )
+
+                if self.get_sizes:
+                    header.append(f"{self.channel_names[0]}_size")
+                    if self.channel2_is_labels:
+                        header.append(
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_size"
+                        )
 
                 if len(self.channel_names) == 3:
-                    header.extend(
-                        [
-                            f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_count",
-                            f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_count",
-                        ]
-                    )
-
-                    if self.get_sizes:
+                    if self.channel2_is_labels and self.channel3_is_labels:
+                        # Both ch2 and ch3 are labels - original 3-channel label mode
                         header.extend(
                             [
-                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_size",
-                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_size",
+                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_count",
+                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_count",
+                            ]
+                        )
+
+                        if self.get_sizes:
+                            header.extend(
+                                [
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_size",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_size",
+                                ]
+                            )
+                    elif (
+                        self.channel2_is_labels and not self.channel3_is_labels
+                    ):
+                        # Ch2 is labels, Ch3 is intensity
+                        header.extend(
+                            [
+                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_mean",
+                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_median",
+                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_std",
+                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_max",
+                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_mean",
+                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_median",
+                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_std",
+                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_max",
+                            ]
+                        )
+
+                        # Add positive counting columns if requested
+                        if self.count_positive:
+                            header.extend(
+                                [
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_positive_for_{self.channel_names[2]}_count",
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_negative_for_{self.channel_names[2]}_count",
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_percent_positive_for_{self.channel_names[2]}",
+                                    f"{self.channel_names[2]}_threshold_used",
+                                ]
+                            )
+                    elif (
+                        not self.channel2_is_labels and self.channel3_is_labels
+                    ):
+                        # Ch2 is intensity, Ch3 is labels
+                        header.append(
+                            f"{self.channel_names[2]}_in_{self.channel_names[0]}_count"
+                        )
+                        if self.get_sizes:
+                            header.append(
+                                f"{self.channel_names[2]}_in_{self.channel_names[0]}_size"
+                            )
+                    else:
+                        # Both Ch2 and Ch3 are intensity
+                        header.extend(
+                            [
+                                f"{self.channel_names[2]}_in_{self.channel_names[0]}_mean",
+                                f"{self.channel_names[2]}_in_{self.channel_names[0]}_median",
+                                f"{self.channel_names[2]}_in_{self.channel_names[0]}_std",
+                                f"{self.channel_names[2]}_in_{self.channel_names[0]}_max",
                             ]
                         )
 
@@ -326,13 +401,30 @@ class ColocalizationWorker(QThread):
         if self.get_sizes:
             roi_sizes = self.calculate_all_rois_size(image_c1)
 
+        # Handle intensity images for channel 2 and 3
+        image_c2_intensity = None
+        image_c3_intensity = None
+
+        if not self.channel2_is_labels:
+            image_c2_intensity = image_c2
+
+        if image_c3 is not None and not self.channel3_is_labels:
+            image_c3_intensity = image_c3
+
         # Process each label
         csv_rows = []
         results = []
 
         for label_id in label_ids:
             row = self.process_single_roi(
-                filename, label_id, image_c1, image_c2, image_c3, roi_sizes
+                filename,
+                label_id,
+                image_c1,
+                image_c2,
+                image_c3,
+                roi_sizes,
+                image_c2_intensity,
+                image_c3_intensity,
             )
             csv_rows.append(row)
 
@@ -368,66 +460,186 @@ class ColocalizationWorker(QThread):
         return output
 
     def process_single_roi(
-        self, filename, label_id, image_c1, image_c2, image_c3, roi_sizes
+        self,
+        filename,
+        label_id,
+        image_c1,
+        image_c2,
+        image_c3,
+        roi_sizes,
+        image_c2_intensity=None,
+        image_c3_intensity=None,
     ):
         """Process a single ROI for colocalization analysis."""
         # Create masks once
         mask_roi = image_c1 == label_id
-        mask_c2 = image_c2 != 0
-
-        # Calculate counts
-        c2_in_c1_count = self.count_unique_nonzero(
-            image_c2, mask_roi & mask_c2
-        )
 
         # Build the result row
-        row = [filename, int(label_id), c2_in_c1_count]
+        row = [filename, int(label_id)]
+
+        # Handle Channel 2 based on whether it's labels or intensity
+        if self.channel2_is_labels:
+            mask_c2 = image_c2 != 0
+            # Calculate counts
+            c2_in_c1_count = self.count_unique_nonzero(
+                image_c2, mask_roi & mask_c2
+            )
+            row.append(c2_in_c1_count)
+        else:
+            # Channel 2 is intensity - calculate intensity statistics
+            intensity_img = (
+                image_c2_intensity
+                if image_c2_intensity is not None
+                else image_c2
+            )
+            stats_c2 = self.calculate_intensity_stats(intensity_img, mask_roi)
+            row.extend(
+                [
+                    stats_c2["mean"],
+                    stats_c2["median"],
+                    stats_c2["std"],
+                    stats_c2["max"],
+                ]
+            )
 
         # Add size information if requested
         if self.get_sizes:
             size = roi_sizes.get(int(label_id), 0)
-            c2_in_c1_size = self.calculate_coloc_size(
-                image_c1, image_c2, label_id
-            )
-            row.extend([size, c2_in_c1_size])
+            row.append(size)
+
+            if self.channel2_is_labels:
+                c2_in_c1_size = self.calculate_coloc_size(
+                    image_c1, image_c2, label_id
+                )
+                row.append(c2_in_c1_size)
 
         # Handle third channel if present
         if image_c3 is not None:
-            mask_c3 = image_c3 != 0
+            if self.channel2_is_labels and self.channel3_is_labels:
+                # Both ch2 and ch3 are labels - original 3-channel label mode
+                mask_c2 = image_c2 != 0
+                mask_c3 = image_c3 != 0
 
-            # Calculate third channel statistics
-            c3_in_c2_in_c1_count = self.count_unique_nonzero(
-                image_c3, mask_roi & mask_c2 & mask_c3
-            )
-            c3_not_in_c2_but_in_c1_count = self.count_unique_nonzero(
-                image_c3, mask_roi & ~mask_c2 & mask_c3
-            )
-
-            row.extend([c3_in_c2_in_c1_count, c3_not_in_c2_but_in_c1_count])
-
-            # Add size information for third channel if requested
-            if self.get_sizes:
-                c3_in_c2_in_c1_size = self.calculate_coloc_size(
-                    image_c1,
-                    image_c2,
-                    label_id,
-                    mask_c2=True,
-                    image_c3=image_c3,
+                # Calculate third channel statistics
+                c3_in_c2_in_c1_count = self.count_unique_nonzero(
+                    image_c3, mask_roi & mask_c2 & mask_c3
                 )
-                c3_not_in_c2_but_in_c1_size = self.calculate_coloc_size(
-                    image_c1,
-                    image_c2,
-                    label_id,
-                    mask_c2=False,
-                    image_c3=image_c3,
+                c3_not_in_c2_but_in_c1_count = self.count_unique_nonzero(
+                    image_c3, mask_roi & ~mask_c2 & mask_c3
                 )
-                row.extend([c3_in_c2_in_c1_size, c3_not_in_c2_but_in_c1_size])
+
+                row.extend(
+                    [c3_in_c2_in_c1_count, c3_not_in_c2_but_in_c1_count]
+                )
+
+                # Add size information for third channel if requested
+                if self.get_sizes:
+                    c3_in_c2_in_c1_size = self.calculate_coloc_size(
+                        image_c1,
+                        image_c2,
+                        label_id,
+                        mask_c2=True,
+                        image_c3=image_c3,
+                    )
+                    c3_not_in_c2_but_in_c1_size = self.calculate_coloc_size(
+                        image_c1,
+                        image_c2,
+                        label_id,
+                        mask_c2=False,
+                        image_c3=image_c3,
+                    )
+                    row.extend(
+                        [c3_in_c2_in_c1_size, c3_not_in_c2_but_in_c1_size]
+                    )
+            elif self.channel2_is_labels and not self.channel3_is_labels:
+                # Ch2 is labels, Ch3 is intensity
+                mask_c2 = image_c2 != 0
+                intensity_img = (
+                    image_c3_intensity
+                    if image_c3_intensity is not None
+                    else image_c3
+                )
+
+                # Calculate intensity where c2 is present in c1
+                mask_c2_in_c1 = mask_roi & mask_c2
+                stats_c2_in_c1 = self.calculate_intensity_stats(
+                    intensity_img, mask_c2_in_c1
+                )
+
+                # Calculate intensity where c2 is NOT present in c1
+                mask_not_c2_in_c1 = mask_roi & ~mask_c2
+                stats_not_c2_in_c1 = self.calculate_intensity_stats(
+                    intensity_img, mask_not_c2_in_c1
+                )
+
+                # Add intensity statistics to row
+                row.extend(
+                    [
+                        stats_c2_in_c1["mean"],
+                        stats_c2_in_c1["median"],
+                        stats_c2_in_c1["std"],
+                        stats_c2_in_c1["max"],
+                        stats_not_c2_in_c1["mean"],
+                        stats_not_c2_in_c1["median"],
+                        stats_not_c2_in_c1["std"],
+                        stats_not_c2_in_c1["max"],
+                    ]
+                )
+
+                # Count positive Channel 2 objects if requested
+                if self.count_positive:
+                    positive_counts = self.count_positive_objects(
+                        image_c2,
+                        intensity_img,
+                        mask_roi,
+                        self.threshold_method,
+                        self.threshold_value,
+                    )
+                    row.extend(
+                        [
+                            positive_counts["positive_c2_objects"],
+                            positive_counts["negative_c2_objects"],
+                            positive_counts["percent_positive"],
+                            positive_counts["threshold_used"],
+                        ]
+                    )
+            elif not self.channel2_is_labels and self.channel3_is_labels:
+                # Ch2 is intensity, Ch3 is labels - count Ch3 objects in Ch1
+                mask_c3 = image_c3 != 0
+                c3_in_c1_count = self.count_unique_nonzero(
+                    image_c3, mask_roi & mask_c3
+                )
+                row.append(c3_in_c1_count)
+
+                if self.get_sizes:
+                    c3_in_c1_size = self.calculate_coloc_size(
+                        image_c1, image_c3, label_id
+                    )
+                    row.append(c3_in_c1_size)
+            else:
+                # Both Ch2 and Ch3 are intensity - just add Ch3 stats to Ch1 ROIs
+                intensity_img = (
+                    image_c3_intensity
+                    if image_c3_intensity is not None
+                    else image_c3
+                )
+                stats_c3 = self.calculate_intensity_stats(
+                    intensity_img, mask_roi
+                )
+                row.extend(
+                    [
+                        stats_c3["mean"],
+                        stats_c3["median"],
+                        stats_c3["std"],
+                        stats_c3["max"],
+                    ]
+                )
 
         return row
 
     def save_output_image(self, results, file_pair):
         """Generate and save visualization of colocalization results"""
-        if not self.output_folder:
+        if not self.output_folder or not self.save_images:
             return
 
         try:
@@ -435,18 +647,9 @@ class ColocalizationWorker(QThread):
             filepath_c1 = file_pair[0]  # Channel 1
             image_c1 = tifffile.imread(filepath_c1)
 
-            # Try to load channel 2 as well
-            try:
-                # filepath_c2 = file_pair[1]  # Channel 2
-                # image_c2 = tifffile.imread(filepath_c2)
-                has_c2 = True
-            except (FileNotFoundError, IndexError):
-                has_c2 = False
-
-            # Try to load channel 3 if available
-            has_c3 = False
-            if len(file_pair) > 2:
-                contextlib.suppress(FileNotFoundError, IndexError)
+            # Check if we have channel 2 and 3
+            has_c2 = len(file_pair) > 1
+            has_c3 = len(file_pair) > 2
 
             # Create output filename
             channels_str = "_".join(self.channel_names)
@@ -560,6 +763,115 @@ class ColocalizationWorker(QThread):
         size = np.count_nonzero(masked_image)
 
         return int(size)
+
+    def calculate_intensity_stats(self, intensity_image, mask):
+        """
+        Calculate intensity statistics for a masked region.
+
+        Args:
+            intensity_image: Raw intensity image
+            mask: Boolean mask defining the region
+
+        Returns:
+            dict: Dictionary with mean, median, std, max, min intensity
+        """
+        # Get intensity values within the mask
+        intensity_values = intensity_image[mask]
+
+        if len(intensity_values) == 0:
+            return {
+                "mean": 0.0,
+                "median": 0.0,
+                "std": 0.0,
+                "max": 0.0,
+                "min": 0.0,
+            }
+
+        stats = {
+            "mean": float(np.mean(intensity_values)),
+            "median": float(np.median(intensity_values)),
+            "std": float(np.std(intensity_values)),
+            "max": float(np.max(intensity_values)),
+            "min": float(np.min(intensity_values)),
+        }
+
+        return stats
+
+    def count_positive_objects(
+        self,
+        image_c2,
+        intensity_c3,
+        mask_roi,
+        threshold_method="percentile",
+        threshold_value=75.0,
+    ):
+        """
+        Count Channel 2 objects that are positive for Channel 3 signal.
+
+        Args:
+            image_c2: Label image of Channel 2 (e.g., nuclei)
+            intensity_c3: Intensity image of Channel 3 (e.g., KI67)
+            mask_roi: Boolean mask for the ROI from Channel 1
+            threshold_method: 'percentile' or 'absolute'
+            threshold_value: Threshold value (0-100 for percentile, or absolute intensity)
+
+        Returns:
+            dict: Dictionary with counts and threshold info
+        """
+        # Get all unique Channel 2 objects in the ROI
+        c2_in_roi = image_c2 * mask_roi
+        c2_labels = np.unique(c2_in_roi)
+        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+        if len(c2_labels) == 0:
+            return {
+                "total_c2_objects": 0,
+                "positive_c2_objects": 0,
+                "negative_c2_objects": 0,
+                "percent_positive": 0.0,
+                "threshold_used": 0.0,
+            }
+
+        # Calculate threshold
+        if threshold_method == "percentile":
+            # Calculate threshold from all Channel 3 intensity values within ROI where Channel 2 exists
+            mask_c2_in_roi = c2_in_roi > 0
+            intensity_in_c2 = intensity_c3[mask_c2_in_roi]
+            if len(intensity_in_c2) > 0:
+                threshold = float(
+                    np.percentile(intensity_in_c2, threshold_value)
+                )
+            else:
+                threshold = 0.0
+        else:  # absolute
+            threshold = threshold_value
+
+        # Count positive objects
+        positive_count = 0
+        for label_id in c2_labels:
+            # Get mask for this specific Channel 2 object
+            mask_c2_obj = (image_c2 == label_id) & mask_roi
+
+            # Get mean intensity of Channel 3 in this Channel 2 object
+            intensity_in_obj = intensity_c3[mask_c2_obj]
+            if len(intensity_in_obj) > 0:
+                mean_intensity = float(np.mean(intensity_in_obj))
+                if mean_intensity >= threshold:
+                    positive_count += 1
+
+        total_count = int(len(c2_labels))
+        negative_count = total_count - positive_count
+        percent_positive = (
+            (positive_count / total_count * 100) if total_count > 0 else 0.0
+        )
+
+        return {
+            "total_c2_objects": total_count,
+            "positive_c2_objects": positive_count,
+            "negative_c2_objects": negative_count,
+            "percent_positive": percent_positive,
+            "threshold_used": threshold,
+        }
 
     def stop(self):
         """Request worker to stop processing"""
@@ -726,6 +1038,12 @@ class ColocalizationAnalysisWidget(QWidget):
         self.ch1_folder = QLineEdit()
         self.ch1_pattern = QLineEdit()
         self.ch1_pattern.setPlaceholderText("*_labels.tif")
+        self.ch1_pattern.setToolTip(
+            "Glob pattern for matching files. Wildcards:\n"
+            "* = any characters (e.g., *_labels.tif)\n"
+            "? = single character (e.g., *_labels?.tif)\n"
+            "[seq] = character in sequence (e.g., *_labels[0-9]*.tif for _labels1, _labels23, etc.)"
+        )
         self.ch1_browse = QPushButton("Browse...")
         self.ch1_browse.clicked.connect(lambda: self.browse_folder(0))
 
@@ -741,6 +1059,12 @@ class ColocalizationAnalysisWidget(QWidget):
         self.ch2_folder = QLineEdit()
         self.ch2_pattern = QLineEdit()
         self.ch2_pattern.setPlaceholderText("*_labels.tif")
+        self.ch2_pattern.setToolTip(
+            "Glob pattern for matching files. Wildcards:\n"
+            "* = any characters (e.g., *_labels.tif)\n"
+            "? = single character (e.g., *_labels?.tif)\n"
+            "[seq] = character in sequence (e.g., *_labels[0-9]*.tif for _labels1, _labels23, etc.)"
+        )
         self.ch2_browse = QPushButton("Browse...")
         self.ch2_browse.clicked.connect(lambda: self.browse_folder(1))
 
@@ -754,8 +1078,15 @@ class ColocalizationAnalysisWidget(QWidget):
         # Channel 3 (optional)
         self.ch3_label = QLabel("Channel 3 (Optional):")
         self.ch3_folder = QLineEdit()
+        self.ch3_folder.textChanged.connect(lambda: self.update_ch3_controls())
         self.ch3_pattern = QLineEdit()
         self.ch3_pattern.setPlaceholderText("*_labels.tif")
+        self.ch3_pattern.setToolTip(
+            "Glob pattern for matching files. Wildcards:\n"
+            "* = any characters (e.g., *_labels.tif or *.tif for intensity)\n"
+            "? = single character (e.g., *_labels?.tif)\n"
+            "[seq] = character in sequence (e.g., *_labels[0-9]*.tif for _labels1, _labels23, etc.)"
+        )
         self.ch3_browse = QPushButton("Browse...")
         self.ch3_browse.clicked.connect(lambda: self.browse_folder(2))
 
@@ -772,6 +1103,17 @@ class ColocalizationAnalysisWidget(QWidget):
         # Get sizes option
         self.get_sizes_checkbox = QCheckBox("Calculate Region Sizes")
         options_layout.addRow(self.get_sizes_checkbox)
+
+        # Save images option
+        self.save_images_checkbox = QCheckBox("Save Output Images")
+        self.save_images_checkbox.setChecked(
+            False
+        )  # Default to not saving images
+        self.save_images_checkbox.setToolTip(
+            "Save visualization images showing colocalization results.\n"
+            "Uncheck to only generate CSV output (faster)."
+        )
+        options_layout.addRow(self.save_images_checkbox)
 
         # Size calculation method
         self.size_method_layout = QHBoxLayout()
@@ -800,6 +1142,77 @@ class ColocalizationAnalysisWidget(QWidget):
         self.size_method_layout.addWidget(self.size_method_median)
         self.size_method_layout.addWidget(self.size_method_sum)
         options_layout.addRow(self.size_method_layout)
+
+        # Channel 2 mode selection
+        self.ch2_is_labels_checkbox = QCheckBox(
+            "Channel 2 is Labels (uncheck for intensity)"
+        )
+        self.ch2_is_labels_checkbox.setChecked(True)
+        self.ch2_is_labels_checkbox.toggled.connect(self.on_ch2_mode_changed)
+        options_layout.addRow(self.ch2_is_labels_checkbox)
+
+        # Channel 3 mode selection
+        self.ch3_is_labels_checkbox = QCheckBox(
+            "Channel 3 is Labels (uncheck for intensity)"
+        )
+        self.ch3_is_labels_checkbox.setChecked(True)
+        self.ch3_is_labels_checkbox.setEnabled(
+            False
+        )  # Disabled until ch3 folder is set
+        self.ch3_is_labels_checkbox.toggled.connect(self.on_ch3_mode_changed)
+        options_layout.addRow(self.ch3_is_labels_checkbox)
+
+        # Positive counting option (only for intensity mode)
+        self.count_positive_checkbox = QCheckBox(
+            "Count Positive Objects (Ch3 signal in Ch2)"
+        )
+        self.count_positive_checkbox.setEnabled(False)  # Disabled initially
+        self.count_positive_checkbox.toggled.connect(
+            self.on_count_positive_changed
+        )
+        options_layout.addRow(self.count_positive_checkbox)
+
+        # Threshold method selection
+        self.threshold_layout = QHBoxLayout()
+        self.threshold_label = QLabel("Threshold Method:")
+        self.threshold_percentile = QCheckBox("Percentile")
+        self.threshold_percentile.setChecked(True)
+        self.threshold_absolute = QCheckBox("Absolute")
+        self.threshold_percentile.setEnabled(False)
+        self.threshold_absolute.setEnabled(False)
+
+        # Connect to make them mutually exclusive
+        self.threshold_percentile.toggled.connect(
+            lambda checked: (
+                self.threshold_absolute.setChecked(not checked)
+                if checked
+                else None
+            )
+        )
+        self.threshold_absolute.toggled.connect(
+            lambda checked: (
+                self.threshold_percentile.setChecked(not checked)
+                if checked
+                else None
+            )
+        )
+
+        self.threshold_layout.addWidget(self.threshold_label)
+        self.threshold_layout.addWidget(self.threshold_percentile)
+        self.threshold_layout.addWidget(self.threshold_absolute)
+        options_layout.addRow(self.threshold_layout)
+
+        # Threshold value input
+        self.threshold_value_layout = QHBoxLayout()
+        self.threshold_value_label = QLabel("Threshold Value:")
+        self.threshold_value_input = QLineEdit("75.0")
+        self.threshold_value_input.setPlaceholderText(
+            "e.g., 75 for 75th percentile"
+        )
+        self.threshold_value_input.setEnabled(False)
+        self.threshold_value_layout.addWidget(self.threshold_value_label)
+        self.threshold_value_layout.addWidget(self.threshold_value_input)
+        options_layout.addRow(self.threshold_value_layout)
 
         layout.addLayout(options_layout)
 
@@ -898,6 +1311,19 @@ class ColocalizationAnalysisWidget(QWidget):
                 self.ch2_folder.setText(folder)
             elif channel_index == 2:
                 self.ch3_folder.setText(folder)
+                # Enable ch3 checkbox when folder is set
+                self.update_ch3_controls()
+
+    def update_ch3_controls(self):
+        """Enable/disable channel 3 controls based on whether folder is set"""
+        ch3_folder = self.ch3_folder.text().strip()
+        has_ch3 = bool(ch3_folder and os.path.isdir(ch3_folder))
+
+        # Enable/disable ch3 checkbox
+        self.ch3_is_labels_checkbox.setEnabled(has_ch3)
+
+        # Update positive counting state based on ch3 availability
+        self.update_positive_counting_state()
 
     def browse_output(self):
         """Browse for output folder"""
@@ -909,6 +1335,39 @@ class ColocalizationAnalysisWidget(QWidget):
         )
         if folder:
             self.output_folder.setText(folder)
+
+    def on_ch2_mode_changed(self, checked):
+        """Handle channel 2 mode change (labels vs intensity)"""
+        # When ch2 is intensity, positive counting doesn't apply
+        # Positive counting only works when ch2 is labels and ch3 is intensity
+        self.update_positive_counting_state()
+
+    def on_ch3_mode_changed(self, checked):
+        """Handle channel 3 mode change (labels vs intensity)"""
+        # Enable/disable positive counting based on mode
+        # Positive counting only available when ch2 is labels and ch3 is intensity
+        self.update_positive_counting_state()
+
+    def update_positive_counting_state(self):
+        """Update the state of positive counting controls based on ch2 and ch3 modes"""
+        # Positive counting only works when ch2 is labels and ch3 is intensity
+        ch2_is_labels = self.ch2_is_labels_checkbox.isChecked()
+        ch3_is_labels = self.ch3_is_labels_checkbox.isChecked()
+
+        # Enable positive counting only when ch2 is labels AND ch3 is intensity
+        can_count_positive = ch2_is_labels and not ch3_is_labels
+        self.count_positive_checkbox.setEnabled(can_count_positive)
+
+        if not can_count_positive:
+            # Disable positive counting if conditions aren't met
+            self.count_positive_checkbox.setChecked(False)
+
+    def on_count_positive_changed(self, checked):
+        """Handle positive counting checkbox change"""
+        # Enable/disable threshold controls
+        self.threshold_percentile.setEnabled(checked)
+        self.threshold_absolute.setEnabled(checked)
+        self.threshold_value_input.setEnabled(checked)
 
     def find_matching_files(self):
         """Find matching files across channels using the updated grouping function."""
@@ -941,12 +1400,36 @@ class ColocalizationAnalysisWidget(QWidget):
         ch1_files = sorted(glob.glob(os.path.join(ch1_folder, ch1_pattern)))
         ch2_files = sorted(glob.glob(os.path.join(ch2_folder, ch2_pattern)))
 
+        # Check if files were found
+        if not ch1_files:
+            self.status_label.setText(
+                f"No files matching pattern '{ch1_pattern}' found in Channel 1 folder"
+            )
+            self.match_label.setText("No matching files found")
+            self.analyze_button.setEnabled(False)
+            return
+
+        if not ch2_files:
+            self.status_label.setText(
+                f"No files matching pattern '{ch2_pattern}' found in Channel 2 folder"
+            )
+            self.match_label.setText("No matching files found")
+            self.analyze_button.setEnabled(False)
+            return
+
         # Check if third channel is provided
         use_ch3 = bool(ch3_folder and os.path.isdir(ch3_folder))
         if use_ch3:
             ch3_files = sorted(
                 glob.glob(os.path.join(ch3_folder, ch3_pattern))
             )
+            if not ch3_files:
+                self.status_label.setText(
+                    f"No files matching pattern '{ch3_pattern}' found in Channel 3 folder"
+                )
+                self.match_label.setText("No matching files found")
+                self.analyze_button.setEnabled(False)
+                return
         else:
             ch3_files = []
 
@@ -997,10 +1480,28 @@ class ColocalizationAnalysisWidget(QWidget):
 
         # Get settings
         get_sizes = self.get_sizes_checkbox.isChecked()
+        save_images = self.save_images_checkbox.isChecked()
         size_method = (
             "median" if self.size_method_median.isChecked() else "sum"
         )
         output_folder = self.output_folder.text().strip()
+
+        # Get new settings for channel mode and positive counting
+        channel2_is_labels = self.ch2_is_labels_checkbox.isChecked()
+        channel3_is_labels = self.ch3_is_labels_checkbox.isChecked()
+        count_positive = self.count_positive_checkbox.isChecked()
+        threshold_method = (
+            "percentile"
+            if self.threshold_percentile.isChecked()
+            else "absolute"
+        )
+
+        # Get threshold value
+        try:
+            threshold_value = float(self.threshold_value_input.text())
+        except ValueError:
+            threshold_value = 75.0  # Default value
+            self.threshold_value_input.setText("75.0")
 
         # Create output folder if it doesn't exist and is specified
         if output_folder:
@@ -1032,13 +1533,35 @@ class ColocalizationAnalysisWidget(QWidget):
         self.analyze_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 
+        # Determine actual channel names based on folder names
+        # file_pairs contains tuples of (ch1_file, ch2_file) or (ch1_file, ch2_file, ch3_file)
+        ch1_folder = self.ch1_folder.text().strip()
+        ch2_folder = self.ch2_folder.text().strip()
+        ch3_folder = self.ch3_folder.text().strip()
+
+        active_channel_names = [
+            os.path.basename(ch1_folder) if ch1_folder else "CH1",
+            os.path.basename(ch2_folder) if ch2_folder else "CH2",
+        ]
+
+        # Only add third channel if it exists
+        num_channels = len(self.file_pairs[0]) if self.file_pairs else 2
+        if num_channels == 3 and ch3_folder:
+            active_channel_names.append(os.path.basename(ch3_folder))
+
         # Create worker thread
         self.worker = ColocalizationWorker(
             self.file_pairs,
-            self.channel_names,
+            active_channel_names,
             get_sizes,
             size_method,
             output_folder,
+            channel2_is_labels,
+            channel3_is_labels,
+            count_positive,
+            threshold_method,
+            threshold_value,
+            save_images,
         )
 
         # Set thread count
@@ -1061,7 +1584,7 @@ class ColocalizationAnalysisWidget(QWidget):
         # Create results widget if needed
         if not self.results_widget:
             self.results_widget = ColocalizationResultsWidget(
-                self.viewer, self.channel_names
+                self.viewer, active_channel_names
             )
             self.viewer.window.add_dock_widget(
                 self.results_widget,
