@@ -162,13 +162,25 @@ class SeriesDetailWidget(QWidget):
             self.parent.set_export_all_series(self.current_file, checked)
             if not checked:
                 self.series_selected(self.series_selector.currentIndex())
+            else:
+                # When export all is enabled, ensure selected_series is also set
+                self.parent.set_selected_series(self.current_file, 0)
 
     def set_file(self, filepath: str):
         """Set the current file and update series list"""
         self.current_file = filepath
         self.series_selector.clear()
-        self.export_all_checkbox.setChecked(False)
-        self.series_selector.setEnabled(True)
+
+        # Block signals to avoid triggering toggle_export_all during initialization
+        self.export_all_checkbox.blockSignals(True)
+
+        # Check if this file already has export_all flag set
+        export_all = self.parent.export_all_series.get(filepath, False)
+        self.export_all_checkbox.setChecked(export_all)
+        self.series_selector.setEnabled(not export_all)
+
+        # Re-enable signals
+        self.export_all_checkbox.blockSignals(False)
 
         try:
             file_loader = self.parent.get_file_loader(filepath)
@@ -2158,18 +2170,20 @@ class MicroscopyImageConverterWidget(QWidget):
             self.updating_format_buttons = False
 
     def convert_files(self):
-        """Convert selected files"""
+        """Convert selected files - only converts the currently displayed file"""
         try:
-            # Prepare conversion list
-            if not self.selected_series:
-                all_files = list(self.files_table.file_data.keys())
-                if not all_files:
-                    self.status_label.setText(
-                        "No files available for conversion"
-                    )
-                    return
-                for filepath in all_files:
-                    self.selected_series[filepath] = 0
+            # Get the currently displayed file from series_widget
+            current_file = self.series_widget.current_file
+
+            if not current_file:
+                self.status_label.setText(
+                    "Please select a file from the table first"
+                )
+                return
+
+            # Ensure the current file is in selected_series
+            if current_file not in self.selected_series:
+                self.selected_series[current_file] = 0
 
             # Validate output folder
             output_folder = self.output_edit.text()
@@ -2181,10 +2195,90 @@ class MicroscopyImageConverterWidget(QWidget):
             if not self._validate_output_folder(output_folder):
                 return
 
-            # Build conversion list
+            # Build conversion list - only for the current file
             files_to_convert = []
-            for filepath, series_index in self.selected_series.items():
-                if self.export_all_series.get(filepath, False):
+            filepath = current_file
+            series_index = self.selected_series.get(filepath, 0)
+
+            if self.export_all_series.get(filepath, False):
+                loader = self.get_file_loader(filepath)
+                if loader:
+                    try:
+                        series_count = loader.get_series_count(filepath)
+                        for i in range(series_count):
+                            files_to_convert.append((filepath, i))
+                    except (OSError, FileFormatError, ValueError) as e:
+                        self.status_label.setText(
+                            f"Error getting series count: {str(e)}"
+                        )
+                        return
+            else:
+                files_to_convert.append((filepath, series_index))
+
+            if not files_to_convert:
+                self.status_label.setText("No valid files to convert")
+                return
+
+            # Start conversion
+            self._start_conversion_worker(files_to_convert, output_folder)
+
+        except (OSError, PermissionError, ValueError) as e:
+            QMessageBox.critical(
+                self,
+                "Conversion Error",
+                f"Failed to start conversion: {str(e)}",
+            )
+
+    def _start_conversion_worker(
+        self, files_to_convert: List[Tuple[str, int]], output_folder: str
+    ):
+        """Start the conversion worker thread"""
+        self.conversion_worker = ConversionWorker(
+            files_to_convert=files_to_convert,
+            output_folder=output_folder,
+            use_zarr=self.zarr_radio.isChecked(),
+            file_loader_func=self.get_file_loader,
+        )
+
+        self.conversion_worker.progress.connect(
+            self.update_conversion_progress
+        )
+        self.conversion_worker.file_done.connect(self.handle_conversion_result)
+        self.conversion_worker.finished.connect(self.conversion_completed)
+
+        self.conversion_progress.setVisible(True)
+        self.conversion_progress.setValue(0)
+        self.cancel_button.setVisible(True)
+        self.status_label.setText(
+            f"Converting {len(files_to_convert)} files/series..."
+        )
+
+        self.conversion_worker.start()
+
+    def convert_all_files(self):
+        """Convert all files with default settings"""
+        try:
+            all_files = list(self.files_table.file_data.keys())
+            if not all_files:
+                self.status_label.setText("No files available for conversion")
+                return
+
+            # Validate output folder
+            output_folder = self.output_edit.text()
+            if not output_folder:
+                output_folder = os.path.join(
+                    self.folder_edit.text(), "converted"
+                )
+
+            if not self._validate_output_folder(output_folder):
+                return
+
+            # Build conversion list for all files
+            files_to_convert = []
+            for filepath in all_files:
+                file_info = self.files_table.file_data.get(filepath)
+                if file_info and file_info.get("series_count", 0) > 1:
+                    # For files with multiple series, export all
                     loader = self.get_file_loader(filepath)
                     if loader:
                         try:
@@ -2197,36 +2291,15 @@ class MicroscopyImageConverterWidget(QWidget):
                             )
                             return
                 else:
-                    files_to_convert.append((filepath, series_index))
+                    # For single image files
+                    files_to_convert.append((filepath, 0))
 
             if not files_to_convert:
                 self.status_label.setText("No valid files to convert")
                 return
 
             # Start conversion
-            self.conversion_worker = ConversionWorker(
-                files_to_convert=files_to_convert,
-                output_folder=output_folder,
-                use_zarr=self.zarr_radio.isChecked(),
-                file_loader_func=self.get_file_loader,
-            )
-
-            self.conversion_worker.progress.connect(
-                self.update_conversion_progress
-            )
-            self.conversion_worker.file_done.connect(
-                self.handle_conversion_result
-            )
-            self.conversion_worker.finished.connect(self.conversion_completed)
-
-            self.conversion_progress.setVisible(True)
-            self.conversion_progress.setValue(0)
-            self.cancel_button.setVisible(True)
-            self.status_label.setText(
-                f"Converting {len(files_to_convert)} files/series..."
-            )
-
-            self.conversion_worker.start()
+            self._start_conversion_worker(files_to_convert, output_folder)
 
         except (OSError, PermissionError, ValueError) as e:
             QMessageBox.critical(
@@ -2234,24 +2307,6 @@ class MicroscopyImageConverterWidget(QWidget):
                 "Conversion Error",
                 f"Failed to start conversion: {str(e)}",
             )
-
-    def convert_all_files(self):
-        """Convert all files with default settings"""
-        self.selected_series.clear()
-        self.export_all_series.clear()
-
-        all_files = list(self.files_table.file_data.keys())
-        if not all_files:
-            self.status_label.setText("No files available for conversion")
-            return
-
-        for filepath in all_files:
-            self.selected_series[filepath] = 0
-            file_info = self.files_table.file_data.get(filepath)
-            if file_info and file_info.get("series_count", 0) > 1:
-                self.export_all_series[filepath] = True
-
-        self.convert_files()
 
     def _validate_output_folder(self, folder: str) -> bool:
         """Validate output folder"""
