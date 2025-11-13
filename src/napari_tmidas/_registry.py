@@ -64,6 +64,6 @@ class BatchProcessingRegistry:
 
     @classmethod
     def list_functions(cls) -> List[str]:
-        """Thread-safe listing"""
+        """Thread-safe listing, returns alphabetically sorted list"""
         with cls._lock:
-            return list(cls._processing_functions.keys())
+            return sorted(cls._processing_functions.keys())
