@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from napari_tmidas.processing_functions.basic import (
+    filter_label_by_id,
     intersect_label_images,
     invert_binary_labels,
     keep_slice_range_by_area,
@@ -128,6 +129,60 @@ class TestBasicProcessing:
         result = invert_binary_labels(binary)
         assert result.shape == (0, 0)
         assert result.dtype == np.uint8
+
+    def test_filter_label_by_id_basic(self):
+        """Test filtering to keep only one label ID"""
+        # Create test label image with multiple labels
+        labels = np.array([[0, 1, 2], [3, 1, 2], [1, 0, 3]], dtype=np.uint32)
+
+        # Keep only label 1
+        result = filter_label_by_id(labels, label_id=1)
+
+        # Check result - only label 1 should remain, others become 0
+        expected = np.array([[0, 1, 0], [0, 1, 0], [1, 0, 0]], dtype=np.uint32)
+        np.testing.assert_array_equal(result, expected)
+        assert result.dtype == labels.dtype
+
+    def test_filter_label_by_id_default_param(self):
+        """Test filtering with default parameter (label_id=1)"""
+        labels = np.array([[0, 1, 2], [1, 2, 0], [2, 0, 1]], dtype=np.uint32)
+        result = filter_label_by_id(labels)
+        expected = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.uint32)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_filter_label_by_id_nonexistent(self):
+        """Test filtering with label ID that doesn't exist"""
+        labels = np.array([[1, 2, 3], [2, 3, 1], [3, 1, 2]], dtype=np.uint32)
+        # Try to keep label 99 which doesn't exist
+        result = filter_label_by_id(labels, label_id=99)
+        # All should become background
+        expected = np.zeros_like(labels)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_filter_label_by_id_3d(self):
+        """Test filtering with 3D label image"""
+        labels = np.array(
+            [[[1, 2], [3, 1]], [[2, 1], [1, 3]]], dtype=np.uint32
+        )
+        result = filter_label_by_id(labels, label_id=2)
+        expected = np.array(
+            [[[0, 2], [0, 0]], [[2, 0], [0, 0]]], dtype=np.uint32
+        )
+        np.testing.assert_array_equal(result, expected)
+
+    def test_filter_label_by_id_all_same(self):
+        """Test filtering when all pixels are the target label"""
+        labels = np.ones((3, 3), dtype=np.uint32) * 5
+        result = filter_label_by_id(labels, label_id=5)
+        # All should remain
+        np.testing.assert_array_equal(result, labels)
+
+    def test_filter_label_by_id_all_background(self):
+        """Test filtering with all background"""
+        labels = np.zeros((3, 3), dtype=np.uint32)
+        result = filter_label_by_id(labels, label_id=1)
+        # Should remain all zeros
+        np.testing.assert_array_equal(result, labels)
 
     def test_mirror_labels_double_size_default_axis(self):
         """Mirroring keeps the same shape and mirrors around largest area slice"""

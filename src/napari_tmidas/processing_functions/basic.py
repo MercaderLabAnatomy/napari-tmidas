@@ -135,6 +135,41 @@ def invert_binary_labels(image: np.ndarray) -> np.ndarray:
 
 
 @BatchProcessingRegistry.register(
+    name="Filter Label by ID",
+    suffix="_filtered",
+    description="Keep only the specified label ID, set all other labels to background (0)",
+    parameters={
+        "label_id": {
+            "type": int,
+            "default": 1,
+            "min": 1,
+            "description": "Label ID to keep (all others become background)",
+        }
+    },
+)
+def filter_label_by_id(image: np.ndarray, label_id: int = 1) -> np.ndarray:
+    """
+    Filter a label image to keep only the specified label ID.
+    All other label IDs are set to background (0).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input label image
+    label_id : int
+        The label ID to keep (default: 1)
+
+    Returns
+    -------
+    np.ndarray
+        Filtered label image with only the specified label ID preserved
+    """
+    arr = _to_array(image)
+    result = np.where(arr == label_id, arr, 0).astype(arr.dtype)
+    return result
+
+
+@BatchProcessingRegistry.register(
     name="Mirror Labels",
     suffix="_mirrored",
     description="Mirror labels at their largest slice area along an axis, keeping original image shape",
