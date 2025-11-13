@@ -57,30 +57,18 @@ def convert_semantic_to_instance_labels(image, connectivity=None):
     # Get unique non-zero values
     unique_labels = np.unique(image[image != 0])
 
-    # If there's only one unique non-zero value, it's likely semantic
-    # But even with multiple values, we should check if they're truly instance labels
-    # For safety, we'll convert all non-zero regions to instance labels
-
-    output = np.zeros_like(image)
-    current_label = 1
-
-    for semantic_label in unique_labels:
-        # Get mask for this semantic label
-        mask = image == semantic_label
-
-        # Find connected components
-        labeled_components = measure.label(mask, connectivity=connectivity)
-
-        # Relabel to avoid conflicts
-        unique_components = np.unique(
-            labeled_components[labeled_components != 0]
-        )
-        for component_id in unique_components:
-            component_mask = labeled_components == component_id
-            output[component_mask] = current_label
-            current_label += 1
-
-    return output
+    # Quick check: if there's only one unique non-zero value, it's definitely semantic
+    # Otherwise, apply connected components to the entire mask at once (much faster)
+    if len(unique_labels) == 1:
+        # Single semantic label - just label connected components of the binary mask
+        mask = image > 0
+        return measure.label(mask, connectivity=connectivity)
+    else:
+        # Multiple labels - could be instance or semantic
+        # Apply connected components to entire non-zero region at once
+        # This is MUCH faster than iterating over each label value
+        mask = image > 0
+        return measure.label(mask, connectivity=connectivity)
 
 
 def longest_common_substring(s1, s2):
@@ -184,6 +172,7 @@ class ColocalizationWorker(QThread):
         save_images=True,
         convert_to_instances_c2=False,
         convert_to_instances_c3=False,
+        count_c2_positive_for_c3=False,
     ):
         super().__init__()
         self.file_pairs = file_pairs
@@ -199,6 +188,7 @@ class ColocalizationWorker(QThread):
         self.save_images = save_images
         self.convert_to_instances_c2 = convert_to_instances_c2
         self.convert_to_instances_c3 = convert_to_instances_c3
+        self.count_c2_positive_for_c3 = count_c2_positive_for_c3
         self.stop_requested = False
         self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
@@ -265,6 +255,16 @@ class ColocalizationWorker(QThread):
                                 [
                                     f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_size",
                                     f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_size",
+                                ]
+                            )
+
+                        # Add positive counting columns if requested
+                        if self.count_c2_positive_for_c3:
+                            header.extend(
+                                [
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_positive_for_{self.channel_names[2]}_count",
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_negative_for_{self.channel_names[2]}_count",
+                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_percent_positive_for_{self.channel_names[2]}",
                                 ]
                             )
                     elif (
@@ -500,15 +500,65 @@ class ColocalizationWorker(QThread):
                 idx += 2
 
             if image_c3 is not None:
-                result_dict["ch3_in_ch2_in_ch1_count"] = row[idx]
-                result_dict["ch3_not_in_ch2_but_in_ch1_count"] = row[idx + 1]
-                idx += 2
-
-                if self.get_sizes:
-                    result_dict["ch3_in_ch2_in_ch1_size"] = row[idx]
-                    result_dict["ch3_not_in_ch2_but_in_ch1_size"] = row[
+                # Map CSV row columns to result_dict depending on channel modes
+                if self.channel2_is_labels and self.channel3_is_labels:
+                    # Both ch2 and ch3 are labels: two counts (in c2 & not in c2)
+                    result_dict["ch3_in_ch2_in_ch1_count"] = row[idx]
+                    result_dict["ch3_not_in_ch2_but_in_ch1_count"] = row[
                         idx + 1
                     ]
+                    idx += 2
+
+                    if self.get_sizes:
+                        result_dict["ch3_in_ch2_in_ch1_size"] = row[idx]
+                        result_dict["ch3_not_in_ch2_but_in_ch1_size"] = row[
+                            idx + 1
+                        ]
+                elif self.channel2_is_labels and not self.channel3_is_labels:
+                    # ch2 labels, ch3 intensity: many intensity stats were appended
+                    # Map the first group of intensity stats to ch3_in_ch2_in_ch1_* keys
+                    result_dict["ch3_in_ch2_in_ch1_mean"] = row[idx]
+                    result_dict["ch3_in_ch2_in_ch1_median"] = row[idx + 1]
+                    result_dict["ch3_in_ch2_in_ch1_std"] = row[idx + 2]
+                    result_dict["ch3_in_ch2_in_ch1_max"] = row[idx + 3]
+                    result_dict["ch3_not_in_ch2_but_in_ch1_mean"] = row[
+                        idx + 4
+                    ]
+                    result_dict["ch3_not_in_ch2_but_in_ch1_median"] = row[
+                        idx + 5
+                    ]
+                    result_dict["ch3_not_in_ch2_but_in_ch1_std"] = row[idx + 6]
+                    result_dict["ch3_not_in_ch2_but_in_ch1_max"] = row[idx + 7]
+                    idx += 8
+
+                    # If positive counting (intensity mode) appended extra columns
+                    if self.count_positive:
+                        result_dict["ch2_in_ch1_positive_for_ch3_count"] = row[
+                            idx
+                        ]
+                        result_dict["ch2_in_ch1_negative_for_ch3_count"] = row[
+                            idx + 1
+                        ]
+                        result_dict["ch2_in_ch1_percent_positive_for_ch3"] = (
+                            row[idx + 2]
+                        )
+                        result_dict["ch3_threshold_used"] = row[idx + 3]
+                        idx += 4
+                elif not self.channel2_is_labels and self.channel3_is_labels:
+                    # ch2 intensity, ch3 labels: single count (ch3 in ch1)
+                    result_dict["ch3_in_ch1_count"] = row[idx]
+                    idx += 1
+
+                    if self.get_sizes:
+                        result_dict["ch3_in_ch1_size"] = row[idx]
+                        idx += 1
+                else:
+                    # Both channels are intensity: map intensity stats
+                    result_dict["ch3_in_ch1_mean"] = row[idx]
+                    result_dict["ch3_in_ch1_median"] = row[idx + 1]
+                    result_dict["ch3_in_ch1_std"] = row[idx + 2]
+                    result_dict["ch3_in_ch1_max"] = row[idx + 3]
+                    idx += 4
 
             results.append(result_dict)
 
@@ -612,6 +662,19 @@ class ColocalizationWorker(QThread):
                     )
                     row.extend(
                         [c3_in_c2_in_c1_size, c3_not_in_c2_but_in_c1_size]
+                    )
+
+                # Count C2 objects positive for C3 if requested
+                if self.count_c2_positive_for_c3:
+                    positive_counts = self.count_c2_positive_for_c3_labels(
+                        image_c2, image_c3, mask_roi
+                    )
+                    row.extend(
+                        [
+                            positive_counts["c2_positive_for_c3_count"],
+                            positive_counts["c2_negative_for_c3_count"],
+                            positive_counts["c2_percent_positive_for_c3"],
+                        ]
                     )
             elif self.channel2_is_labels and not self.channel3_is_labels:
                 # Ch2 is labels, Ch3 is intensity
@@ -935,6 +998,57 @@ class ColocalizationWorker(QThread):
             "threshold_used": threshold,
         }
 
+    def count_c2_positive_for_c3_labels(self, image_c2, image_c3, mask_roi):
+        """
+        Count Channel 2 objects that contain at least one Channel 3 object (label-based).
+
+        Args:
+            image_c2: Label image of Channel 2 (e.g., nuclei)
+            image_c3: Label image of Channel 3 (e.g., Ki67 spots)
+            mask_roi: Boolean mask for the ROI from Channel 1
+
+        Returns:
+            dict: Dictionary with positive/negative counts and percentage
+        """
+        # Get all unique Channel 2 objects in the ROI
+        c2_in_roi = image_c2 * mask_roi
+        c2_labels = np.unique(c2_in_roi)
+        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+        if len(c2_labels) == 0:
+            return {
+                "total_c2_objects": 0,
+                "c2_positive_for_c3_count": 0,
+                "c2_negative_for_c3_count": 0,
+                "c2_percent_positive_for_c3": 0.0,
+            }
+
+        # Count how many C2 objects contain at least one C3 object
+        positive_count = 0
+        for c2_label in c2_labels:
+            # Get mask for this specific Channel 2 object
+            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+
+            # Check if any C3 objects overlap with this C2 object
+            c3_in_c2 = image_c3[mask_c2_obj]
+            c3_labels_in_c2 = np.unique(c3_in_c2[c3_in_c2 != 0])
+
+            if len(c3_labels_in_c2) > 0:
+                positive_count += 1
+
+        total_count = int(len(c2_labels))
+        negative_count = total_count - positive_count
+        percent_positive = (
+            (positive_count / total_count * 100) if total_count > 0 else 0.0
+        )
+
+        return {
+            "total_c2_objects": total_count,
+            "c2_positive_for_c3_count": positive_count,
+            "c2_negative_for_c3_count": negative_count,
+            "c2_percent_positive_for_c3": percent_positive,
+        }
+
     def stop(self):
         """Request worker to stop processing"""
         self.stop_requested = True
@@ -1248,6 +1362,24 @@ class ColocalizationAnalysisWidget(QWidget):
         )  # Disabled until ch3 folder is set
         options_layout.addRow(self.convert_c3_checkbox)
 
+        # Count C2 positive for C3 (both labels)
+        self.count_c2_positive_checkbox = QCheckBox(
+            "Count C2 Objects Positive for C3 (both labels)"
+        )
+        self.count_c2_positive_checkbox.setChecked(False)
+        self.count_c2_positive_checkbox.setEnabled(False)
+        self.count_c2_positive_checkbox.setToolTip(
+            "When both C2 and C3 are labels, count how many C2 objects contain\n"
+            "at least one C3 object (binary: positive/negative per C2 object)."
+        )
+        self.ch3_is_labels_checkbox.toggled.connect(
+            self.update_c2_positive_state
+        )
+        self.ch2_is_labels_checkbox.toggled.connect(
+            self.update_c2_positive_state
+        )
+        options_layout.addRow(self.count_c2_positive_checkbox)
+
         # Positive counting option (only for intensity mode)
         self.count_positive_checkbox = QCheckBox(
             "Count Positive Objects (Ch3 signal in Ch2)"
@@ -1413,6 +1545,7 @@ class ColocalizationAnalysisWidget(QWidget):
 
         # Update positive counting state based on ch3 availability
         self.update_positive_counting_state()
+        self.update_c2_positive_state()
 
     def browse_output(self):
         """Browse for output folder"""
@@ -1457,6 +1590,23 @@ class ColocalizationAnalysisWidget(QWidget):
         self.threshold_percentile.setEnabled(checked)
         self.threshold_absolute.setEnabled(checked)
         self.threshold_value_input.setEnabled(checked)
+
+    def update_c2_positive_state(self):
+        """Update the state of C2 positive for C3 counting based on ch2 and ch3 modes"""
+        # Get folder and mode states
+        ch3_folder = self.ch3_folder.text().strip()
+        has_ch3 = bool(ch3_folder and os.path.isdir(ch3_folder))
+
+        # C2 positive counting only works when BOTH ch2 and ch3 are labels
+        ch2_is_labels = self.ch2_is_labels_checkbox.isChecked()
+        ch3_is_labels = self.ch3_is_labels_checkbox.isChecked()
+
+        # Enable only when ch3 exists AND both are labels
+        can_count_c2_positive = has_ch3 and ch2_is_labels and ch3_is_labels
+        self.count_c2_positive_checkbox.setEnabled(can_count_c2_positive)
+
+        if not can_count_c2_positive:
+            self.count_c2_positive_checkbox.setChecked(False)
 
     def find_matching_files(self):
         """Find matching files across channels using the updated grouping function."""
@@ -1641,6 +1791,7 @@ class ColocalizationAnalysisWidget(QWidget):
         # Get conversion settings
         convert_to_instances_c2 = self.convert_c2_checkbox.isChecked()
         convert_to_instances_c3 = self.convert_c3_checkbox.isChecked()
+        count_c2_positive_for_c3 = self.count_c2_positive_checkbox.isChecked()
 
         # Create worker thread
         self.worker = ColocalizationWorker(
@@ -1657,6 +1808,7 @@ class ColocalizationAnalysisWidget(QWidget):
             save_images,
             convert_to_instances_c2,
             convert_to_instances_c3,
+            count_c2_positive_for_c3,
         )
 
         # Set thread count
