@@ -36,30 +36,18 @@ def convert_semantic_to_instance_labels(image, connectivity=None):
     # Get unique non-zero values
     unique_labels = np.unique(image[image != 0])
 
-    # If there's only one unique non-zero value, it's likely semantic
-    # But even with multiple values, we should check if they're truly instance labels
-    # For safety, we'll convert all non-zero regions to instance labels
-
-    output = np.zeros_like(image)
-    current_label = 1
-
-    for semantic_label in unique_labels:
-        # Get mask for this semantic label
-        mask = image == semantic_label
-
-        # Find connected components
-        labeled_components = measure.label(mask, connectivity=connectivity)
-
-        # Relabel to avoid conflicts
-        unique_components = np.unique(
-            labeled_components[labeled_components != 0]
-        )
-        for component_id in unique_components:
-            component_mask = labeled_components == component_id
-            output[component_mask] = current_label
-            current_label += 1
-
-    return output
+    # Quick check: if there's only one unique non-zero value, it's definitely semantic
+    # Otherwise, apply connected components to the entire mask at once (much faster)
+    if len(unique_labels) == 1:
+        # Single semantic label - just label connected components of the binary mask
+        mask = image > 0
+        return measure.label(mask, connectivity=connectivity)
+    else:
+        # Multiple labels - could be instance or semantic
+        # Apply connected components to entire non-zero region at once
+        # This is MUCH faster than iterating over each label value
+        mask = image > 0
+        return measure.label(mask, connectivity=connectivity)
 
 
 def count_unique_nonzero(array, mask):
@@ -132,6 +120,58 @@ def calculate_intensity_stats(intensity_image, mask):
     return stats
 
 
+def count_c2_positive_for_c3_labels(image_c2, image_c3, mask_roi):
+    """
+    Count Channel 2 objects that contain at least one Channel 3 object (label-based).
+
+    Args:
+        image_c2: Label image of Channel 2 (e.g., nuclei)
+        image_c3: Label image of Channel 3 (e.g., Ki67 spots)
+        mask_roi: Boolean mask for the ROI from Channel 1
+
+    Returns:
+        dict: Dictionary with positive/negative counts and percentage
+    """
+    # Get all unique Channel 2 objects in the ROI
+    c2_in_roi = image_c2 * mask_roi
+    c2_labels = np.unique(c2_in_roi)
+    c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+    if len(c2_labels) == 0:
+        return {
+            "total_c2_objects": 0,
+            "c2_positive_for_c3_count": 0,
+            "c2_negative_for_c3_count": 0,
+            "c2_percent_positive_for_c3": 0.0,
+        }
+
+    # Count how many C2 objects contain at least one C3 object
+    positive_count = 0
+    for c2_label in c2_labels:
+        # Get mask for this specific Channel 2 object
+        mask_c2_obj = (image_c2 == c2_label) & mask_roi
+
+        # Check if any C3 objects overlap with this C2 object
+        c3_in_c2 = image_c3[mask_c2_obj]
+        c3_labels_in_c2 = np.unique(c3_in_c2[c3_in_c2 != 0])
+
+        if len(c3_labels_in_c2) > 0:
+            positive_count += 1
+
+    total_count = int(len(c2_labels))
+    negative_count = total_count - positive_count
+    percent_positive = (
+        (positive_count / total_count * 100) if total_count > 0 else 0.0
+    )
+
+    return {
+        "total_c2_objects": total_count,
+        "c2_positive_for_c3_count": positive_count,
+        "c2_negative_for_c3_count": negative_count,
+        "c2_percent_positive_for_c3": percent_positive,
+    }
+
+
 def count_positive_objects(
     image_c2,
     intensity_c3,
@@ -140,7 +180,7 @@ def count_positive_objects(
     threshold_value=75.0,
 ):
     """
-    Count Channel 2 objects that are positive for Channel 3 signal.
+    Count Channel 2 objects that are positive for Channel 3 signal (intensity-based).
 
     Args:
         image_c2: Label image of Channel 2 (e.g., nuclei)
@@ -222,6 +262,7 @@ def process_single_roi(
     threshold_value=75.0,
     convert_to_instances_c2=False,
     convert_to_instances_c3=False,
+    count_c2_positive_for_c3=False,
 ):
     """
     Process a single ROI for colocalization analysis.
@@ -237,11 +278,12 @@ def process_single_roi(
         channel3_is_labels: If True, treat channel 3 as labels; if False, as intensity
         image_c2_intensity: Separate intensity image for channel 2 (optional)
         image_c3_intensity: Separate intensity image for channel 3 (optional)
-        count_positive: Count positive objects (only applicable when one channel is labels and another is intensity)
+        count_positive: Count positive objects (only applicable when ch2 is labels and ch3 is intensity)
         threshold_method: 'percentile' or 'absolute' for positive counting
         threshold_value: Threshold value for positive counting
         convert_to_instances_c2: If True, convert semantic labels to instance labels for channel 2
         convert_to_instances_c3: If True, convert semantic labels to instance labels for channel 3
+        count_c2_positive_for_c3: Count C2 objects containing at least one C3 object (ch2 and ch3 both labels)
     """
     # Convert semantic labels to instance labels if requested
     if convert_to_instances_c2 and channel2_is_labels and image_c2 is not None:
@@ -316,6 +358,25 @@ def process_single_roi(
                         "ch3_not_in_ch2_but_in_ch1_count": c3_not_in_c2_but_in_c1_count,
                     }
                 )
+
+                # Count C2 objects positive for C3 if requested
+                if count_c2_positive_for_c3:
+                    positive_counts = count_c2_positive_for_c3_labels(
+                        image_c2, image_c3, mask_roi
+                    )
+                    result.update(
+                        {
+                            "c2_in_c1_positive_for_c3_count": positive_counts[
+                                "c2_positive_for_c3_count"
+                            ],
+                            "c2_in_c1_negative_for_c3_count": positive_counts[
+                                "c2_negative_for_c3_count"
+                            ],
+                            "c2_in_c1_percent_positive_for_c3": positive_counts[
+                                "c2_percent_positive_for_c3"
+                            ],
+                        }
+                    )
 
                 # Add size information for third channel if requested
                 if get_sizes:
