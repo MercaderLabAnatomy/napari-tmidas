@@ -19,6 +19,49 @@ def get_nonzero_labels(image):
     return [int(x) for x in labels]
 
 
+def convert_semantic_to_instance_labels(image, connectivity=None):
+    """
+    Convert semantic labels (where all objects have the same value) to instance labels.
+
+    Args:
+        image: Label image that may contain semantic labels
+        connectivity: Connectivity for connected component analysis (1, 2, or None for full)
+
+    Returns:
+        Image with instance labels (each connected component gets unique label)
+    """
+    if image is None or np.all(image == 0):
+        return image
+
+    # Get unique non-zero values
+    unique_labels = np.unique(image[image != 0])
+
+    # If there's only one unique non-zero value, it's likely semantic
+    # But even with multiple values, we should check if they're truly instance labels
+    # For safety, we'll convert all non-zero regions to instance labels
+
+    output = np.zeros_like(image)
+    current_label = 1
+
+    for semantic_label in unique_labels:
+        # Get mask for this semantic label
+        mask = image == semantic_label
+
+        # Find connected components
+        labeled_components = measure.label(mask, connectivity=connectivity)
+
+        # Relabel to avoid conflicts
+        unique_components = np.unique(
+            labeled_components[labeled_components != 0]
+        )
+        for component_id in unique_components:
+            component_mask = labeled_components == component_id
+            output[component_mask] = current_label
+            current_label += 1
+
+    return output
+
+
 def count_unique_nonzero(array, mask):
     """Count unique non-zero values in array where mask is True."""
     unique_vals = np.unique(array[mask])
@@ -177,6 +220,8 @@ def process_single_roi(
     count_positive=False,
     threshold_method="percentile",
     threshold_value=75.0,
+    convert_to_instances_c2=False,
+    convert_to_instances_c3=False,
 ):
     """
     Process a single ROI for colocalization analysis.
@@ -195,7 +240,16 @@ def process_single_roi(
         count_positive: Count positive objects (only applicable when one channel is labels and another is intensity)
         threshold_method: 'percentile' or 'absolute' for positive counting
         threshold_value: Threshold value for positive counting
+        convert_to_instances_c2: If True, convert semantic labels to instance labels for channel 2
+        convert_to_instances_c3: If True, convert semantic labels to instance labels for channel 3
     """
+    # Convert semantic labels to instance labels if requested
+    if convert_to_instances_c2 and channel2_is_labels and image_c2 is not None:
+        image_c2 = convert_semantic_to_instance_labels(image_c2)
+
+    if convert_to_instances_c3 and channel3_is_labels and image_c3 is not None:
+        image_c3 = convert_semantic_to_instance_labels(image_c3)
+
     # Create masks once
     mask_roi = image_c1 == label_id
 

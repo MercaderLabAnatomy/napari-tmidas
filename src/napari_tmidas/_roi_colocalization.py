@@ -40,6 +40,49 @@ from qtpy.QtWidgets import (
 from skimage import measure
 
 
+def convert_semantic_to_instance_labels(image, connectivity=None):
+    """
+    Convert semantic labels (where all objects have the same value) to instance labels.
+
+    Args:
+        image: Label image that may contain semantic labels
+        connectivity: Connectivity for connected component analysis (1, 2, or None for full)
+
+    Returns:
+        Image with instance labels (each connected component gets unique label)
+    """
+    if image is None or np.all(image == 0):
+        return image
+
+    # Get unique non-zero values
+    unique_labels = np.unique(image[image != 0])
+
+    # If there's only one unique non-zero value, it's likely semantic
+    # But even with multiple values, we should check if they're truly instance labels
+    # For safety, we'll convert all non-zero regions to instance labels
+
+    output = np.zeros_like(image)
+    current_label = 1
+
+    for semantic_label in unique_labels:
+        # Get mask for this semantic label
+        mask = image == semantic_label
+
+        # Find connected components
+        labeled_components = measure.label(mask, connectivity=connectivity)
+
+        # Relabel to avoid conflicts
+        unique_components = np.unique(
+            labeled_components[labeled_components != 0]
+        )
+        for component_id in unique_components:
+            component_mask = labeled_components == component_id
+            output[component_mask] = current_label
+            current_label += 1
+
+    return output
+
+
 def longest_common_substring(s1, s2):
     """Finds the longest common substring between two strings."""
     matcher = SequenceMatcher(None, s1, s2)
@@ -139,6 +182,8 @@ class ColocalizationWorker(QThread):
         threshold_method="percentile",
         threshold_value=75.0,
         save_images=True,
+        convert_to_instances_c2=False,
+        convert_to_instances_c3=False,
     ):
         super().__init__()
         self.file_pairs = file_pairs
@@ -152,6 +197,8 @@ class ColocalizationWorker(QThread):
         self.threshold_method = threshold_method
         self.threshold_value = threshold_value
         self.save_images = save_images
+        self.convert_to_instances_c2 = convert_to_instances_c2
+        self.convert_to_instances_c3 = convert_to_instances_c3
         self.stop_requested = False
         self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
@@ -393,6 +440,21 @@ class ColocalizationWorker(QThread):
         self, filename, image_c1, image_c2, image_c3=None
     ):
         """Process colocalization between channels"""
+        # Convert semantic labels to instance labels if requested
+        if (
+            self.convert_to_instances_c2
+            and self.channel2_is_labels
+            and image_c2 is not None
+        ):
+            image_c2 = convert_semantic_to_instance_labels(image_c2)
+
+        if (
+            self.convert_to_instances_c3
+            and self.channel3_is_labels
+            and image_c3 is not None
+        ):
+            image_c3 = convert_semantic_to_instance_labels(image_c3)
+
         # Get unique label IDs in image_c1
         label_ids = self.get_nonzero_labels(image_c1)
 
@@ -1162,6 +1224,30 @@ class ColocalizationAnalysisWidget(QWidget):
         self.ch3_is_labels_checkbox.toggled.connect(self.on_ch3_mode_changed)
         options_layout.addRow(self.ch3_is_labels_checkbox)
 
+        # Semantic to instance label conversion options
+        self.convert_c2_checkbox = QCheckBox(
+            "Convert C2 Semantic to Instance Labels"
+        )
+        self.convert_c2_checkbox.setChecked(False)
+        self.convert_c2_checkbox.setToolTip(
+            "Enable if C2 contains semantic labels (all objects have same value).\n"
+            "This will find connected components and assign unique labels to each object."
+        )
+        options_layout.addRow(self.convert_c2_checkbox)
+
+        self.convert_c3_checkbox = QCheckBox(
+            "Convert C3 Semantic to Instance Labels"
+        )
+        self.convert_c3_checkbox.setChecked(False)
+        self.convert_c3_checkbox.setToolTip(
+            "Enable if C3 contains semantic labels (all objects have same value).\n"
+            "This will find connected components and assign unique labels to each object."
+        )
+        self.convert_c3_checkbox.setEnabled(
+            False
+        )  # Disabled until ch3 folder is set
+        options_layout.addRow(self.convert_c3_checkbox)
+
         # Positive counting option (only for intensity mode)
         self.count_positive_checkbox = QCheckBox(
             "Count Positive Objects (Ch3 signal in Ch2)"
@@ -1321,6 +1407,9 @@ class ColocalizationAnalysisWidget(QWidget):
 
         # Enable/disable ch3 checkbox
         self.ch3_is_labels_checkbox.setEnabled(has_ch3)
+
+        # Enable/disable ch3 semantic conversion checkbox
+        self.convert_c3_checkbox.setEnabled(has_ch3)
 
         # Update positive counting state based on ch3 availability
         self.update_positive_counting_state()
@@ -1549,6 +1638,10 @@ class ColocalizationAnalysisWidget(QWidget):
         if num_channels == 3 and ch3_folder:
             active_channel_names.append(os.path.basename(ch3_folder))
 
+        # Get conversion settings
+        convert_to_instances_c2 = self.convert_c2_checkbox.isChecked()
+        convert_to_instances_c3 = self.convert_c3_checkbox.isChecked()
+
         # Create worker thread
         self.worker = ColocalizationWorker(
             self.file_pairs,
@@ -1562,6 +1655,8 @@ class ColocalizationAnalysisWidget(QWidget):
             threshold_method,
             threshold_value,
             save_images,
+            convert_to_instances_c2,
+            convert_to_instances_c3,
         )
 
         # Set thread count
