@@ -52,31 +52,159 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (semantic)",
         suffix="_otsu_semantic",
-        description="Threshold image using Otsu's method to obtain a binary image",
+        description="Threshold image using Otsu's method to obtain a binary image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice.",
     )
-    def otsu_thresholding(image: np.ndarray) -> np.ndarray:
+    def otsu_thresholding(
+        image: np.ndarray, dimension_order: str = "Auto"
+    ) -> np.ndarray:
         """
-        Threshold image using Otsu's method
-        """
+        Threshold image using Otsu's method.
 
+        Args:
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            If TYX/ZYX/TCYX/TZYX: processes each frame/slice independently
+                            If CYX: processes each channel independently
+                            If YX or Auto: processes as single 2D image
+
+        Returns:
+            Binary image with same shape as input (255=foreground, 0=background)
+        """
         image = skimage.img_as_ubyte(image)  # convert to 8-bit
-        thresh = skimage.filters.threshold_otsu(image)
-        # Return 255 for values above threshold, 0 for values below
-        return np.where(image > thresh, 255, 0).astype(np.uint8)
+
+        # Handle different dimension orders
+        if dimension_order in ["TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX"]:
+            # Process frame-by-frame or slice-by-slice
+            result = np.zeros_like(image, dtype=np.uint8)
+
+            # Determine which axes to iterate over
+            if len(image.shape) == 3:  # TYX or ZYX
+                for i in range(image.shape[0]):
+                    thresh = skimage.filters.threshold_otsu(image[i])
+                    result[i] = np.where(image[i] > thresh, 255, 0).astype(
+                        np.uint8
+                    )
+            elif len(image.shape) == 4:  # TCYX, TZYX, ZCYX
+                for i in range(image.shape[0]):
+                    for j in range(image.shape[1]):
+                        thresh = skimage.filters.threshold_otsu(image[i, j])
+                        result[i, j] = np.where(
+                            image[i, j] > thresh, 255, 0
+                        ).astype(np.uint8)
+            elif len(image.shape) == 5:  # TZCYX
+                for i in range(image.shape[0]):
+                    for j in range(image.shape[1]):
+                        for k in range(image.shape[2]):
+                            thresh = skimage.filters.threshold_otsu(
+                                image[i, j, k]
+                            )
+                            result[i, j, k] = np.where(
+                                image[i, j, k] > thresh, 255, 0
+                            ).astype(np.uint8)
+            else:
+                # Fallback for unexpected shapes
+                thresh = skimage.filters.threshold_otsu(image)
+                result = np.where(image > thresh, 255, 0).astype(np.uint8)
+
+            return result
+        elif dimension_order == "CYX":
+            # Process each channel independently
+            if len(image.shape) >= 3:
+                result = np.zeros_like(image, dtype=np.uint8)
+                for i in range(image.shape[0]):
+                    thresh = skimage.filters.threshold_otsu(image[i])
+                    result[i] = np.where(image[i] > thresh, 255, 0).astype(
+                        np.uint8
+                    )
+                return result
+            else:
+                # Fallback if not actually multi-channel
+                thresh = skimage.filters.threshold_otsu(image)
+                return np.where(image > thresh, 255, 0).astype(np.uint8)
+        else:
+            # YX or Auto: process as single image
+            thresh = skimage.filters.threshold_otsu(image)
+            return np.where(image > thresh, 255, 0).astype(np.uint8)
 
     # instance segmentation
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (instance)",
         suffix="_otsu_labels",
-        description="Threshold image using Otsu's method to obtain a multi-label image",
+        description="Threshold image using Otsu's method to obtain a multi-label image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice.",
     )
-    def otsu_thresholding_instance(image: np.ndarray) -> np.ndarray:
+    def otsu_thresholding_instance(
+        image: np.ndarray, dimension_order: str = "Auto"
+    ) -> np.ndarray:
         """
-        Threshold image using Otsu's method
+        Threshold image using Otsu's method to create instance labels.
+
+        Args:
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            If TYX/ZYX/TCYX/TZYX: processes each frame/slice independently
+                            If CYX: processes each channel independently
+                            If YX or Auto: processes as single 2D image
+
+        Returns:
+            Label image with same shape as input (0=background, 1,2,3...=objects)
         """
         image = skimage.img_as_ubyte(image)  # convert to 8-bit
-        thresh = skimage.filters.threshold_otsu(image)
-        return skimage.measure.label(image > thresh).astype(np.uint32)
+
+        # Handle different dimension orders
+        if dimension_order in ["TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX"]:
+            # Process frame-by-frame or slice-by-slice
+            result = np.zeros_like(image, dtype=np.uint32)
+
+            # Determine which axes to iterate over
+            if len(image.shape) == 3:  # TYX or ZYX
+                for i in range(image.shape[0]):
+                    thresh = skimage.filters.threshold_otsu(image[i])
+                    result[i] = skimage.measure.label(
+                        image[i] > thresh
+                    ).astype(np.uint32)
+            elif len(image.shape) == 4:  # TCYX, TZYX, ZCYX
+                for i in range(image.shape[0]):
+                    for j in range(image.shape[1]):
+                        thresh = skimage.filters.threshold_otsu(image[i, j])
+                        result[i, j] = skimage.measure.label(
+                            image[i, j] > thresh
+                        ).astype(np.uint32)
+            elif len(image.shape) == 5:  # TZCYX
+                for i in range(image.shape[0]):
+                    for j in range(image.shape[1]):
+                        for k in range(image.shape[2]):
+                            thresh = skimage.filters.threshold_otsu(
+                                image[i, j, k]
+                            )
+                            result[i, j, k] = skimage.measure.label(
+                                image[i, j, k] > thresh
+                            ).astype(np.uint32)
+            else:
+                # Fallback for unexpected shapes
+                thresh = skimage.filters.threshold_otsu(image)
+                result = skimage.measure.label(image > thresh).astype(
+                    np.uint32
+                )
+
+            return result
+        elif dimension_order == "CYX":
+            # Process each channel independently
+            if len(image.shape) >= 3:
+                result = np.zeros_like(image, dtype=np.uint32)
+                for i in range(image.shape[0]):
+                    thresh = skimage.filters.threshold_otsu(image[i])
+                    result[i] = skimage.measure.label(
+                        image[i] > thresh
+                    ).astype(np.uint32)
+                return result
+            else:
+                # Fallback if not actually multi-channel
+                thresh = skimage.filters.threshold_otsu(image)
+                return skimage.measure.label(image > thresh).astype(np.uint32)
+        else:
+            # YX or Auto: process as single image
+            thresh = skimage.filters.threshold_otsu(image)
+            return skimage.measure.label(image > thresh).astype(np.uint32)
 
     # simple thresholding
     @BatchProcessingRegistry.register(

@@ -437,7 +437,15 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
         # Fallback to basic zarr loading with dask
         return load_zarr_basic(filepath)
     else:
-        return imread(filepath)
+        # Use tifffile for TIFF files to preserve dimension order
+        # (skimage.io.imread may transpose dimensions)
+        if _HAS_TIFFFILE and (
+            filepath.lower().endswith(".tif")
+            or filepath.lower().endswith(".tiff")
+        ):
+            return tifffile.imread(filepath)
+        else:
+            return imread(filepath)
 
 
 class ProcessedFilesTableWidget(QTableWidget):
@@ -613,21 +621,35 @@ class ProcessedFilesTableWidget(QTableWidget):
         image_list.clear()
 
     def _should_enable_3d_view(self, data):
-        """Check if 3D view should be enabled based on data dimensions"""
+        """
+        Check if 3D view should be enabled based on data dimensions.
+
+        Conservative approach: Only enable 3D view for clearly spatial 3D data (Z-stacks),
+        not for time series which should use 2D view with time slider.
+        """
         if not hasattr(data, "shape") or len(data.shape) < 3:
             return False
 
-        # Check if we have meaningful 3D data (excluding potential channel dimensions)
         shape = data.shape
 
-        # If first dimension is small (<=10), it's likely channels, check remaining dims
-        meaningful_dims = shape[1:] if shape[0] <= 10 else shape
+        # If first dimension is channels (2-4), check remaining dims
+        if shape[0] >= 2 and shape[0] <= 4:
+            meaningful_dims = shape[1:]
+        else:
+            meaningful_dims = shape
 
-        # Enable 3D if we have at least 3 spatial dimensions with substantial size
-        if len(meaningful_dims) >= 3:
-            # Check that we have meaningful Z depth (not just singleton)
-            z_dim = meaningful_dims[0] if len(meaningful_dims) >= 3 else 1
+        # Only enable 3D view for data with 4+ dimensions (like TZYX, CZYX)
+        # or 3D data with many slices (likely a Z-stack, not time series)
+        if len(meaningful_dims) >= 4:
+            # TZYX or similar - check Z dimension
+            z_dim = meaningful_dims[1] if len(meaningful_dims) >= 4 else 1
             return z_dim > 1
+        elif len(meaningful_dims) == 3:
+            # Could be ZYX (spatial) or TYX (temporal)
+            # Only enable 3D for many slices (likely Z-stack)
+            # 10+ slices suggests Z-stack, fewer suggests time series
+            first_dim = meaningful_dims[0]
+            return first_dim > 10
 
         return False
 
@@ -822,46 +844,9 @@ class ProcessedFilesTableWidget(QTableWidget):
             if hasattr(image, "squeeze") and not hasattr(image, "chunks"):
                 image = np.squeeze(image)
 
-            # Check for multi-channel data in single array
-            if (
-                hasattr(image, "shape")
-                and len(image.shape) > 2
-                and image.shape[0] <= 10
-                and image.shape[0] > 1
-            ):  # Likely channels first
-                print(
-                    f"Using napari channel_axis=0 for {image.shape[0]} channels"
-                )
-
-                # Use napari's channel_axis to automatically split channels with proper colormaps
-                layers = self.viewer.add_image(
-                    image,
-                    channel_axis=0,
-                    name=f"Original: {os.path.basename(filepath)}",
-                    blending="additive",
-                )
-
-                # Track all the layers napari created
-                if isinstance(layers, list):
-                    self.current_original_images.extend(layers)
-                else:
-                    self.current_original_images.append(layers)
-
-                # Switch to 3D view if data has meaningful 3D dimensions (excluding channel dim)
-                if len(self.current_original_images) > 0:
-                    first_layer = self.current_original_images[0]
-                    if hasattr(first_layer, "data"):
-                        channel_data = first_layer.data
-                        if self._should_enable_3d_view(channel_data):
-                            self.viewer.dims.ndisplay = 3
-                            print(
-                                f"Switched to 3D view for multi-channel data with shape: {channel_data.shape}"
-                            )
-
-                self.viewer.status = f"Loaded {len(self.current_original_images)} channels from {os.path.basename(filepath)}"
-                return
-
-            # Single channel image
+            # Don't automatically split channels - let napari handle with sliders
+            # This avoids confusion between channels (C) and time (T) dimensions
+            # Users can manually split if needed using the "Split Color Channels" function
             base_filename = os.path.basename(filepath)
             # check if label image by checking image dtype
             is_label = is_label_image(image)
@@ -879,14 +864,8 @@ class ProcessedFilesTableWidget(QTableWidget):
 
             self.current_original_images.append(layer)
 
-            # Switch to 3D view if data has meaningful 3D dimensions
-            if hasattr(layer, "data") and self._should_enable_3d_view(
-                layer.data
-            ):
-                self.viewer.dims.ndisplay = 3
-                print(
-                    f"Switched to 3D view for single-channel data with shape: {layer.data.shape}"
-                )
+            # Don't automatically switch to 3D view - let user decide
+            # napari will show appropriate sliders for all dimensions
 
             self.viewer.status = f"Loaded {base_filename}"
 
@@ -1179,57 +1158,8 @@ class ProcessedFilesTableWidget(QTableWidget):
             if hasattr(image, "squeeze") and not hasattr(image, "chunks"):
                 image = np.squeeze(image)
 
-            filename = os.path.basename(filepath)
-
-            # Check for multi-channel data in single array
-            if (
-                hasattr(image, "shape")
-                and len(image.shape) > 2
-                and image.shape[0] <= 10
-                and image.shape[0] > 1
-            ):  # Likely channels first
-                print(
-                    f"Using napari channel_axis=0 for {image.shape[0]} processed channels"
-                )
-
-                # Use napari's channel_axis to automatically split channels with proper colormaps
-                layers = self.viewer.add_image(
-                    image,
-                    channel_axis=0,
-                    name=f"Processed: {filename}",
-                    blending="additive",
-                )
-
-                # Track all the layers napari created
-                if isinstance(layers, list):
-                    self.current_processed_images.extend(layers)
-                else:
-                    self.current_processed_images.append(layers)
-
-                # Switch to 3D view if data has meaningful 3D dimensions (excluding channel dim)
-                if len(self.current_processed_images) > 0:
-                    first_layer = self.current_processed_images[0]
-                    if hasattr(first_layer, "data"):
-                        channel_data = first_layer.data
-                        if self._should_enable_3d_view(channel_data):
-                            self.viewer.dims.ndisplay = 3
-                            print(
-                                f"Switched to 3D view for processed multi-channel data with shape: {channel_data.shape}"
-                            )
-
-                # Move all processed layers to top
-                for layer in self.current_processed_images:
-                    if layer in self.viewer.layers:
-                        layer_index = self.viewer.layers.index(layer)
-                        if layer_index < len(self.viewer.layers) - 1:
-                            self.viewer.layers.move(
-                                layer_index, len(self.viewer.layers) - 1
-                            )
-
-                self.viewer.status = f"Loaded {len(self.current_processed_images)} processed channels from {filename}"
-                return
-
-            # Single channel processed image
+            # Don't automatically split channels - let napari handle with sliders
+            # This avoids confusion between channels (C) and time (T) dimensions
             filename = os.path.basename(filepath)
             # Check if image dtype indicates labels
             is_label = is_label_image(image)
@@ -1252,14 +1182,8 @@ class ProcessedFilesTableWidget(QTableWidget):
 
             self.current_processed_images.append(layer)
 
-            # Switch to 3D view if data has meaningful 3D dimensions
-            if hasattr(layer, "data") and self._should_enable_3d_view(
-                layer.data
-            ):
-                self.viewer.dims.ndisplay = 3
-                print(
-                    f"Switched to 3D view for processed single-channel data with shape: {layer.data.shape}"
-                )
+            # Don't automatically switch to 3D view - let user decide
+            # napari will show appropriate sliders for all dimensions
 
             # Move the processed layer to the top of the stack
             if layer in self.viewer.layers:
@@ -1844,9 +1768,45 @@ class ProcessingWorker(QThread):
                 ext = ".tif"
 
             # Check if the first dimension should be treated as channels
-            is_multi_channel = (
-                processed_image.ndim > 2 and processed_image.shape[0] <= 10
+            # Respect dimension_order hint if provided, otherwise use heuristic (2-4 channels for RGB/RGBA)
+            dimension_order_hint = processing_params.get(
+                "dimension_order", "Auto"
             )
+
+            # Only split if dimension_order indicates channels (CYX, TCYX, etc. with C first)
+            # or if Auto and shape suggests channels (2-4)
+            is_multi_channel = False
+            if dimension_order_hint in [
+                "CYX",
+                "CZYX",
+                "TCYX",
+                "ZCYX",
+                "TZCYX",
+            ]:
+                # User explicitly said first dim is channels - split it
+                is_multi_channel = (
+                    processed_image.ndim > 2 and processed_image.shape[0] > 1
+                )
+                print(
+                    f"dimension_order='{dimension_order_hint}' indicates channels, will split {processed_image.shape[0]} channels"
+                )
+            elif dimension_order_hint in ["TYX", "ZYX", "TZYX"]:
+                # User explicitly said it's NOT channels (time or Z) - don't split
+                is_multi_channel = False
+                print(
+                    f"dimension_order='{dimension_order_hint}' indicates time/Z dimension, will NOT split channels"
+                )
+            elif dimension_order_hint == "Auto":
+                # Auto mode: use old heuristic (2-4 suggests channels)
+                is_multi_channel = (
+                    processed_image.ndim > 2
+                    and processed_image.shape[0] <= 4
+                    and processed_image.shape[0] > 1
+                )
+                if is_multi_channel:
+                    print(
+                        f"Auto mode: shape[0]={processed_image.shape[0]} <= 4, assuming channels"
+                    )
 
             if is_multi_channel:
                 # Save each channel as a separate image
@@ -2032,6 +1992,44 @@ class FileResultsWidget(QWidget):
 
         # Create processing function selector
         processing_layout = QVBoxLayout()
+
+        # Add dimension order selector FIRST (before function selector)
+        dim_order_layout = QHBoxLayout()
+        dim_order_label = QLabel("Dimension Order (optional hint):")
+        dim_order_label.setToolTip(
+            "Help processing functions interpret multi-dimensional data.\n"
+            "• Auto: Let function decide (default)\n"
+            "• YX: 2D image\n"
+            "• CYX: Channels first (e.g., RGB)\n"
+            "• TYX: Time series\n"
+            "• ZYX: Z-stack\n"
+            "• TCYX, TZYX, etc.: Combined dimensions\n"
+            "\nNote: Not all functions use this hint."
+        )
+        dim_order_layout.addWidget(dim_order_label)
+
+        self.dimension_order = QComboBox()
+        self.dimension_order.addItems(
+            [
+                "Auto",
+                "YX",
+                "CYX",
+                "TYX",
+                "ZYX",
+                "TCYX",
+                "TZYX",
+                "ZCYX",
+                "TZCYX",
+            ]
+        )
+        self.dimension_order.setToolTip(
+            "Dimension interpretation hint for processing functions"
+        )
+        dim_order_layout.addWidget(self.dimension_order)
+        dim_order_layout.addStretch()
+        processing_layout.addLayout(dim_order_layout)
+
+        # Now add processing function selector
         processing_label = QLabel("Select Processing Function:")
         processing_layout.addWidget(processing_label)
 
@@ -2219,6 +2217,12 @@ class FileResultsWidget(QWidget):
             self.param_widget_instance, "get_parameter_values"
         ):
             param_values = self.param_widget_instance.get_parameter_values()
+
+        # Add dimension order hint if not "Auto"
+        if hasattr(self, "dimension_order"):
+            dim_order = self.dimension_order.currentText()
+            if dim_order != "Auto":
+                param_values["dimension_order"] = dim_order
 
         # Determine output folder
         output_folder = self.output_folder.text().strip()

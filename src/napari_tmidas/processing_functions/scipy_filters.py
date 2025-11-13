@@ -328,7 +328,7 @@ if SCIPY_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Gaussian Blur",
         suffix="_blurred",
-        description="Apply Gaussian blur to the image",
+        description="Apply Gaussian blur to the image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D blur.",
         parameters={
             "sigma": {
                 "type": float,
@@ -339,16 +339,53 @@ if SCIPY_AVAILABLE:
             }
         },
     )
-    def gaussian_blur(image: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    def gaussian_blur(
+        image: np.ndarray, sigma: float = 1.0, dimension_order: str = "Auto"
+    ) -> np.ndarray:
         """
-        Apply Gaussian blur to the image
+        Apply Gaussian blur to the image.
+
+        Args:
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            sigma: Standard deviation for Gaussian kernel
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            If TYX/CYX: processes each frame/channel independently (2D blur per slice)
+                            If ZYX: applies 3D blur to spatial volume
+                            If YX or Auto: processes as-is
+
+        Returns:
+            Blurred image with same shape as input
         """
-        return ndimage.gaussian_filter(image, sigma=sigma)
+        # Handle different dimension orders
+        if dimension_order in ["TYX", "CYX"] and len(image.shape) == 3:
+            # Process frame-by-frame or channel-by-channel (2D blur)
+            result = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                result[i] = ndimage.gaussian_filter(image[i], sigma=sigma)
+            return result
+        elif (
+            dimension_order in ["TCYX", "TZYX", "ZCYX"]
+            and len(image.shape) == 4
+        ):
+            # Process each T/Z and C slice independently (2D blur)
+            result = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                for j in range(image.shape[1]):
+                    result[i, j] = ndimage.gaussian_filter(
+                        image[i, j], sigma=sigma
+                    )
+            return result
+        elif dimension_order == "ZYX" and len(image.shape) == 3:
+            # Apply 3D blur to spatial volume
+            return ndimage.gaussian_filter(image, sigma=sigma)
+        else:
+            # YX, Auto, or other: process as-is
+            return ndimage.gaussian_filter(image, sigma=sigma)
 
     @BatchProcessingRegistry.register(
         name="Median Filter",
         suffix="_median",
-        description="Apply median filter for noise reduction",
+        description="Apply median filter for noise reduction. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D filter.",
         parameters={
             "size": {
                 "type": int,
@@ -359,11 +396,48 @@ if SCIPY_AVAILABLE:
             }
         },
     )
-    def median_filter(image: np.ndarray, size: int = 3) -> np.ndarray:
+    def median_filter(
+        image: np.ndarray, size: int = 3, dimension_order: str = "Auto"
+    ) -> np.ndarray:
         """
-        Apply median filter for noise reduction
+        Apply median filter for noise reduction.
+
+        Args:
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            size: Size of the median filter window
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            If TYX/CYX: processes each frame/channel independently (2D filter per slice)
+                            If ZYX: applies 3D filter to spatial volume
+                            If YX or Auto: processes as-is
+
+        Returns:
+            Filtered image with same shape as input
         """
-        return ndimage.median_filter(image, size=size)
+        # Handle different dimension orders
+        if dimension_order in ["TYX", "CYX"] and len(image.shape) == 3:
+            # Process frame-by-frame or channel-by-channel (2D filter)
+            result = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                result[i] = ndimage.median_filter(image[i], size=size)
+            return result
+        elif (
+            dimension_order in ["TCYX", "TZYX", "ZCYX"]
+            and len(image.shape) == 4
+        ):
+            # Process each T/Z and C slice independently (2D filter)
+            result = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                for j in range(image.shape[1]):
+                    result[i, j] = ndimage.median_filter(
+                        image[i, j], size=size
+                    )
+            return result
+        elif dimension_order == "ZYX" and len(image.shape) == 3:
+            # Apply 3D filter to spatial volume
+            return ndimage.median_filter(image, size=size)
+        else:
+            # YX, Auto, or other: process as-is
+            return ndimage.median_filter(image, size=size)
 
 else:
     # Export stub functions that raise ImportError when called

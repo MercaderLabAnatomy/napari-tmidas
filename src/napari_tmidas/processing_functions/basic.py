@@ -707,6 +707,9 @@ def split_channels(
     # Process output format
     result_channels = []
     for i, channel_img in enumerate(channels):
+        # Remove the channel dimension (which now has size 1 after split)
+        channel_img = np.squeeze(channel_img, axis=channel_axis)
+
         # Get original axes without channel
         axes_without_channel = axes.copy()
         del axes_without_channel[channel_axis]
