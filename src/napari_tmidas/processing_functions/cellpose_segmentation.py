@@ -321,6 +321,11 @@ def cellpose_segmentation(
     result = run_cellpose_in_env("eval", args)
     print(f"Segmentation complete. Found {np.max(result)} objects.")
 
+    # Ensure result is uint32 for proper label detection in napari
+    # Cellpose typically returns int32, but uint32 is preferred for labels
+    if result.dtype != np.uint32:
+        result = result.astype(np.uint32)
+
     return result
 
 
