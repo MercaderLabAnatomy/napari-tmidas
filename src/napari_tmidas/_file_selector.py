@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from magicgui import magicgui
     from qtpy.QtCore import Qt, QThread, Signal
     from qtpy.QtWidgets import (
+        QCheckBox,
         QComboBox,
         QDoubleSpinBox,
         QFormLayout,
@@ -87,6 +88,7 @@ except ImportError:
 try:
     from qtpy.QtCore import Qt, QThread, Signal
     from qtpy.QtWidgets import (
+        QCheckBox,
         QComboBox,
         QDoubleSpinBox,
         QFormLayout,
@@ -106,7 +108,7 @@ try:
     _HAS_QTPY = True
 except ImportError:
     Qt = QThread = Signal = None
-    QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
+    QCheckBox = QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
     QHeaderView = QLabel = QLineEdit = QProgressBar = QPushButton = None
     QSpinBox = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
     _HAS_QTPY = False
@@ -1250,6 +1252,11 @@ class ParameterWidget(QWidget):
                 widget.setDecimals(3)
                 if default_value is not None:
                     widget.setValue(default_value)
+            elif param_type is bool:
+                # Use checkbox for boolean parameters
+                widget = QCheckBox()
+                if default_value is not None:
+                    widget.setChecked(bool(default_value))
             else:
                 # Default to text input for other types
                 widget = QLineEdit(
@@ -1270,6 +1277,8 @@ class ParameterWidget(QWidget):
 
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 values[param_name] = widget.value()
+            elif isinstance(widget, QCheckBox):
+                values[param_name] = widget.isChecked()
             else:
                 # For text inputs, try to convert to the appropriate type
                 try:

@@ -271,7 +271,10 @@ def is_label_image(image: np.ndarray) -> bool:
 
 def save_image_file(image: np.ndarray, filepath: str, dtype=None):
     """
-    Save image to file with proper format detection
+    Save image to file with proper format detection.
+
+    Label images are saved as uint32 to ensure napari recognizes them as labels.
+    Napari automatically detects int32/uint32/int64/uint64 dtypes as labels.
     """
     if not _HAS_TIFFFILE:
         raise ImportError("tifffile is required to save images")
@@ -288,6 +291,8 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
         save_dtype = dtype
     elif is_label_image(image):
         # Input is already a label dtype, preserve as uint32
+        # uint32 is the standard for label images and is automatically
+        # recognized by napari
         save_dtype = np.uint32
     else:
         # Use image's dtype
