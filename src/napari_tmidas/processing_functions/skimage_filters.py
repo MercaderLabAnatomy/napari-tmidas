@@ -16,8 +16,6 @@ except ImportError:
         "scikit-image not available, some processing functions will be disabled"
     )
 
-import contextlib
-import os
 
 # Lazy imports for optional heavy dependencies
 try:
@@ -28,25 +26,87 @@ except ImportError:
     pd = None
     _HAS_PANDAS = False
 
-from napari_tmidas._file_selector import ProcessingWorker
 from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
-    # Equalize histogram
+    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
     @BatchProcessingRegistry.register(
-        name="Equalize Histogram",
-        suffix="_equalized",
-        description="Equalize histogram of image",
+        name="CLAHE (Adaptive Histogram Equalization)",
+        suffix="_clahe",
+        description="Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to enhance local contrast, especially useful for dark images with weak bright features",
+        parameters={
+            "clip_limit": {
+                "type": float,
+                "default": 0.01,
+                "description": "Clipping limit for contrast (0.01 = 1%). Higher values give more contrast but may amplify noise. Range: 0.001-0.1",
+            },
+            "kernel_size": {
+                "type": int,
+                "default": 0,
+                "description": "Size of the local region (0 = auto-calculate based on image size). For small features use smaller values (e.g., 32), for large features use larger values (e.g., 128)",
+            },
+        },
     )
     def equalize_histogram(
-        image: np.ndarray, clip_limit: float = 0.01
+        image: np.ndarray, clip_limit: float = 0.01, kernel_size: int = 0
     ) -> np.ndarray:
         """
-        Equalize histogram of image
-        """
+        Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to enhance local contrast.
 
-        return skimage.exposure.equalize_hist(image)
+        This is much better than standard histogram equalization for dark images with
+        weak bright features like membranes, as it works locally and prevents over-brightening
+        of background regions.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Input image
+        clip_limit : float
+            Clipping limit for contrast limiting (normalized to 0-1 range, e.g., 0.01 = 1%)
+            Higher values give more contrast but may amplify noise
+        kernel_size : int
+            Size of the contextual regions (0 = auto-calculate based on image size)
+
+        Returns
+        -------
+        np.ndarray
+            CLAHE-enhanced image with same dtype as input
+        """
+        # Store original dtype to convert back later
+        original_dtype = image.dtype
+
+        # Auto-calculate kernel size if not specified
+        if kernel_size <= 0:
+            # Use 1/8 of the smaller dimension, but cap between 16 and 128
+            min_dim = min(
+                image.shape[-2:]
+            )  # Last 2 dimensions are spatial (Y, X)
+            kernel_size = max(16, min(128, min_dim // 8))
+
+        # Ensure kernel_size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        # Apply CLAHE using scikit-image's equalize_adapthist
+        # Note: clip_limit in equalize_adapthist is already normalized (0-1 range)
+        # This returns float64 in range [0, 1]
+        result = skimage.exposure.equalize_adapthist(
+            image, kernel_size=kernel_size, clip_limit=clip_limit
+        )
+
+        # Convert back to original dtype to preserve compatibility
+        if np.issubdtype(original_dtype, np.integer):
+            # For integer types, scale back to original range
+            iinfo = np.iinfo(original_dtype)
+            result = (result * (iinfo.max - iinfo.min) + iinfo.min).astype(
+                original_dtype
+            )
+        else:
+            # For float types, keep as is but match dtype
+            result = result.astype(original_dtype)
+
+        return result
 
     # simple otsu thresholding
     @BatchProcessingRegistry.register(
@@ -350,200 +410,10 @@ if SKIMAGE_AVAILABLE:
 
         return result.astype(np.uint32)
 
-    @BatchProcessingRegistry.register(
-        name="Extract Region Properties",
-        suffix="_props",  # Changed to indicate this is for CSV output only
-        description="Extract properties of labeled regions and save as CSV (no image output)",
-        parameters={
-            "properties": {
-                "type": str,
-                "default": "area,bbox,centroid,eccentricity,euler_number,perimeter",
-                "description": "Comma-separated list of properties to extract (e.g., area,perimeter,centroid)",
-            },
-            "intensity_image": {
-                "type": bool,
-                "default": False,
-                "description": "Use input as intensity image for intensity-based measurements",
-            },
-            "min_area": {
-                "type": int,
-                "default": 0,
-                "min": 0,
-                "max": 100000,
-                "description": "Minimum area to include in results (pixels)",
-            },
-        },
-    )
-    def extract_region_properties(
-        image: np.ndarray,
-        properties: str = "area,bbox,centroid,eccentricity,euler_number,perimeter",
-        intensity_image: bool = False,
-        min_area: int = 0,
-    ) -> np.ndarray:
-        """
-        Extract properties of labeled regions in an image and save results as CSV.
-
-        This function analyzes all labeled regions in a label image and computes
-        various region properties like area, perimeter, centroid, etc. The results
-        are saved as a CSV file. The input image is returned unchanged.
-
-        Parameters:
-        -----------
-        image : numpy.ndarray
-            Input label image (instance segmentation)
-        properties : str
-            Comma-separated list of properties to extract
-            See scikit-image documentation for all available properties:
-            https://scikit-image.org/docs/stable/api/skimage.measure.html#skimage.measure.regionprops
-        intensity_image : bool
-            Whether to use the input image as intensity image for intensity-based measurements
-        min_area : int
-            Minimum area (in pixels) for regions to include in results
-
-        Returns:
-        --------
-        numpy.ndarray
-            The original image (unchanged)
-        """
-        # Check if we have a proper label image
-        if image.ndim < 2 or np.max(image) == 0:
-            print(
-                "Input must be a valid label image with at least one labeled region"
-            )
-            return image
-
-        # Convert image to proper format for regionprops
-        label_image = image.astype(np.int32)
-
-        # Parse the properties list
-        prop_list = [prop.strip() for prop in properties.split(",")]
-
-        # Get region properties
-        if intensity_image:
-            # Use the same image as both label and intensity image # this is wrong
-            regions = skimage.measure.regionprops(
-                label_image, intensity_image=image
-            )
-        else:
-            regions = skimage.measure.regionprops(label_image)
-
-        # Collect property data
-        data = []
-        for region in regions:
-            # Skip regions that are too small
-            if region.area < min_area:
-                continue
-
-            # Get all requested properties
-            region_data = {"label": region.label}
-            for prop in prop_list:
-                try:
-                    value = getattr(region, prop)
-
-                    # Handle different types of properties
-                    if isinstance(value, tuple) or (
-                        isinstance(value, np.ndarray) and value.ndim > 0
-                    ):
-                        # For tuple/array properties like centroid, bbox, etc.
-                        if isinstance(value, tuple):
-                            value = np.array(value)
-
-                        # For each element in the tuple/array
-                        for i, val in enumerate(value):
-                            region_data[f"{prop}_{i}"] = val
-                    else:
-                        # For scalar properties like area, perimeter, etc.
-                        region_data[prop] = value
-                except AttributeError:
-                    print(f"Property '{prop}' not found, skipping")
-                    continue
-
-            data.append(region_data)
-
-        # Create a DataFrame
-        df = pd.DataFrame(data)
-
-        # Store the DataFrame as an attribute of the function
-        extract_region_properties.csv_data = df
-        extract_region_properties.save_csv = True
-        extract_region_properties.no_image_output = (
-            True  # Indicate no image output needed
-        )
-
-        print(f"Extracted properties for {len(data)} regions")
-        return image
-
-    # Monkey patch to handle saving CSV files without creating a new image file
-    try:
-        # Check if ProcessingWorker is imported and available
-        original_process_file = ProcessingWorker.process_file
-
-        # Create a new version that handles saving CSV
-        def process_file_with_csv_export(self, filepath):
-            """Modified process_file function that saves CSV after processing."""
-            result = original_process_file(self, filepath)
-
-            # Check if there's a result and if we should save CSV
-            if isinstance(result, dict) and "processed_file" in result:
-                output_path = result["processed_file"]
-
-                # Check if the processing function had CSV data
-                if (
-                    hasattr(self.processing_func, "save_csv")
-                    and self.processing_func.save_csv
-                    and hasattr(self.processing_func, "csv_data")
-                ):
-
-                    # Get the CSV data
-                    df = self.processing_func.csv_data
-
-                    # For functions that don't need an image output, use the original filepath
-                    # as the base for the CSV filename
-                    if (
-                        hasattr(self.processing_func, "no_image_output")
-                        and self.processing_func.no_image_output
-                    ):
-                        # Use the original filepath without creating a new image file
-                        base_path = os.path.splitext(filepath)[0]
-                        csv_path = f"{base_path}_regionprops.csv"
-
-                        # Don't save a duplicate image file
-                        if (
-                            os.path.exists(output_path)
-                            and output_path != filepath
-                        ):
-                            contextlib.suppress(OSError)
-                    else:
-                        # Create CSV filename from the output image path
-                        csv_path = (
-                            os.path.splitext(output_path)[0]
-                            + "_regionprops.csv"
-                        )
-
-                    # Save the CSV file
-                    df.to_csv(csv_path, index=False)
-                    print(f"Saved region properties to {csv_path}")
-
-                    # Add the CSV file to the result
-                    result["secondary_files"] = [csv_path]
-
-                    # If we don't need an image output, update the result to just point to the CSV
-                    if (
-                        hasattr(self.processing_func, "no_image_output")
-                        and self.processing_func.no_image_output
-                    ):
-                        result["processed_file"] = csv_path
-
-            return result
-
-        # Apply the monkey patch
-        ProcessingWorker.process_file = process_file_with_csv_export
-
-    except (NameError, AttributeError) as e:
-        print(f"Warning: Could not apply CSV export patch: {e}")
-        print(
-            "Region properties will be extracted but CSV files may not be saved"
-        )
+    # Note: Old "Extract Region Properties" function removed
+    # Use "Extract Regionprops to CSV" from regionprops_analysis.py instead
+    # which properly handles multi-dimensional data (T, C, Z dimensions)
+    # and creates a single CSV for all images in a folder
 
 else:
     # Export stub functions that raise ImportError when called
