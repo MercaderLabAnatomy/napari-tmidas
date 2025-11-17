@@ -3,6 +3,7 @@ import numpy as np
 
 from napari_tmidas.processing_functions.skimage_filters import (
     adaptive_threshold_bright,
+    equalize_histogram,
     invert_image,
     percentile_threshold,
     rolling_ball_background,
@@ -140,3 +141,119 @@ class TestBrightRegionExtraction:
 
         assert result.shape == image.shape
         assert result.dtype == np.uint8
+
+
+class TestCLAHE:
+    """Test suite for CLAHE (Contrast Limited Adaptive Histogram Equalization)"""
+
+    def test_clahe_basic(self):
+        """Test basic CLAHE functionality"""
+        # Create a dark image with weak bright features
+        image = np.zeros((100, 100), dtype=np.float32)
+        image[40:60, 40:60] = 0.1  # Weak bright region
+
+        result = equalize_histogram(image)
+
+        # Output should be same shape
+        assert result.shape == image.shape
+        # Output should be normalized to [0, 1] range
+        assert result.min() >= 0
+        assert result.max() <= 1
+        # Contrast should be enhanced (std deviation should increase)
+        assert result.std() > image.std()
+
+    def test_clahe_dark_with_membranes(self):
+        """Test CLAHE on dark images with weak bright membranes (the use case that failed)"""
+        # Create a realistic dark image with weak membrane-like structures
+        np.random.seed(42)
+        image = np.random.normal(0.05, 0.01, (200, 200))  # Dark background
+        image = np.clip(image, 0, 1)
+
+        # Add weak membrane-like structures
+        image[50:55, :] += 0.1  # Horizontal membrane
+        image[:, 100:105] += 0.1  # Vertical membrane
+        image = np.clip(image, 0, 1)
+
+        result = equalize_histogram(image, clip_limit=0.01)
+
+        # Should not produce black image
+        assert result.max() > 0.1, "CLAHE should not produce near-black images"
+        # Should enhance contrast
+        assert result.std() > image.std()
+        # Membranes should be more visible (higher values)
+        membrane_region = result[50:55, :]
+        background_region = result[10:20, 10:20]
+        assert membrane_region.mean() > background_region.mean()
+
+    def test_clahe_custom_kernel_size(self):
+        """Test CLAHE with custom kernel size"""
+        image = np.random.rand(256, 256)
+
+        result = equalize_histogram(image, kernel_size=64)
+
+        assert result.shape == image.shape
+        assert result.min() >= 0
+        assert result.max() <= 1
+
+    def test_clahe_auto_kernel_size(self):
+        """Test CLAHE with automatic kernel size calculation"""
+        # Small image
+        small_image = np.random.rand(128, 128)
+        result_small = equalize_histogram(small_image, kernel_size=0)
+        assert result_small.shape == small_image.shape
+
+        # Large image
+        large_image = np.random.rand(1024, 1024)
+        result_large = equalize_histogram(large_image, kernel_size=0)
+        assert result_large.shape == large_image.shape
+
+    def test_clahe_different_clip_limits(self):
+        """Test CLAHE with different clip limit values"""
+        image = np.random.rand(100, 100) * 0.2  # Dark image
+
+        # Low clip limit (less contrast enhancement)
+        result_low = equalize_histogram(image, clip_limit=0.005)
+
+        # High clip limit (more contrast enhancement)
+        result_high = equalize_histogram(image, clip_limit=0.05)
+
+        # Both should enhance contrast compared to original
+        assert result_low.std() > image.std()
+        assert result_high.std() > image.std()
+        # Higher clip limit typically gives more contrast (but not always guaranteed)
+        assert (
+            result_high.max() >= result_low.max() * 0.8
+        )  # Allow some tolerance
+
+    def test_clahe_3d_image(self):
+        """Test CLAHE on 3D image (should work on last 2 dimensions)"""
+        # Create 3D image (e.g., time series or z-stack)
+        image_3d = np.random.rand(10, 100, 100) * 0.3
+
+        result = equalize_histogram(image_3d)
+
+        assert result.shape == image_3d.shape
+        # Each slice should be enhanced independently
+        assert result.std() > image_3d.std()
+
+    def test_clahe_preserves_dtype(self):
+        """Test that CLAHE preserves the original dtype"""
+        # Test uint8
+        img_uint8 = np.random.randint(0, 256, (100, 100), dtype=np.uint8)
+        result_uint8 = equalize_histogram(img_uint8)
+        assert result_uint8.dtype == np.uint8
+        assert result_uint8.max() <= 255
+        assert result_uint8.min() >= 0
+
+        # Test uint16
+        img_uint16 = np.random.randint(0, 65536, (100, 100), dtype=np.uint16)
+        result_uint16 = equalize_histogram(img_uint16)
+        assert result_uint16.dtype == np.uint16
+        assert result_uint16.max() <= 65535
+
+        # Test float32
+        img_float32 = np.random.rand(100, 100).astype(np.float32)
+        result_float32 = equalize_histogram(img_float32)
+        assert result_float32.dtype == np.float32
+        assert result_float32.max() <= 1.0
+        assert result_float32.min() >= 0.0
