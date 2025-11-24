@@ -217,13 +217,23 @@ class ColocalizationWorker(QThread):
                     f"{self.channel_names[0]}_label_id",
                 ]
 
+                # Add c2_label_id column if in individual mode
+                if (
+                    self.size_method == "individual"
+                    and self.channel2_is_labels
+                ):
+                    header.append(f"{self.channel_names[1]}_label_id")
+
                 # Add Channel 2 columns based on whether it's labels or intensity
                 if self.channel2_is_labels:
-                    header.append(
-                        f"{self.channel_names[1]}_in_{self.channel_names[0]}_count"
-                    )
+                    if self.size_method != "individual":
+                        # Aggregate mode: add count of C2 labels in C1
+                        header.append(
+                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_count"
+                        )
+                    # Individual mode: no aggregate C2 statistics needed
                 else:
-                    # Channel 2 is intensity
+                    # Channel 2 is intensity: add intensity statistics
                     header.extend(
                         [
                             f"{self.channel_names[1]}_in_{self.channel_names[0]}_mean",
@@ -236,9 +246,13 @@ class ColocalizationWorker(QThread):
                 if self.get_sizes:
                     header.append(f"{self.channel_names[0]}_size")
                     if self.channel2_is_labels:
-                        header.append(
-                            f"{self.channel_names[1]}_in_{self.channel_names[0]}_size"
-                        )
+                        if self.size_method == "individual":
+                            # Individual mode: one row per c2 label with its size
+                            header.append(f"{self.channel_names[1]}_size")
+                        else:
+                            header.append(
+                                f"{self.channel_names[1]}_in_{self.channel_names[0]}_size"
+                            )
 
                 if len(self.channel_names) == 3:
                     if self.channel2_is_labels and self.channel3_is_labels:
@@ -251,12 +265,18 @@ class ColocalizationWorker(QThread):
                         )
 
                         if self.get_sizes:
-                            header.extend(
-                                [
-                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_size",
-                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_size",
-                                ]
-                            )
+                            if self.size_method == "individual":
+                                # Individual mode: c3 size within each c2 label
+                                header.append(
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_size"
+                                )
+                            else:
+                                header.extend(
+                                    [
+                                        f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_size",
+                                        f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_size",
+                                    ]
+                                )
 
                         # Add positive counting columns if requested
                         if self.count_c2_positive_for_c3:
@@ -271,18 +291,29 @@ class ColocalizationWorker(QThread):
                         self.channel2_is_labels and not self.channel3_is_labels
                     ):
                         # Ch2 is labels, Ch3 is intensity
-                        header.extend(
-                            [
-                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_mean",
-                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_median",
-                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_std",
-                                f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_max",
-                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_mean",
-                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_median",
-                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_std",
-                                f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_max",
-                            ]
-                        )
+                        if self.size_method == "individual":
+                            # Individual mode: intensity statistics per c2 label
+                            header.extend(
+                                [
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_mean",
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_median",
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_std",
+                                ]
+                            )
+                        else:
+                            # Aggregate statistics (original behavior)
+                            header.extend(
+                                [
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_mean",
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_median",
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_std",
+                                    f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_max",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_mean",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_in_{self.channel_names[0]}_median",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_std",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_max",
+                                ]
+                            )
 
                         # Add positive counting columns if requested
                         if self.count_positive:
@@ -478,7 +509,7 @@ class ColocalizationWorker(QThread):
         results = []
 
         for label_id in label_ids:
-            row = self.process_single_roi(
+            row_or_rows = self.process_single_roi(
                 filename,
                 label_id,
                 image_c1,
@@ -488,9 +519,23 @@ class ColocalizationWorker(QThread):
                 image_c2_intensity,
                 image_c3_intensity,
             )
-            csv_rows.append(row)
 
-            # Extract results as dictionary
+            # Check if we got multiple rows (individual mode) or single row
+            if len(row_or_rows) == 0:
+                # No rows returned (e.g., no C2 labels in this C1 ROI in individual mode)
+                continue
+            elif isinstance(row_or_rows[0], list):
+                # Multiple rows returned (one per c2 label)
+                for row in row_or_rows:
+                    csv_rows.append(row)
+                    # For individual mode, skip creating result_dict (simplified visualization)
+                continue
+            else:
+                # Single row returned
+                row = row_or_rows
+                csv_rows.append(row)
+
+            # Extract results as dictionary (only for non-individual mode)
             result_dict = {"label_id": label_id, "ch2_in_ch1_count": row[2]}
 
             idx = 3
@@ -582,9 +627,37 @@ class ColocalizationWorker(QThread):
         image_c2_intensity=None,
         image_c3_intensity=None,
     ):
-        """Process a single ROI for colocalization analysis."""
+        """Process a single ROI for colocalization analysis.
+
+        Returns:
+            list or list of lists: Single row for non-individual mode,
+                                  list of rows (one per c2 label) for individual mode
+        """
         # Create masks once
         mask_roi = image_c1 == label_id
+
+        # Check if we should create individual rows for each c2 label
+        if (
+            self.size_method == "individual"
+            and self.channel2_is_labels
+            and (
+                image_c3 is not None
+                and not self.channel3_is_labels
+                or self.get_sizes
+            )
+        ):
+            # Individual mode: return one row per c2 label
+            return self._process_individual_c2_labels(
+                filename,
+                label_id,
+                image_c1,
+                image_c2,
+                image_c3,
+                roi_sizes,
+                mask_roi,
+                image_c2_intensity,
+                image_c3_intensity,
+            )
 
         # Build the result row
         row = [filename, int(label_id)]
@@ -620,6 +693,7 @@ class ColocalizationWorker(QThread):
             row.append(size)
 
             if self.channel2_is_labels:
+                # Calculate aggregate size (non-individual mode handles this)
                 c2_in_c1_size = self.calculate_coloc_size(
                     image_c1, image_c2, label_id
                 )
@@ -646,6 +720,7 @@ class ColocalizationWorker(QThread):
 
                 # Add size information for third channel if requested
                 if self.get_sizes:
+                    # Calculate aggregate sizes (non-individual mode)
                     c3_in_c2_in_c1_size = self.calculate_coloc_size(
                         image_c1,
                         image_c2,
@@ -685,6 +760,7 @@ class ColocalizationWorker(QThread):
                     else image_c3
                 )
 
+                # Calculate aggregate intensity statistics (non-individual mode)
                 # Calculate intensity where c2 is present in c1
                 mask_c2_in_c1 = mask_roi & mask_c2
                 stats_c2_in_c1 = self.calculate_intensity_stats(
@@ -921,6 +997,163 @@ class ColocalizationWorker(QThread):
         }
 
         return stats
+
+    def _process_individual_c2_labels(
+        self,
+        filename,
+        c1_label_id,
+        image_c1,
+        image_c2,
+        image_c3,
+        roi_sizes,
+        mask_roi,
+        image_c2_intensity,
+        image_c3_intensity,
+    ):
+        """
+        Process each C2 label individually, returning one row per C2 label.
+
+        Returns:
+            list of lists: One row per C2 label within the C1 ROI
+        """
+        # Get all unique Channel 2 objects in the ROI
+        c2_in_roi = image_c2 * mask_roi
+        c2_labels = np.unique(c2_in_roi)
+        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+        if len(c2_labels) == 0:
+            # No c2 labels in this ROI, return empty list (no rows)
+            return []
+
+        rows = []
+        c1_size = (
+            roi_sizes.get(int(c1_label_id), 0) if self.get_sizes else None
+        )
+
+        for c2_label in sorted(c2_labels):
+            # Start row with filename, c1_label_id, c2_label_id
+            row = [filename, int(c1_label_id), int(c2_label)]
+
+            # Get mask for this specific Channel 2 object within the ROI
+            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+
+            # Add size information if requested
+            if self.get_sizes:
+                row.append(c1_size)  # C1 ROI size (same for all c2 labels)
+
+                # C2 label size
+                c2_size = int(np.count_nonzero(mask_c2_obj))
+                row.append(c2_size)
+
+            # Handle C3 channel based on its type
+            if image_c3 is not None:
+                if self.channel3_is_labels:
+                    # C3 is labels: count unique C3 labels in this C2 label
+                    mask_c3 = image_c3 != 0
+                    mask_c3_in_c2 = mask_c2_obj & mask_c3
+                    c3_count = self.count_unique_nonzero(
+                        image_c3, mask_c3_in_c2
+                    )
+                    row.append(c3_count)
+
+                    # Add C3 size if requested
+                    if self.get_sizes:
+                        c3_size = int(np.count_nonzero(mask_c3_in_c2))
+                        row.append(c3_size)
+                else:
+                    # C3 is intensity: calculate intensity statistics in this C2 label
+                    intensity_img = (
+                        image_c3_intensity
+                        if image_c3_intensity is not None
+                        else image_c3
+                    )
+                    intensity_in_obj = intensity_img[mask_c2_obj]
+
+                    if len(intensity_in_obj) > 0:
+                        c3_mean = float(np.mean(intensity_in_obj))
+                        c3_median = float(np.median(intensity_in_obj))
+                        c3_std = float(np.std(intensity_in_obj))
+                    else:
+                        c3_mean = 0.0
+                        c3_median = 0.0
+                        c3_std = 0.0
+
+                    row.extend([c3_mean, c3_median, c3_std])
+
+            rows.append(row)
+
+        return rows
+
+    def calculate_individual_c2_intensities(
+        self, image_c2, intensity_c3, mask_roi
+    ):
+        """
+        Calculate individual Channel 3 intensity values for each Channel 2 label.
+
+        Args:
+            image_c2: Label image of Channel 2 (e.g., nuclei)
+            intensity_c3: Intensity image of Channel 3
+            mask_roi: Boolean mask for the ROI from Channel 1
+
+        Returns:
+            dict: Dictionary mapping c2_label_id -> intensity value (mean of c3 in that c2 label)
+        """
+        # Get all unique Channel 2 objects in the ROI
+        c2_in_roi = image_c2 * mask_roi
+        c2_labels = np.unique(c2_in_roi)
+        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+        individual_values = {}
+        for c2_label in c2_labels:
+            # Get mask for this specific Channel 2 object within the ROI
+            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+
+            # Get intensity values of Channel 3 in this Channel 2 object
+            intensity_in_obj = intensity_c3[mask_c2_obj]
+
+            if len(intensity_in_obj) > 0:
+                # Use mean intensity as the representative value for this c2 label
+                individual_values[int(c2_label)] = float(
+                    np.mean(intensity_in_obj)
+                )
+            else:
+                individual_values[int(c2_label)] = 0.0
+
+        return individual_values
+
+    def calculate_individual_c2_sizes(self, image_c2, mask_roi, image_c3=None):
+        """
+        Calculate individual sizes for each Channel 2 label within the ROI.
+
+        Args:
+            image_c2: Label image of Channel 2
+            mask_roi: Boolean mask for the ROI from Channel 1
+            image_c3: Optional Channel 3 image (if provided, calculate c3 size within each c2 label)
+
+        Returns:
+            dict: Dictionary mapping c2_label_id -> size (pixel count)
+        """
+        # Get all unique Channel 2 objects in the ROI
+        c2_in_roi = image_c2 * mask_roi
+        c2_labels = np.unique(c2_in_roi)
+        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+
+        individual_sizes = {}
+        for c2_label in c2_labels:
+            # Get mask for this specific Channel 2 object within the ROI
+            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+
+            if image_c3 is not None:
+                # Calculate c3 size within this c2 label
+                mask_with_c3 = mask_c2_obj & (image_c3 != 0)
+                size = int(np.count_nonzero(mask_with_c3))
+            else:
+                # Calculate c2 label size
+                size = int(np.count_nonzero(mask_c2_obj))
+
+            individual_sizes[int(c2_label)] = size
+
+        return individual_sizes
 
     def count_positive_objects(
         self,
@@ -1278,6 +1511,7 @@ class ColocalizationAnalysisWidget(QWidget):
 
         # Get sizes option
         self.get_sizes_checkbox = QCheckBox("Calculate Region Sizes")
+        self.get_sizes_checkbox.toggled.connect(self._on_get_sizes_changed)
         options_layout.addRow(self.get_sizes_checkbox)
 
         # Save images option
@@ -1297,18 +1531,30 @@ class ColocalizationAnalysisWidget(QWidget):
         self.size_method_median = QCheckBox("Median")
         self.size_method_median.setChecked(True)
         self.size_method_sum = QCheckBox("Sum")
+        self.size_method_individual = QCheckBox("Individual")
+        self.size_method_individual.setToolTip(
+            "Report individual values for each Channel 2 label\n"
+            "instead of aggregating (median/sum) across all labels."
+        )
 
         # Connect to make them mutually exclusive
         self.size_method_median.toggled.connect(
             lambda checked: (
-                self.size_method_sum.setChecked(not checked)
+                self._update_size_method_checkboxes("median", checked)
                 if checked
                 else None
             )
         )
         self.size_method_sum.toggled.connect(
             lambda checked: (
-                self.size_method_median.setChecked(not checked)
+                self._update_size_method_checkboxes("sum", checked)
+                if checked
+                else None
+            )
+        )
+        self.size_method_individual.toggled.connect(
+            lambda checked: (
+                self._update_size_method_checkboxes("individual", checked)
                 if checked
                 else None
             )
@@ -1317,7 +1563,11 @@ class ColocalizationAnalysisWidget(QWidget):
         self.size_method_layout.addWidget(self.size_method_label)
         self.size_method_layout.addWidget(self.size_method_median)
         self.size_method_layout.addWidget(self.size_method_sum)
+        self.size_method_layout.addWidget(self.size_method_individual)
         options_layout.addRow(self.size_method_layout)
+
+        # Initially disable size method controls
+        self._update_size_method_controls_state()
 
         # Channel 2 mode selection
         self.ch2_is_labels_checkbox = QCheckBox(
@@ -1558,6 +1808,32 @@ class ColocalizationAnalysisWidget(QWidget):
         if folder:
             self.output_folder.setText(folder)
 
+    def _update_size_method_checkboxes(self, selected, checked):
+        """Make size method checkboxes mutually exclusive"""
+        if not checked:
+            return
+        if selected == "median":
+            self.size_method_sum.setChecked(False)
+            self.size_method_individual.setChecked(False)
+        elif selected == "sum":
+            self.size_method_median.setChecked(False)
+            self.size_method_individual.setChecked(False)
+        elif selected == "individual":
+            self.size_method_median.setChecked(False)
+            self.size_method_sum.setChecked(False)
+
+    def _on_get_sizes_changed(self, checked):
+        """Enable/disable size method controls based on get_sizes checkbox"""
+        self._update_size_method_controls_state()
+
+    def _update_size_method_controls_state(self):
+        """Update the enabled state of size method controls"""
+        enabled = self.get_sizes_checkbox.isChecked()
+        self.size_method_label.setEnabled(enabled)
+        self.size_method_median.setEnabled(enabled)
+        self.size_method_sum.setEnabled(enabled)
+        self.size_method_individual.setEnabled(enabled)
+
     def on_ch2_mode_changed(self, checked):
         """Handle channel 2 mode change (labels vs intensity)"""
         # When ch2 is intensity, positive counting doesn't apply
@@ -1720,9 +1996,17 @@ class ColocalizationAnalysisWidget(QWidget):
         # Get settings
         get_sizes = self.get_sizes_checkbox.isChecked()
         save_images = self.save_images_checkbox.isChecked()
-        size_method = (
-            "median" if self.size_method_median.isChecked() else "sum"
-        )
+
+        # Determine size method
+        if self.size_method_median.isChecked():
+            size_method = "median"
+        elif self.size_method_sum.isChecked():
+            size_method = "sum"
+        elif self.size_method_individual.isChecked():
+            size_method = "individual"
+        else:
+            size_method = "median"  # Default fallback
+
         output_folder = self.output_folder.text().strip()
 
         # Get new settings for channel mode and positive counting
