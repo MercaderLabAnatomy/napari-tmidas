@@ -28,6 +28,7 @@ dependencies = [
     "tqdm",
     "qtpy",
     "scikit-image>=0.19.0",
+    "scikit-learn-extra>=0.3.0",
     "pyqt5",
     "zarr",
     "ome-zarr",
@@ -56,6 +57,9 @@ testing = [
     "napari",
     "pyqt5",
     "psygnal>=0.8.0",
+]
+clustering = [
+    "scikit-learn-extra>=0.3.0",
 ]
 
 [project.entry-points."napari.manifest"]
