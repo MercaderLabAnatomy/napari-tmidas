@@ -143,10 +143,6 @@ class ProcessingWorker(QThread):
             else:
                 image_dtype = np.float32
 
-            print(
-                f"Original image shape: {image.shape if hasattr(image, 'shape') else 'unknown'}, dtype: {image_dtype}"
-            )
-
             # Check if this is a folder-processing function that shouldn't save individual files
             function_name = getattr(
                 self.processing_func, "__name__", "unknown"
@@ -154,7 +150,14 @@ class ProcessingWorker(QThread):
             is_folder_function = function_name in [
                 "merge_timepoints",
                 "track_objects",
+                "create_grid_overlay",  # Grid overlay processes all files at once
             ]
+
+            # Only print verbose output for non-folder functions
+            if not is_folder_function:
+                print(
+                    f"Original image shape: {image.shape if hasattr(image, 'shape') else 'unknown'}, dtype: {image_dtype}"
+                )
 
             # Apply the processing function with parameters
             if self.param_values:
