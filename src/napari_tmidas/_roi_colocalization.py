@@ -300,6 +300,8 @@ class ColocalizationWorker(QThread):
                                     f"{self.channel_names[2]}_in_{self.channel_names[1]}_std",
                                 ]
                             )
+                            # Note: positive counting is not available in individual mode
+                            # Individual mode provides per-label statistics, not aggregate counts
                         else:
                             # Aggregate statistics (original behavior)
                             header.extend(
@@ -315,16 +317,16 @@ class ColocalizationWorker(QThread):
                                 ]
                             )
 
-                        # Add positive counting columns if requested
-                        if self.count_positive:
-                            header.extend(
-                                [
-                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_positive_for_{self.channel_names[2]}_count",
-                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_negative_for_{self.channel_names[2]}_count",
-                                    f"{self.channel_names[1]}_in_{self.channel_names[0]}_percent_positive_for_{self.channel_names[2]}",
-                                    f"{self.channel_names[2]}_threshold_used",
-                                ]
-                            )
+                            # Add positive counting columns if requested (only in aggregate mode)
+                            if self.count_positive:
+                                header.extend(
+                                    [
+                                        f"{self.channel_names[1]}_in_{self.channel_names[0]}_positive_for_{self.channel_names[2]}_count",
+                                        f"{self.channel_names[1]}_in_{self.channel_names[0]}_negative_for_{self.channel_names[2]}_count",
+                                        f"{self.channel_names[1]}_in_{self.channel_names[0]}_percent_positive_for_{self.channel_names[2]}",
+                                        f"{self.channel_names[2]}_threshold_used",
+                                    ]
+                                )
                     elif (
                         not self.channel2_is_labels and self.channel3_is_labels
                     ):
@@ -436,6 +438,17 @@ class ColocalizationWorker(QThread):
             image_c1 = tifffile.imread(filepath_c1)
             image_c2 = tifffile.imread(filepath_c2)
             image_c3 = tifffile.imread(filepath_c3) if filepath_c3 else None
+
+            # Debugging: Check if images are identical (possible file selection error)
+            if image_c3 is not None and np.array_equal(image_c2, image_c3):
+                print(
+                    "WARNING: Channel 2 and Channel 3 contain IDENTICAL data!"
+                )
+                print(f"  C2 file: {os.path.basename(filepath_c2)}")
+                print(f"  C3 file: {os.path.basename(filepath_c3)}")
+                print(
+                    "  This likely indicates the same file was selected for both channels."
+                )
 
             # Ensure all images have the same shape
             if image_c1.shape != image_c2.shape:
@@ -1530,11 +1543,22 @@ class ColocalizationAnalysisWidget(QWidget):
         self.size_method_label = QLabel("Size Calculation Method:")
         self.size_method_median = QCheckBox("Median")
         self.size_method_median.setChecked(True)
+        self.size_method_median.setToolTip(
+            "Aggregate mode: One row per C1 ROI\n"
+            "Size = median size of C2 objects in this C1 ROI"
+        )
         self.size_method_sum = QCheckBox("Sum")
+        self.size_method_sum.setToolTip(
+            "Aggregate mode: One row per C1 ROI\n"
+            "Size = total size of all C2 objects in this C1 ROI"
+        )
         self.size_method_individual = QCheckBox("Individual")
         self.size_method_individual.setToolTip(
-            "Report individual values for each Channel 2 label\n"
-            "instead of aggregating (median/sum) across all labels."
+            "Individual mode: One row per C2 object (not per C1 ROI)\n"
+            "Each C2 label gets its own row with individual stats.\n"
+            "\n"
+            "Note: Positive counting is disabled in Individual mode.\n"
+            "You get per-object C3 mean/median/std values instead."
         )
 
         # Connect to make them mutually exclusive
@@ -1574,6 +1598,13 @@ class ColocalizationAnalysisWidget(QWidget):
             "Channel 2 is Labels (uncheck for intensity)"
         )
         self.ch2_is_labels_checkbox.setChecked(True)
+        self.ch2_is_labels_checkbox.setToolTip(
+            "Check: C2 contains labeled objects (e.g., nuclei segmentation)\n"
+            "  → Counts C2 objects in C1 ROIs\n"
+            "\n"
+            "Uncheck: C2 contains intensity values (e.g., fluorescence)\n"
+            "  → Calculates C2 intensity statistics in C1 ROIs"
+        )
         self.ch2_is_labels_checkbox.toggled.connect(self.on_ch2_mode_changed)
         options_layout.addRow(self.ch2_is_labels_checkbox)
 
@@ -1585,6 +1616,22 @@ class ColocalizationAnalysisWidget(QWidget):
         self.ch3_is_labels_checkbox.setEnabled(
             False
         )  # Disabled until ch3 folder is set
+        self.ch3_is_labels_checkbox.setToolTip(
+            "COMMON MODES:\n"
+            "\n"
+            "C2=Labels + C3=Intensity (UNCHECKED):\n"
+            "  → Measures C3 intensity within C2 objects\n"
+            "  → Also measures C3 where C2 doesn't exist\n"
+            "  → Use Individual mode for per-C2-object stats\n"
+            "  → Use Aggregate + Count Positive to threshold C2 objects\n"
+            "\n"
+            "C2=Labels + C3=Labels (CHECKED):\n"
+            "  → Counts C3 objects within C2 objects\n"
+            "  → Counts C3 objects outside C2 but in C1\n"
+            "\n"
+            "C2=Intensity + C3=Intensity (UNCHECKED):\n"
+            "  → Measures both C2 and C3 intensity in C1 ROIs"
+        )
         self.ch3_is_labels_checkbox.toggled.connect(self.on_ch3_mode_changed)
         options_layout.addRow(self.ch3_is_labels_checkbox)
 
@@ -1632,9 +1679,19 @@ class ColocalizationAnalysisWidget(QWidget):
 
         # Positive counting option (only for intensity mode)
         self.count_positive_checkbox = QCheckBox(
-            "Count Positive Objects (Ch3 signal in Ch2)"
+            "Count Positive C2 Objects (Aggregate mode only)"
         )
         self.count_positive_checkbox.setEnabled(False)  # Disabled initially
+        self.count_positive_checkbox.setToolTip(
+            "Available when: C2 is labels AND C3 is intensity AND aggregate mode\n"
+            "\n"
+            "Counts how many C2 objects are 'positive' for C3 signal based on\n"
+            "mean C3 intensity within each C2 object vs. threshold.\n"
+            "\n"
+            "Outputs: positive_count, negative_count, percent_positive, threshold\n"
+            "\n"
+            "Note: Individual mode provides per-object C3 stats instead of counts."
+        )
         self.count_positive_checkbox.toggled.connect(
             self.on_count_positive_changed
         )

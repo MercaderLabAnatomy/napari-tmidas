@@ -1490,6 +1490,7 @@ class ProcessingWorker(QThread):
                 "timepoint" in function_name.lower()
                 or "merge" in function_name.lower()
                 or "folder" in function_name.lower()
+                or "grid" in function_name.lower()
             )
 
             # Convert dask array to numpy for processing functions that don't support dask
@@ -2138,6 +2139,7 @@ class FileResultsWidget(QWidget):
             "folder" in function_name.lower()
             or "timepoint" in function_name.lower()
             or "merge" in function_name.lower()
+            or "grid" in function_name.lower()
             or "folder" in description.lower()
             or "cellpose" in description.lower()
             or "careamics" in description.lower()
@@ -2319,6 +2321,40 @@ class FileResultsWidget(QWidget):
         self.viewer.status = (
             f"Completed processing {len(self.processed_files_info)} files"
         )
+
+        # For grid overlay function, load and display the result
+        if hasattr(self, "processing_selector"):
+            function_name = self.processing_selector.currentText()
+            if "grid" in function_name.lower():
+                # Import here to avoid circular dependency
+                try:
+                    from napari_tmidas.processing_functions.grid_view_overlay import (
+                        _grid_output_path,
+                    )
+
+                    if _grid_output_path:
+                        import numpy as np
+                        from PIL import Image
+
+                        # Load PNG image
+                        grid_image = np.array(Image.open(_grid_output_path))
+
+                        # Add to viewer
+                        self.viewer.add_image(
+                            grid_image,
+                            name=f"Grid Overlay ({len(self.file_list)} pairs)",
+                            rgb=True,
+                        )
+                        print("\n✨ Grid overlay added to napari viewer!")
+
+                        # Reset the grid cache for next run
+                        from napari_tmidas.processing_functions.grid_view_overlay import (
+                            reset_grid_cache,
+                        )
+
+                        reset_grid_cache()
+                except (FileNotFoundError, OSError, ValueError) as e:
+                    print(f"Could not load grid overlay: {e}")
 
     def processing_error(self, filepath, error_msg):
         """Handle processing errors"""
