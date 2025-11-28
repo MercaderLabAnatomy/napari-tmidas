@@ -3344,6 +3344,12 @@ def create_crop_widget(processor):
             )
 
     def on_next_clicked():
+        # Check if we can move to the next image before clearing prompts
+        if processor.current_index >= len(processor.images) - 1:
+            next_button.setEnabled(False)
+            status_label.setText("No more images. Processing complete.")
+            return
+
         # Clear prompts before moving to next image
         on_clear_prompts_clicked()
 
@@ -3358,6 +3364,12 @@ def create_crop_widget(processor):
             processor._ensure_active_prompt_layer()
 
     def on_prev_clicked():
+        # Check if we can move to the previous image before clearing prompts
+        if processor.current_index <= 0:
+            prev_button.setEnabled(False)
+            status_label.setText("Already at the first image.")
+            return
+
         # Clear prompts before moving to previous image
         on_clear_prompts_clicked()
 
