@@ -1842,6 +1842,10 @@ class ColocalizationAnalysisWidget(QWidget):
     def update_ch3_controls(self):
         """Enable/disable channel 3 controls based on whether folder is set"""
         ch3_folder = self.ch3_folder.text().strip()
+        # Expand user path (~/...) and normalize the path
+        if ch3_folder:
+            ch3_folder = os.path.expanduser(ch3_folder)
+            ch3_folder = os.path.abspath(ch3_folder)
         has_ch3 = bool(ch3_folder and os.path.isdir(ch3_folder))
 
         # Enable/disable ch3 checkbox
@@ -1952,6 +1956,17 @@ class ColocalizationAnalysisWidget(QWidget):
 
         ch3_folder = self.ch3_folder.text().strip()
         ch3_pattern = self.ch3_pattern.text().strip() or "*_labels.tif"
+
+        # Expand user paths (~/...) and normalize paths
+        if ch1_folder:
+            ch1_folder = os.path.expanduser(ch1_folder)
+            ch1_folder = os.path.abspath(ch1_folder)
+        if ch2_folder:
+            ch2_folder = os.path.expanduser(ch2_folder)
+            ch2_folder = os.path.abspath(ch2_folder)
+        if ch3_folder:
+            ch3_folder = os.path.expanduser(ch3_folder)
+            ch3_folder = os.path.abspath(ch3_folder)
 
         # Validate required folders
         if not ch1_folder or not os.path.isdir(ch1_folder):
@@ -2118,6 +2133,17 @@ class ColocalizationAnalysisWidget(QWidget):
         ch1_folder = self.ch1_folder.text().strip()
         ch2_folder = self.ch2_folder.text().strip()
         ch3_folder = self.ch3_folder.text().strip()
+
+        # Expand paths for consistent handling
+        if ch1_folder:
+            ch1_folder = os.path.expanduser(ch1_folder)
+            ch1_folder = os.path.abspath(ch1_folder)
+        if ch2_folder:
+            ch2_folder = os.path.expanduser(ch2_folder)
+            ch2_folder = os.path.abspath(ch2_folder)
+        if ch3_folder:
+            ch3_folder = os.path.expanduser(ch3_folder)
+            ch3_folder = os.path.abspath(ch3_folder)
 
         active_channel_names = [
             os.path.basename(ch1_folder) if ch1_folder else "CH1",
