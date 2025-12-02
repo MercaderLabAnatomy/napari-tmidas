@@ -52,3 +52,15 @@ class TestWindowsBasic:
         # Test that __version__ is available
         assert hasattr(napari_tmidas, "__version__")
         assert isinstance(napari_tmidas.__version__, str)
+
+        # On Windows CI with skip_install=true, version may be "unknown"
+        # This is expected and acceptable
+        if platform.system() == "Windows" and os.environ.get("CI") == "true":
+            assert (
+                napari_tmidas.__version__ in ["unknown", "0.0.0"]
+                or "+" in napari_tmidas.__version__
+                or napari_tmidas.__version__.startswith("0.")
+            )
+        else:
+            # On other platforms or local development, version should be meaningful
+            assert napari_tmidas.__version__ != "unknown"
