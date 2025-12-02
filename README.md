@@ -91,6 +91,23 @@ The image processing capabilities are powered by several excellent open-source t
 - [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
 - [Spotiflow](https://github.com/weigertlab/spotiflow): Accurate and efficient spot detection for fluorescence microscopy
 
+#### Processing Function Documentation
+
+Detailed documentation for specific processing functions:
+
+**Core Processing**
+- [Basic Processing Functions](docs/basic_processing.md) - Label and intensity operations, channel splitting/merging, time series
+- [Cellpose Segmentation](docs/cellpose_segmentation.md) - Deep learning cell/nucleus segmentation
+- [TrackAstra Tracking](docs/trackastra_tracking.md) - Cell tracking across time-lapse data
+
+**Analysis and Quality Control**
+- [Grid View: Intensity + Labels Overlay](docs/grid_view_overlay.md) - Visual QC for segmentation results
+- [Intensity-Based Label Filtering](docs/intensity_label_filter.md) - Filter labels by signal intensity
+- [Regionprops Analysis](docs/regionprops_analysis.md) - Extract quantitative properties from labels
+
+**Advanced Processing**
+- [Advanced Processing Functions](docs/advanced_processing.md) - Denoising (CAREamics), spot detection (Spotiflow), SciPy/scikit-image filters, compression, colocalization
+
 ### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
 
