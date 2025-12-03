@@ -41,8 +41,8 @@ def test_create_overlay():
     labels[20:40, 20:40] = 1
     labels[60:80, 60:80] = 2
 
-    # Create overlay without downsampling
-    overlay = _create_overlay(intensity, labels)
+    # Create overlay without downsampling (with overlay enabled)
+    overlay = _create_overlay(intensity, labels, show_overlay=True)
 
     # Check output
     assert overlay.shape == (100, 100, 3)
@@ -63,7 +63,9 @@ def test_create_overlay_with_downsampling():
     labels[600:800, 600:800] = 2
 
     # Create overlay with downsampling to 300px
-    overlay = _create_overlay(intensity, labels, target_size=300)
+    overlay = _create_overlay(
+        intensity, labels, target_size=300, show_overlay=True
+    )
 
     # Check output is downsampled
     assert overlay.shape[0] <= 300
@@ -122,3 +124,70 @@ def test_create_grid_empty():
     """Test grid creation with empty list."""
     grid = _create_grid([], grid_cols=4)
     assert grid is None
+
+
+@pytest.mark.skipif(
+    not GRID_OVERLAY_AVAILABLE, reason="Grid overlay function not available"
+)
+def test_create_overlay_intensity_only():
+    """Test overlay creation with intensity only (no label overlay)."""
+    # Create simple test images
+    intensity = np.random.randint(0, 255, (100, 100), dtype=np.uint8)
+    labels = np.zeros((100, 100), dtype=np.uint16)
+    labels[20:40, 20:40] = 1
+    labels[60:80, 60:80] = 2
+
+    # Create overlay with overlay disabled (intensity only)
+    overlay = _create_overlay(intensity, labels, show_overlay=False)
+
+    # Check output - should be grayscale RGB (all channels equal)
+    assert overlay.shape == (100, 100, 3)
+    assert overlay.dtype == np.uint8
+    assert overlay.min() >= 0
+    assert overlay.max() <= 255
+
+    # Check that all channels are equal (grayscale)
+    assert np.array_equal(overlay[:, :, 0], overlay[:, :, 1])
+    assert np.array_equal(overlay[:, :, 1], overlay[:, :, 2])
+
+
+@pytest.mark.skipif(
+    not GRID_OVERLAY_AVAILABLE, reason="Grid overlay function not available"
+)
+def test_create_overlay_with_and_without_labels():
+    """Test that overlay mode creates different outputs with labels."""
+    # Create test images with labels
+    intensity = np.random.randint(0, 255, (100, 100), dtype=np.uint8)
+    labels = np.zeros((100, 100), dtype=np.uint16)
+    labels[20:40, 20:40] = 1
+    labels[60:80, 60:80] = 2
+
+    # Create overlay with labels
+    overlay_with_labels = _create_overlay(intensity, labels, show_overlay=True)
+
+    # Create overlay without labels (intensity only)
+    overlay_intensity_only = _create_overlay(
+        intensity, labels, show_overlay=False
+    )
+
+    # Both should have same shape
+    assert overlay_with_labels.shape == overlay_intensity_only.shape
+
+    # But different content (overlay should have colored regions)
+    # In the intensity-only version, all channels should be equal
+    assert np.array_equal(
+        overlay_intensity_only[:, :, 0], overlay_intensity_only[:, :, 1]
+    )
+
+    # In the overlay version, channels should differ in labeled regions
+    # Check the labeled region [20:40, 20:40]
+    labeled_region_r = overlay_with_labels[20:40, 20:40, 0]
+    labeled_region_g = overlay_with_labels[20:40, 20:40, 1]
+    labeled_region_b = overlay_with_labels[20:40, 20:40, 2]
+
+    # At least one channel pair should differ in the labeled region
+    assert (
+        not np.array_equal(labeled_region_r, labeled_region_g)
+        or not np.array_equal(labeled_region_g, labeled_region_b)
+        or not np.array_equal(labeled_region_r, labeled_region_b)
+    )

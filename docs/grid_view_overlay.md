@@ -2,11 +2,13 @@
 
 ## Overview
 
-The `Grid View: Intensity + Labels Overlay` processing function creates a comprehensive visualization showing intensity images overlaid with their corresponding label boundaries, arranged in a convenient grid layout for quick inspection.
+The `Grid View: Intensity + Labels Overlay` processing function creates a comprehensive visualization showing intensity images with optional label overlay, arranged in a convenient grid layout for quick inspection.
 
 ## Purpose
 
-This function is designed for quality control and visual inspection of segmentation results. Instead of opening each image pair individually, you can generate a single grid image showing all your intensity + label overlays at once.
+This function is designed for quality control and visual inspection of segmentation results. Instead of opening each image pair individually, you can generate a single grid image showing all your images at once. You can choose to display:
+- **Intensity + Label Overlay**: Intensity images with colored label regions for segmentation QC
+- **Intensity Only**: Plain intensity images in a grid layout for quick comparison
 
 ## How It Works
 
@@ -21,19 +23,26 @@ This function is designed for quality control and visual inspection of segmentat
 
 ## Parameters
 
-None - the function automatically handles everything!
+- **label_suffix** (str, default: "_labels.tif"): Suffix pattern to identify label files
+   - Use a suffix like `"_labels.tif"`, `"_segmentation.tif"`, or `"_masks.tif"` to match your label files
+   - **Leave empty (`""`) to create intensity-only grid** without looking for label files
+   - When set, the function will find corresponding label files and create overlays
+   - When empty, the function processes selected files as intensity images directly
 
 ## Usage
 
 ### In napari
 
 1. Open the **Batch Image Processing** widget
-2. Select a folder containing your label images
-3. **Important**: Set the input suffix to match your label files
-   - Example: `_convpaint_labels_filtered.tif`
-   - Example: `_labels.tif`
+2. Select a folder containing your images
+3. **Set the input suffix** to match your files:
+   - For **intensity + labels mode**: Match label files (e.g., `_labels.tif`, `_segmentation.tif`)
+   - For **intensity-only mode**: Match intensity files (e.g., `.tif`, `_processed.tif`)
 4. Choose **"Grid View: Intensity + Labels Overlay"** from the processing function dropdown
-5. Click **Start Batch Processing**
+5. **Configure the `label_suffix` parameter**:
+   - For **intensity + labels**: Enter suffix like `_labels.tif` or `_segmentation.tif` (default: `_labels.tif`)
+   - For **intensity-only grid**: **Leave empty** or clear the field
+6. Click **Start Batch Processing**
 
 The function will only process the files matching your suffix filter, not all label files in the folder.
 
@@ -70,10 +79,18 @@ The corresponding intensity image is found by removing these suffixes.
 - **Channels**: 3-channel RGB blended overlay
 
 ### Visual Interpretation
+
+**With Labels (label_suffix set, e.g., "_labels")**:
 - **Grayscale background**: Normalized intensity signal (brighter = higher intensity)
 - **Colored regions**: Labeled objects with 60% opacity overlay
 - **Each label**: Gets a unique color for easy distinction
 - **Dark areas**: Low intensity and no labeled objects
+- **Use case**: Quality control for segmentation results
+
+**Intensity Only (label_suffix empty)**:
+- **Grayscale images**: Pure intensity images without any label coloring
+- **All channels equal**: RGB image with grayscale content
+- **Use case**: Comparing raw intensity patterns, montage creation, image quality overview
 
 ## Example
 
@@ -89,16 +106,45 @@ folder/
 ```
 
 ### Processing
+
+**Example 1: Intensity + Label Overlay (default)**
 ```
-Suffix filter: _labels.tif
+Input suffix: _labels.tif
 Selected function: Grid View: Intensity + Labels Overlay
+label_suffix: _labels.tif
 ```
 
-### Output
-- Single image: `sample1_grid_overlay.png` (PNG format)
-- Grid layout: Auto-sized (2 columns for 3 images)
-- Each cell shows one intensity + labels overlay
-- Ready to insert into papers/presentations
+Output: `sample1_grid_overlay.png` with colored label regions overlaid on intensity images
+
+**Example 2: Intensity Only Grid**
+```
+Input suffix: .tif
+Selected function: Grid View: Intensity + Labels Overlay
+label_suffix: (empty/cleared)
+```
+
+Output: `sample1_grid_overlay.png` with grayscale intensity images only
+
+**Example 3: Custom Label Suffix**
+```
+Input suffix: _segmentation.tif
+Selected function: Grid View: Intensity + Labels Overlay
+label_suffix: _segmentation.tif
+```
+
+Output: Grid with custom segmentation overlays
+
+### Output Details
+- **File Format**: Compressed TIF image (8-bit RGB, zlib compression)
+- **Filename**: `<first_file_name>_grid_overlay.tif`
+- **Location**:
+   - If output folder is specified in the batch processing widget → saves there
+   - If output folder is blank → saves in the **parent directory** of the input folder
+- **Grid Layout**: Auto-sized square grid based on image count
+- **Content**: Each cell shows either intensity + labels overlay OR intensity only (depending on parameter)
+- **Notification**: Output path is displayed in console with visual separator and shown in a GUI message box upon completion
+- Compressed format reduces file size while maintaining quality
+- Ideal for viewing in napari
 
 ## Tips
 

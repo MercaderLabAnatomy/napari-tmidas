@@ -2,7 +2,7 @@
 Example: Create Grid View of Intensity + Labels Overlay
 
 This example demonstrates how to create a grid visualization showing
-intensity images overlaid with their corresponding label boundaries.
+intensity images with optional label overlay.
 """
 
 
@@ -20,14 +20,24 @@ def main():
 
     print("\nUsage:")
     print("1. Use the Batch Image Processing widget in napari")
-    print("2. Select a folder and suffix for label images")
-    print("   Example: suffix = '_labels_filtered.tif'")
+    print("2. Select a folder and suffix for your files")
+    print(
+        "   - Overlay mode: suffix matches label files (e.g., '_labels_filtered.tif')"
+    )
+    print("   - Intensity only: suffix matches intensity files (e.g., '.tif')")
     print('3. Choose "Grid View: Intensity + Labels Overlay" function')
-    print("4. Run batch processing")
+    print("4. In the parameter panel (right side):")
+    print(
+        "   - Set `label_suffix` to match label files (default '_labels.tif')"
+    )
+    print("   - Clear `label_suffix` to create an intensity-only grid")
+    print("5. Run batch processing")
     print("\nOutput:")
-    print("- Single RGB image showing all selected overlays in a grid")
-    print("- Green channel: intensity values")
-    print("- Magenta boundaries: label edges")
+    print("- Single RGB image showing all selected images in a grid")
+    print(
+        "- With overlay: grayscale intensity + colored label regions (60% opacity)"
+    )
+    print("- Without overlay: grayscale intensity images only")
     print("- Grid columns automatically sized based on image count")
 
     print("\nExpected file structure:")
@@ -40,12 +50,15 @@ def main():
 
     # Show what the function does
     print("\nFunction behavior:")
-    print("- Scans folder for all label files (*_labels*.tif)")
-    print("- Finds corresponding intensity images (removes label suffix)")
+    print("- Scans folder for files matching the suffix filter")
     print(
-        "- Creates overlay for each pair (green=intensity, magenta=boundaries)"
+        "- If `label_suffix` is set: finds labels + matching intensity images"
     )
-    print("- Arranges overlays in a grid")
+    print("- If `label_suffix` is empty: uses intensity files directly")
+    print("- Creates visualization for each file/pair:")
+    print("  * Overlay mode: grayscale intensity + colored label regions")
+    print("  * Intensity-only mode: grayscale intensity only")
+    print("- Arranges images in a grid")
     print("- Returns single RGB image for easy inspection")
 
 
