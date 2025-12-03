@@ -42,20 +42,28 @@ def _get_intensity_filename(label_filename: str) -> str:
     str
         Intensity image filename
     """
-    # Remove common label suffixes
+    # Remove common label suffixes (handle both with and without .tif extension)
     suffixes_to_remove = [
         "_convpaint_labels_filtered.tif",
         "_labels_filtered.tif",
         "_labels.tif",
         "_intensity_filtered.tif",
+        "_convpaint_labels_filtered",
+        "_labels_filtered",
+        "_labels",
+        "_intensity_filtered",
     ]
 
     for suffix in suffixes_to_remove:
         if label_filename.endswith(suffix):
-            return label_filename.replace(suffix, ".tif")
+            base = label_filename.replace(suffix, "")
+            # Ensure .tif extension
+            if not base.endswith(".tif"):
+                base += ".tif"
+            return base
 
-    # If no known suffix found, just replace extension
-    return os.path.splitext(label_filename)[0] + ".tif"
+    # If no known suffix found, just use the filename as-is (already has .tif)
+    return label_filename
 
 
 def _downsample_image(image: np.ndarray, target_size: int) -> np.ndarray:
@@ -114,6 +122,7 @@ def _create_overlay(
     label_image: np.ndarray,
     target_size: int = None,
     label_opacity: float = 0.6,
+    show_overlay: bool = True,
 ) -> np.ndarray:
     """
     Create an overlay of intensity and label images with transparency.
@@ -128,11 +137,14 @@ def _create_overlay(
         Target size for downsampling (max dimension). If None, no downsampling.
     label_opacity : float, optional
         Opacity of label overlay (0-1). Default is 0.6 (60%).
+    show_overlay : bool, optional
+        If True, show colored label overlay on intensity (default).
+        If False, show only intensity in grayscale.
 
     Returns
     -------
     np.ndarray
-        RGB overlay image with intensity in grayscale and colored label regions
+        RGB overlay image with intensity in grayscale and optional colored label regions
     """
     # Downsample if target size specified
     if target_size is not None:
@@ -172,53 +184,54 @@ def _create_overlay(
     rgb[:, :, 1] = intensity_norm  # Green
     rgb[:, :, 2] = intensity_norm  # Blue
 
-    # Create colored label overlay using simple colormap
-    # Generate colors for each unique label (excluding background)
-    unique_labels = np.unique(label_image)
-    unique_labels = unique_labels[unique_labels > 0]  # Exclude background
+    # Create colored label overlay using simple colormap (only if show_overlay is True)
+    if show_overlay:
+        # Generate colors for each unique label (excluding background)
+        unique_labels = np.unique(label_image)
+        unique_labels = unique_labels[unique_labels > 0]  # Exclude background
 
-    if len(unique_labels) == 0:
-        # No labels found - image will be grayscale only
-        pass  # rgb already has intensity in all channels (grayscale)
-    elif len(unique_labels) > 0:
-        # Create a simple colormap using hue variation
-        # Use modulo to cycle through distinct colors even with many labels
-        for i, label_id in enumerate(unique_labels):
-            mask = label_image == label_id
+        if len(unique_labels) == 0:
+            # No labels found - image will be grayscale only
+            pass  # rgb already has intensity in all channels (grayscale)
+        elif len(unique_labels) > 0:
+            # Create a simple colormap using hue variation
+            # Use modulo to cycle through distinct colors even with many labels
+            for i, label_id in enumerate(unique_labels):
+                mask = label_image == label_id
 
-            # Generate color by cycling through hue values (0-360 degrees)
-            hue = (
-                i * 137.5
-            ) % 360  # Golden angle for better color distribution
+                # Generate color by cycling through hue values (0-360 degrees)
+                hue = (
+                    i * 137.5
+                ) % 360  # Golden angle for better color distribution
 
-            # Convert HSV to RGB (H=hue, S=1, V=1)
-            h_norm = hue / 60.0
-            h_int = int(h_norm) % 6
-            f = h_norm - int(h_norm)
+                # Convert HSV to RGB (H=hue, S=1, V=1)
+                h_norm = hue / 60.0
+                h_int = int(h_norm) % 6
+                f = h_norm - int(h_norm)
 
-            if h_int == 0:
-                r, g, b = 1.0, f, 0.0
-            elif h_int == 1:
-                r, g, b = 1.0 - f, 1.0, 0.0
-            elif h_int == 2:
-                r, g, b = 0.0, 1.0, f
-            elif h_int == 3:
-                r, g, b = 0.0, 1.0 - f, 1.0
-            elif h_int == 4:
-                r, g, b = f, 0.0, 1.0
-            else:
-                r, g, b = 1.0, 0.0, 1.0 - f
+                if h_int == 0:
+                    r, g, b = 1.0, f, 0.0
+                elif h_int == 1:
+                    r, g, b = 1.0 - f, 1.0, 0.0
+                elif h_int == 2:
+                    r, g, b = 0.0, 1.0, f
+                elif h_int == 3:
+                    r, g, b = 0.0, 1.0 - f, 1.0
+                elif h_int == 4:
+                    r, g, b = f, 0.0, 1.0
+                else:
+                    r, g, b = 1.0, 0.0, 1.0 - f
 
-            # Blend with opacity
-            rgb[mask, 0] = (1 - label_opacity) * rgb[
-                mask, 0
-            ] + label_opacity * r
-            rgb[mask, 1] = (1 - label_opacity) * rgb[
-                mask, 1
-            ] + label_opacity * g
-            rgb[mask, 2] = (1 - label_opacity) * rgb[
-                mask, 2
-            ] + label_opacity * b
+                # Blend with opacity
+                rgb[mask, 0] = (1 - label_opacity) * rgb[
+                    mask, 0
+                ] + label_opacity * r
+                rgb[mask, 1] = (1 - label_opacity) * rgb[
+                    mask, 1
+                ] + label_opacity * g
+                rgb[mask, 2] = (1 - label_opacity) * rgb[
+                    mask, 2
+                ] + label_opacity * b
 
     # Convert to uint8
     rgb_uint8 = (rgb * 255).astype(np.uint8)
@@ -277,37 +290,57 @@ def _create_grid(images: list, grid_cols: int = 4) -> np.ndarray:
 
 @BatchProcessingRegistry.register(
     name="Grid View: Intensity + Labels Overlay",
-    suffix="_grid_overlay.png",
-    description="Create grid view of intensity images overlaid with colored label regions for selected files",
-    parameters={},
+    suffix="_grid_overlay.tif",
+    description="Create grid view of intensity images with optional colored label overlay for selected files",
+    parameters={
+        "label_suffix": {
+            "type": str,
+            "default": "_labels.tif",
+            "description": "Example: _labels.tif. Leave empty for intensity-only grid.",
+        }
+    },
 )
-def create_grid_overlay(image: np.ndarray) -> np.ndarray:
+def create_grid_overlay(
+    image: np.ndarray, label_suffix: str = "_labels.tif"
+) -> np.ndarray:
     """
-    Create a grid view showing intensity images overlaid with colored label regions.
+    Create a grid view showing intensity images with optional colored label overlay.
 
-    This function processes all label files selected in the batch processing queue,
-    finds their corresponding intensity images, and creates overlay visualizations
-    with transparent colored labels arranged in an auto-sized grid.
+    This function processes all files selected in the batch processing queue.
+    If label_suffix is provided, it finds corresponding label files and creates
+    overlays. If label_suffix is empty, it creates a grid of intensity images only.
 
     Parameters
     ----------
     image : np.ndarray
-        Input label image (processed as part of the batch)
+        Input image (processed as part of the batch)
+    label_suffix : str, optional
+        Suffix pattern to identify label files (e.g., "_labels.tif", "_segmentation.tif").
+        If empty string, creates intensity-only grid without looking for labels.
+        Default is "_labels.tif".
 
     Returns
     -------
     np.ndarray
-        Grid image with overlays (RGB uint8)
+        Grid image with intensity images and optional overlays (RGB uint8)
 
     Notes
     -----
     - Intensity is shown in grayscale
-    - Each label gets a unique color with 60% opacity
+    - When labels are used: each label gets a unique color with 60% opacity
     - Images are automatically normalized for display
     - Grid columns are automatically determined based on number of images
     - Only processes files selected by user's suffix filter in batch processing
     """
     global _grid_created, _cached_grid
+
+    # Determine mode based on label_suffix
+    intensity_only_mode = label_suffix == "" or label_suffix is None
+    mode_str = (
+        "intensity only"
+        if intensity_only_mode
+        else f"intensity + labels (suffix: '{label_suffix}')"
+    )
 
     # If grid has already been created in this batch, return None to skip saving
     if _grid_created:
@@ -330,9 +363,10 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
     sys.stdout = io.StringIO()
 
     try:
-        # Get the filepath and files list from the call stack
+        # Get the filepath, files list, and output folder from the call stack
         current_filepath = None
         file_list = None
+        output_folder = None
 
         for frame_info in inspect.stack():
             frame_locals = frame_info.frame.f_locals
@@ -340,7 +374,15 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
                 current_filepath = Path(frame_locals["filepath"])
             if "file_list" in frame_locals:
                 file_list = frame_locals["file_list"]
-            if current_filepath is not None and file_list is not None:
+            if "self" in frame_locals:
+                obj = frame_locals["self"]
+                if hasattr(obj, "output_folder"):
+                    output_folder = obj.output_folder
+            if (
+                current_filepath is not None
+                and file_list is not None
+                and output_folder is not None
+            ):
                 break
     finally:
         # Restore stdout
@@ -352,18 +394,63 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
 
     label_folder = current_filepath.parent
 
+    # Use output folder from batch processing if available; default to parent folder
+    if output_folder is None:
+        output_folder = str(label_folder)
+
+    output_folder = Path(output_folder)
+
+    # When the batch UI output matches the input folder (blank value), save to parent
+    try:
+        same_as_input = output_folder.resolve() == label_folder.resolve()
+    except FileNotFoundError:
+        same_as_input = False
+
+    if same_as_input:
+        output_folder = label_folder.parent
+
+    output_folder.mkdir(parents=True, exist_ok=True)
+
     # Use the file_list from batch processing if available
     if file_list is not None:
         label_files = [Path(f) for f in file_list]
     else:
-        # Fallback: find all label files in the folder
+        # Fallback: determine files based on mode
         label_files = []
-        for pattern in ["*_labels*.tif", "*_labels*.tiff"]:
+
+        if intensity_only_mode:
+            # Intensity-only mode: use all TIFF files in folder
+            patterns = ["*.tif", "*.tiff"]
+        else:
+            # Label mode: honor user-provided suffix while keeping legacy patterns
+            patterns = []
+            if label_suffix:
+                suffixes = {label_suffix}
+                if label_suffix.lower().endswith(".tif"):
+                    suffixes.add(label_suffix[:-4] + ".tiff")
+                for suffix in suffixes:
+                    patterns.append(f"*{suffix}")
+
+            # Legacy fallback patterns
+            patterns.extend(["*_labels*.tif", "*_labels*.tiff"])
+
+        for pattern in patterns:
             label_files.extend(label_folder.glob(pattern))
 
         if not label_files:
-            print("⚠️  No label files found in folder")
+            msg = "intensity files" if intensity_only_mode else "label files"
+            print(f"⚠️  No {msg} found in folder")
             return image
+
+    # Filter out any grid overlay files to prevent reprocessing
+    label_files = [f for f in label_files if "_grid_overlay" not in f.name]
+
+    # Deduplicate and sort for deterministic ordering
+    label_files = sorted(set(label_files))
+
+    if not label_files:
+        print("⚠️  No valid label files found after filtering")
+        return image
 
     # Calculate square grid dimensions
     import math
@@ -381,50 +468,71 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
     target_per_image = max(100, min(target_per_image, 500))
 
     print(
-        f"\n📊 Processing {len(label_files)} image pairs → {target_per_image}px per image, {grid_cols}×{grid_rows} grid (square)"
+        f"\n📊 Processing {len(label_files)} images → {target_per_image}px per image, {grid_cols}×{grid_rows} grid (square), {mode_str}"
     )
 
     # Create overlays for each pair using parallel processing
-    def process_image_pair(label_path):
-        """Process a single image pair and return overlay or None."""
-        label_filename = label_path.name
-        intensity_filename = _get_intensity_filename(label_filename)
-        intensity_path = label_folder / intensity_filename
+    def process_image_pair(file_path):
+        """Process a single image file (with or without labels)."""
+        filename = file_path.name
 
-        if not intensity_path.exists():
-            return (
-                None,
-                f"⚠️  Skipping {label_filename}: no intensity image found",
-            )
+        if intensity_only_mode:
+            # Intensity-only mode: use the file itself as intensity, no labels
+            intensity_path = file_path
+            label_path = None
+        else:
+            # Label mode: file is a label, find corresponding intensity
+            intensity_filename = _get_intensity_filename(filename)
+            intensity_path = label_folder / intensity_filename
+            label_path = file_path
+
+            if not intensity_path.exists():
+                return (
+                    None,
+                    f"⚠️  Skipping {filename}: no intensity image found",
+                )
 
         try:
-            # Load images
+            # Load intensity image
             intensity_img = tifffile.imread(str(intensity_path))
-            label_img = tifffile.imread(str(label_path))
+
+            # Load label image if in label mode
+            if label_path is not None:
+                label_img = tifffile.imread(str(label_path))
+            else:
+                label_img = None
 
             # Handle 3D data by taking max projection
             if len(intensity_img.shape) > 2:
                 intensity_img = np.max(intensity_img, axis=0)
-            if len(label_img.shape) > 2:
-                label_img = np.max(label_img, axis=0)
 
-            # Check for labels
-            unique_labels = np.unique(label_img)
-            n_labels = len(unique_labels[unique_labels > 0])
+            if label_img is not None:
+                if len(label_img.shape) > 2:
+                    label_img = np.max(label_img, axis=0)
 
-            # Ensure matching dimensions
-            if intensity_img.shape != label_img.shape:
-                return None, (
-                    f"⚠️  Skipping {label_filename}: dimension mismatch "
-                    f"(intensity: {intensity_img.shape}, labels: {label_img.shape})"
-                )
+                # Check for labels
+                unique_labels = np.unique(label_img)
+                n_labels = len(unique_labels[unique_labels > 0])
+
+                # Ensure matching dimensions
+                if intensity_img.shape != label_img.shape:
+                    return None, (
+                        f"⚠️  Skipping {filename}: dimension mismatch "
+                        f"(intensity: {intensity_img.shape}, labels: {label_img.shape})"
+                    )
+            else:
+                # Intensity-only mode: create dummy zero label image
+                label_img = np.zeros(intensity_img.shape, dtype=np.uint16)
+                n_labels = 0
 
             # Create overlay with intelligent downsampling and 60% label opacity
+            # When label_img is all zeros (intensity_only_mode), this creates grayscale output
             overlay = _create_overlay(
                 intensity_img,
                 label_img,
                 target_size=target_per_image,
                 label_opacity=0.6,
+                show_overlay=(not intensity_only_mode),
             )
 
             # Explicitly delete large arrays to free memory immediately
@@ -433,7 +541,7 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
             return (overlay, n_labels), None
 
         except (FileNotFoundError, OSError) as e:
-            return None, f"⚠️  Error processing {label_filename}: {e}"
+            return None, f"⚠️  Error processing {filename}: {e}"
 
     # Process in parallel with ThreadPoolExecutor
     # Use max 4 workers for better memory management with large datasets
@@ -490,16 +598,19 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
             del batch_overlays
 
     # Print diagnostics after progress bar completes
-    print(f"\n✓ Processed {valid_pairs} image pairs")
-    print(
-        f"  Labels found: {images_with_labels}/{valid_pairs} images ({total_labels} total labels)"
-    )
-
-    if total_labels == 0:
-        print("  ⚠️  WARNING: No labels detected in any image!")
+    print(f"\n✓ Processed {valid_pairs} images")
+    if not intensity_only_mode:
         print(
-            "      Output will be grayscale intensity only (no colored regions)"
+            f"  Labels found: {images_with_labels}/{valid_pairs} images ({total_labels} total labels)"
         )
+
+        if total_labels == 0:
+            print("  ⚠️  WARNING: No labels detected in any image!")
+            print(
+                "      Output will be grayscale intensity only (no colored regions)"
+            )
+    else:
+        print("  Mode: Intensity only (no labels)")
 
     if errors:
         print(f"\n⚠️  {len(errors)} files skipped:")
@@ -514,16 +625,23 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
 
     overlays = all_overlays
 
+    mode_desc = (
+        "intensity only"
+        if intensity_only_mode
+        else "intensity + colored labels at 60% opacity"
+    )
     print(
-        f"\n✨ Creating final grid: {valid_pairs} overlays, {grid_cols}×{grid_cols} square grid"
+        f"\n✨ Creating final grid: {valid_pairs} images, {grid_cols}×{grid_cols} square grid ({mode_desc})"
     )
 
     # Create grid
     grid = _create_grid(overlays, grid_cols=grid_cols)
 
-    print(
-        f"✅ Complete! Grid shape: {grid.shape} (grayscale intensity + colored labels at 60% opacity)"
-    )
+    if grid is None:
+        print("⚠️  ERROR: Grid creation returned None!")
+        return image
+
+    print(f"✅ Complete! Grid shape: {grid.shape}")
 
     # Cache the result for subsequent calls in the same batch
     _cached_grid = grid
@@ -531,23 +649,47 @@ def create_grid_overlay(image: np.ndarray) -> np.ndarray:
     # Save the grid to file (only once)
     global _grid_saved, _grid_output_path
     if not _grid_saved:
-        # Save as PNG for publication/presentation use
-        from PIL import Image
-
-        output_filename = f"{sorted_label_files[0].stem}_grid_overlay.png"
-        output_path = label_folder.parent / output_filename
+        # Save as compressed TIF for napari viewing
+        output_filename = f"{sorted_label_files[0].stem}_grid_overlay.tif"
+        output_path = output_folder / output_filename
 
         try:
-            # Save as PNG with high quality
-            img = Image.fromarray(grid)
-            img.save(str(output_path), "PNG", compress_level=6)
+            # Ensure output directory exists
+            output_folder.mkdir(parents=True, exist_ok=True)
+
+            # Save as compressed TIFF
+            tifffile.imwrite(
+                str(output_path),
+                grid,
+                compression="zlib",
+                compressionargs={"level": 6},
+            )
             _grid_output_path = str(output_path)
             _grid_saved = True
-            print(
-                f"💾 Saved grid to: {output_path} (PNG format for publications/presentations)"
-            )
-        except (OSError, ValueError) as e:
-            print(f"⚠️  Error saving grid: {e}")
+
+            # Verify file was actually saved
+            if output_path.exists():
+                file_size = output_path.stat().st_size
+                print("\n" + "=" * 80)
+                print("💾 SAVED GRID IMAGE TO:")
+                print(f"   {output_path}")
+                print(f"   File size: {file_size / 1024 / 1024:.2f} MB")
+                print("   (Compressed TIF format)")
+                print("=" * 80 + "\n")
+            else:
+                print(
+                    f"⚠️  WARNING: File save appeared to succeed but file not found at {output_path}"
+                )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            tifffile.TiffFileError,
+        ) as e:
+            print(f"⚠️  Error saving grid: {type(e).__name__}: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     return grid
 

@@ -96,6 +96,7 @@ try:
         QHeaderView,
         QLabel,
         QLineEdit,
+        QMessageBox,
         QProgressBar,
         QPushButton,
         QSpinBox,
@@ -109,7 +110,9 @@ try:
 except ImportError:
     Qt = QThread = Signal = None
     QCheckBox = QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
-    QHeaderView = QLabel = QLineEdit = QProgressBar = QPushButton = None
+    QHeaderView = QLabel = QLineEdit = QMessageBox = QProgressBar = (
+        QPushButton
+    ) = None
     QSpinBox = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
     _HAS_QTPY = False
 
@@ -1480,8 +1483,6 @@ class ProcessingWorker(QThread):
             else:
                 shape_info = "unknown (no shape attribute)"
 
-            print(f"Original image shape: {shape_info}, dtype: {image_dtype}")
-
             # Check if this is a folder-processing function that shouldn't save individual files
             function_name = getattr(
                 self.processing_func, "__name__", "unknown"
@@ -1521,9 +1522,11 @@ class ProcessingWorker(QThread):
 
             if processed_result is None:
                 # Allow processing functions to signal that this file should be skipped
-                print(
-                    "Processing function returned None; skipping save for this file."
-                )
+                # Suppress message for grid_overlay since it's expected to return None for most files
+                if not is_folder_function:
+                    print(
+                        "Processing function returned None; skipping save for this file."
+                    )
                 return None
 
             # Check if result is points data (for spot detection functions)
@@ -2222,6 +2225,17 @@ class FileResultsWidget(QWidget):
         processing_func = function_info["func"]
         output_suffix = function_info["suffix"]
 
+        # Ensure grid overlay cache is reset before each new run
+        if getattr(processing_func, "__name__", "") == "create_grid_overlay":
+            try:
+                from napari_tmidas.processing_functions.grid_view_overlay import (
+                    reset_grid_cache,
+                )
+
+                reset_grid_cache()
+            except ImportError:
+                pass
+
         # Get parameter values if available
         param_values = {}
         if hasattr(self, "param_widget_instance") and hasattr(
@@ -2333,11 +2347,10 @@ class FileResultsWidget(QWidget):
                     )
 
                     if _grid_output_path:
-                        import numpy as np
-                        from PIL import Image
+                        import tifffile
 
-                        # Load PNG image
-                        grid_image = np.array(Image.open(_grid_output_path))
+                        # Load TIF image
+                        grid_image = tifffile.imread(_grid_output_path)
 
                         # Add to viewer
                         self.viewer.add_image(
@@ -2346,6 +2359,19 @@ class FileResultsWidget(QWidget):
                             rgb=True,
                         )
                         print("\n✨ Grid overlay added to napari viewer!")
+
+                        # Show message box with output location
+                        msg = QMessageBox(self)
+                        msg.setIcon(QMessageBox.Information)
+                        msg.setWindowTitle("Grid Overlay Complete")
+                        msg.setText(
+                            f"Grid overlay created successfully!\n\nProcessed {len(self.file_list)} image pairs"
+                        )
+                        msg.setInformativeText(
+                            f"Saved to:\n{_grid_output_path}"
+                        )
+                        msg.setStandardButtons(QMessageBox.Ok)
+                        msg.exec_()
 
                         # Reset the grid cache for next run
                         from napari_tmidas.processing_functions.grid_view_overlay import (
