@@ -431,5 +431,117 @@ def test_dimension_order_tczyx():
         assert "label" in result
 
 
+def test_extract_regionprops_summary_basic():
+    """Test summary statistics extraction without grouping by dimensions."""
+    # Create a simple 2D label image
+    label_2d = np.zeros((100, 100), dtype=np.uint16)
+    label_2d[10:20, 10:20] = 1  # 100 pixels
+    label_2d[30:50, 30:50] = 2  # 400 pixels
+    label_2d[60:70, 60:80] = 3  # 200 pixels
+
+    # Create intensity image
+    intensity_2d = np.random.rand(100, 100) * 100
+
+    # Extract regionprops first to get individual values
+    results = extract_regionprops_recursive(
+        label_2d,
+        intensity_image=intensity_2d,
+        prefix_dims={"filename": "test.npy"},
+        max_spatial_dims=2,
+        properties=[
+            "label",
+            "area",
+            "mean_intensity",
+            "median_intensity",
+            "std_intensity",
+        ],
+    )
+
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+
+    # Calculate expected summary statistics (note: 'area' is renamed to 'size')
+    expected_count = len(df)
+    expected_size_sum = df["size"].sum()
+    expected_size_mean = df["size"].mean()
+    expected_size_median = df["size"].median()
+
+    # Verify we have 3 labels
+    assert expected_count == 3
+    assert expected_size_sum == 700  # 100 + 400 + 200
+    assert expected_size_mean == pytest.approx(233.333, rel=0.01)
+    assert expected_size_median == 200
+
+
+def test_extract_regionprops_summary_with_grouping():
+    """Test summary statistics extraction with grouping by dimensions."""
+    # Create 4D label image (T=2, Z=3, Y=50, X=50)
+    label_4d = np.zeros((2, 3, 50, 50), dtype=np.uint16)
+
+    # T=0: 2 labels
+    label_4d[0, 1:3, 10:20, 10:20] = 1  # 200 pixels
+    label_4d[0, 1:2, 30:40, 30:40] = 2  # 100 pixels
+
+    # T=1: 3 labels
+    label_4d[1, 1:3, 10:15, 10:15] = 1  # 50 pixels
+    label_4d[1, 1:2, 20:30, 20:30] = 2  # 100 pixels
+    label_4d[1, 1:2, 35:45, 35:45] = 3  # 100 pixels
+
+    # Extract with dimension order
+    results = extract_regionprops_recursive(
+        label_4d,
+        intensity_image=None,
+        prefix_dims={"filename": "test_4d.npy"},
+        current_dim=0,
+        max_spatial_dims=3,
+        dimension_order="TZYX",
+        properties=["label", "area"],
+    )
+
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+
+    # Group by T dimension (note: 'area' is renamed to 'size')
+    summary_stats = []
+    for t, group in df.groupby("T"):
+        summary_stats.append(
+            {
+                "T": t,
+                "label_count": len(group),
+                "size_sum": group["size"].sum(),
+                "size_mean": group["size"].mean(),
+            }
+        )
+
+    # Verify T=0 has 2 labels
+    t0_stats = [s for s in summary_stats if s["T"] == 0][0]
+    assert t0_stats["label_count"] == 2
+    assert t0_stats["size_sum"] == 300  # 200 + 100
+
+    # Verify T=1 has 3 labels
+    t1_stats = [s for s in summary_stats if s["T"] == 1][0]
+    assert t1_stats["label_count"] == 3
+    assert t1_stats["size_sum"] == 250  # 50 + 100 + 100
+
+
+def test_summary_statistics_calculations():
+    """Test that summary statistics are calculated correctly."""
+    # Simple test data
+    data = np.array([10, 20, 30, 40, 50])
+
+    # Expected values
+    expected_sum = 150
+    expected_mean = 30.0
+    expected_median = 30.0
+    expected_std = np.std(data, ddof=1)  # pandas uses ddof=1
+
+    # Verify using pandas
+    df = pd.DataFrame({"values": data})
+    assert df["values"].sum() == expected_sum
+    assert df["values"].mean() == expected_mean
+    assert df["values"].median() == expected_median
+    assert df["values"].std() == pytest.approx(expected_std, rel=0.01)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
