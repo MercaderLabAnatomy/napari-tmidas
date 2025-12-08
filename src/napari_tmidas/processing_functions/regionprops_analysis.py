@@ -960,3 +960,321 @@ def extract_regionprops_folder(
 
         traceback.print_exc()
         return None
+
+
+@BatchProcessingRegistry.register(
+    name="Regionprops Summary Statistics",
+    suffix="_regionprops_summary",
+    description="Calculate summary statistics (count, sum, mean, median, std) of regionprops per file. Groups labels by file and optional dimensions (T/C/Z). Results saved to single CSV per folder.",
+    parameters={
+        "max_spatial_dims": {
+            "type": int,
+            "default": 2,
+            "min": 2,
+            "max": 3,
+            "description": "Spatial dimensions: 2=2D slices (YX), 3=3D volumes (ZYX)",
+        },
+        "overwrite_existing": {
+            "type": bool,
+            "default": False,
+            "description": "Overwrite existing CSV file if it exists",
+        },
+        "label_suffix": {
+            "type": str,
+            "default": "",
+            "description": "Label suffix to remove for finding intensity image (e.g., '_otsu_semantic.tif'). Only files with this suffix are processed. Leave empty to skip intensity.",
+        },
+        "group_by_dimensions": {
+            "type": bool,
+            "default": False,
+            "description": "Group by T/C/Z dimensions (if present) in addition to filename",
+        },
+        "size": {
+            "type": bool,
+            "default": True,
+            "description": "Include size (area) statistics",
+        },
+        "mean_intensity": {
+            "type": bool,
+            "default": True,
+            "description": "Include mean intensity statistics",
+        },
+        "median_intensity": {
+            "type": bool,
+            "default": True,
+            "description": "Include median intensity statistics",
+        },
+        "std_intensity": {
+            "type": bool,
+            "default": True,
+            "description": "Include std intensity statistics",
+        },
+        "max_intensity": {
+            "type": bool,
+            "default": False,
+            "description": "Include max intensity statistics",
+        },
+        "min_intensity": {
+            "type": bool,
+            "default": False,
+            "description": "Include min intensity statistics",
+        },
+    },
+)
+def extract_regionprops_summary_folder(
+    image: np.ndarray,
+    max_spatial_dims: int = 2,
+    overwrite_existing: bool = False,
+    label_suffix: str = "",
+    group_by_dimensions: bool = False,
+    size: bool = True,
+    mean_intensity: bool = True,
+    median_intensity: bool = True,
+    std_intensity: bool = True,
+    max_intensity: bool = False,
+    min_intensity: bool = False,
+    dimension_order: str = "Auto",
+) -> None:
+    """
+    Extract summary statistics of region properties from label images.
+
+    This function calculates aggregate statistics (count, sum, mean, median, std)
+    for selected regionprops across all labels in each file. Results are grouped
+    by filename and optionally by dimensions (T/C/Z).
+
+    **Output:** Creates ONLY a CSV file with summary statistics, no image files.
+
+    The CSV contains:
+    - filename (and T/C/Z if group_by_dimensions=True)
+    - label_count: number of labels/regions
+    - For each selected property (e.g., size, mean_intensity):
+      - {property}_sum: sum across all labels
+      - {property}_mean: mean across all labels
+      - {property}_median: median across all labels
+      - {property}_std: standard deviation across all labels
+
+    **Intensity Measurements:** If label_suffix is provided, the function will find
+    matching intensity images by replacing the suffix in label filenames.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input label image
+    max_spatial_dims : int
+        Maximum number of spatial dimensions to process as a unit (2=YX, 3=ZYX)
+    overwrite_existing : bool
+        Overwrite existing CSV file if it exists (only applies to first image)
+    label_suffix : str
+        Label file suffix to remove for finding matching intensity image
+    group_by_dimensions : bool
+        If True, group statistics by T/C/Z dimensions in addition to filename
+    size, mean_intensity, ... : bool
+        Enable/disable specific region properties for statistics
+    dimension_order : str
+        Dimension order string (e.g., "TZYX", "CZYX", "TYX", "Auto")
+
+    Returns:
+    --------
+    None
+        This function only generates CSV output, no image is returned
+    """
+    global _REGIONPROPS_CSV_FILES
+
+    # Get the current file path from the call stack
+    current_file = get_current_filepath()
+
+    if current_file is None:
+        print("⚠️  Could not determine current file path")
+        return None
+
+    # This is the label image file
+    label_path = Path(current_file)
+
+    # Only process files that have the label_suffix (label images)
+    if label_suffix and label_suffix.strip():
+        filename_str = str(label_path.name)
+        if not filename_str.endswith(label_suffix):
+            return None
+
+    # Generate output CSV path (one per folder)
+    folder_name = label_path.parent.name
+    parent_dir = label_path.parent.parent
+    output_csv = str(parent_dir / f"{folder_name}_regionprops_summary.csv")
+
+    # Build properties list for extraction
+    properties_list = ["label", "area"]  # Always need these
+    if mean_intensity:
+        properties_list.append("mean_intensity")
+    if median_intensity:
+        properties_list.append("median_intensity")
+    if std_intensity:
+        properties_list.append("std_intensity")
+    if max_intensity:
+        properties_list.append("max_intensity")
+    if min_intensity:
+        properties_list.append("min_intensity")
+
+    # Debug: Print on first file
+    csv_key = f"{output_csv}_summary"
+    if csv_key not in _REGIONPROPS_CSV_FILES:
+        print(
+            f"📋 Computing summary statistics for: {', '.join(properties_list)}"
+        )
+
+    # Check if CSV already exists
+    csv_path = Path(output_csv)
+    write_header = False
+    if csv_key not in _REGIONPROPS_CSV_FILES:
+        if overwrite_existing or not csv_path.exists():
+            write_header = True
+        _REGIONPROPS_CSV_FILES[csv_key] = True
+
+    # Process this single image
+    try:  # noqa: SIM105
+        # Load intensity image if suffix provided
+        intensity_image = None
+        if label_suffix and label_suffix.strip():
+            intensity_path_str = str(label_path).replace(
+                label_suffix, Path(label_path).suffix
+            )
+            intensity_path = Path(intensity_path_str)
+            if intensity_path.exists():
+                intensity_image = load_label_image(str(intensity_path))
+                print(f"📊 Loaded intensity image: {intensity_path.name}")
+            else:
+                print(f"⚠️  Intensity image not found: {intensity_path.name}")
+
+        # Extract regionprops for this image
+        results = extract_regionprops_recursive(
+            image=image,
+            intensity_image=intensity_image,
+            properties=properties_list,
+            max_spatial_dims=max_spatial_dims,
+            dimension_order=dimension_order,
+        )
+
+        if not results:
+            print(f"⚠️  No regions found in {label_path.name}")
+            return None
+
+        # Convert to DataFrame for easier aggregation
+        df = pd.DataFrame(results)
+
+        # Determine grouping columns
+        group_cols = []
+        if group_by_dimensions:
+            # Check which dimension columns are present
+            for dim in ["T", "C", "Z"]:
+                if dim in df.columns:
+                    group_cols.append(dim)
+
+        # Prepare summary statistics
+        summary_rows = []
+
+        if group_cols:
+            # Group by dimensions
+            for group_key, group_df in df.groupby(group_cols):
+                summary_row = {"filename": label_path.name}
+
+                # Add dimension values
+                if len(group_cols) == 1:
+                    summary_row[group_cols[0]] = group_key
+                else:
+                    for i, col in enumerate(group_cols):
+                        summary_row[col] = group_key[i]
+
+                # Calculate statistics
+                summary_row["label_count"] = len(group_df)
+
+                # Size statistics (note: 'area' is renamed to 'size' by extract_regionprops_recursive)
+                if size and "size" in group_df.columns:
+                    summary_row["size_sum"] = int(group_df["size"].sum())
+                    summary_row["size_mean"] = float(group_df["size"].mean())
+                    summary_row["size_median"] = float(
+                        group_df["size"].median()
+                    )
+                    summary_row["size_std"] = float(group_df["size"].std())
+
+                # Intensity statistics
+                for prop in [
+                    "mean_intensity",
+                    "median_intensity",
+                    "std_intensity",
+                    "max_intensity",
+                    "min_intensity",
+                ]:
+                    # Check if user enabled this property and it exists in data
+                    prop_enabled = locals().get(
+                        prop.replace("_intensity", "_intensity")
+                    )
+                    if prop_enabled and prop in group_df.columns:
+                        prop_name = prop.replace("_intensity", "_int")
+                        summary_row[f"{prop_name}_sum"] = float(
+                            group_df[prop].sum()
+                        )
+                        summary_row[f"{prop_name}_mean"] = float(
+                            group_df[prop].mean()
+                        )
+                        summary_row[f"{prop_name}_median"] = float(
+                            group_df[prop].median()
+                        )
+                        summary_row[f"{prop_name}_std"] = float(
+                            group_df[prop].std()
+                        )
+
+                summary_rows.append(summary_row)
+        else:
+            # No grouping by dimensions - single summary for whole file
+            summary_row = {"filename": label_path.name}
+            summary_row["label_count"] = len(df)
+
+            # Size statistics (note: 'area' is renamed to 'size' by extract_regionprops_recursive)
+            if size and "size" in df.columns:
+                summary_row["size_sum"] = int(df["size"].sum())
+                summary_row["size_mean"] = float(df["size"].mean())
+                summary_row["size_median"] = float(df["size"].median())
+                summary_row["size_std"] = float(df["size"].std())
+
+            # Intensity statistics
+            for prop in [
+                "mean_intensity",
+                "median_intensity",
+                "std_intensity",
+                "max_intensity",
+                "min_intensity",
+            ]:
+                prop_enabled = locals().get(
+                    prop.replace("_intensity", "_intensity")
+                )
+                if prop_enabled and prop in df.columns:
+                    prop_name = prop.replace("_intensity", "_int")
+                    summary_row[f"{prop_name}_sum"] = float(df[prop].sum())
+                    summary_row[f"{prop_name}_mean"] = float(df[prop].mean())
+                    summary_row[f"{prop_name}_median"] = float(
+                        df[prop].median()
+                    )
+                    summary_row[f"{prop_name}_std"] = float(df[prop].std())
+
+            summary_rows.append(summary_row)
+
+        # Convert to DataFrame and save
+        summary_df = pd.DataFrame(summary_rows)
+
+        # Write to CSV
+        if write_header:
+            summary_df.to_csv(output_csv, index=False, mode="w")
+            print(f"✅ Created summary CSV: {output_csv}")
+        else:
+            summary_df.to_csv(output_csv, index=False, mode="a", header=False)
+            print(
+                f"✅ Appended {len(summary_df)} summary rows to: {output_csv}"
+            )
+
+        return None
+
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Error processing {label_path.name}: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return None
