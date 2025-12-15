@@ -24,6 +24,14 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
+**For deep learning features** (SAM2, Spotiflow, Careamics, Trackastra), also install the deep-learning extras:
+
+    pip install napari-tmidas[deep-learning]
+
+Or install everything at once:
+
+    pip install napari-tmidas[all]
+
 It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
 
     pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git

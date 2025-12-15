@@ -34,17 +34,10 @@ dependencies = [
     "zarr",
     "ome-zarr",
     "napari-ome-zarr",
-    "torch>=1.12.0",
-    "torchvision>=0.13.0",
-    "timm",
-    "opencv-python",
-    "cmake",
     "nd2",
     "pylibCZIrw",
     "readlif",
     "tiffslide",
-    "hydra-core",
-    "eva-decord",
     "acquifer-napari",
 ]
 
@@ -61,6 +54,19 @@ testing = [
 ]
 clustering = [
     "scikit-learn-extra>=0.3.0",
+]
+deep-learning = [
+    # Heavy dependencies for ML/DL features (SAM2, Spotiflow, Careamics, Trackastra)
+    "torch>=1.12.0",
+    "torchvision>=0.13.0",
+    "timm",
+    "opencv-python",
+    "cmake",
+    "hydra-core",
+    "eva-decord",
+]
+all = [
+    "napari-tmidas[testing,clustering,deep-learning]",
 ]
 
 [project.entry-points."napari.manifest"]
