@@ -3426,6 +3426,19 @@ def batch_crop_anything(
     viewer: Viewer = None,
 ):
     """MagicGUI widget for starting Batch Crop Anything using SAM2."""
+    # Check if torch is available
+    if not _HAS_TORCH:
+        QMessageBox.critical(
+            None,
+            "Missing Dependency",
+            "PyTorch not found. Batch Crop Anything requires PyTorch and SAM2.\n\n"
+            "To install the required dependencies, run:\n"
+            "pip install 'napari-tmidas[deep-learning]'\n\n"
+            "Then follow SAM2 installation instructions at:\n"
+            "https://github.com/MercaderLabAnatomy/napari-tmidas#installation",
+        )
+        return
+
     # Check if SAM2 is available
     try:
         import importlib.util
@@ -3436,15 +3449,15 @@ def batch_crop_anything(
                 None,
                 "Missing Dependency",
                 "SAM2 not found. Please follow installation instructions at:\n"
-                "https://github.com/MercaderLabAnatomy/napari-tmidas?tab=readme-ov-file#dependencies\n",
+                "https://github.com/MercaderLabAnatomy/napari-tmidas#installation\n",
             )
             return
     except ImportError:
         QMessageBox.critical(
             None,
             "Missing Dependency",
-            "SAM2 package cannot be imported. Please follow installation instructions at\n"
-            "https://github.com/MercaderLabAnatomy/napari-tmidas?tab=readme-ov-file#dependencies",
+            "SAM2 package cannot be imported. Please follow installation instructions at:\n"
+            "https://github.com/MercaderLabAnatomy/napari-tmidas#installation",
         )
         return
 
