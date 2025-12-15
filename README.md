@@ -24,19 +24,21 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-**For deep learning features** (SAM2, Spotiflow, Careamics, Trackastra), also install the deep-learning extras:
+**For deep learning features** (Batch Crop Anything with SAM2, Spotiflow, Careamics, Trackastra), also install:
 
-    pip install napari-tmidas[deep-learning]
+    pip install 'napari-tmidas[deep-learning]'
 
 Or install everything at once:
 
-    pip install napari-tmidas[all]
+    pip install 'napari-tmidas[all]'
 
 It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
 
     pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git
 
-To use the Batch Crop Anything pipeline, we need to install **Segment Anything 2** (2D/3D):
+### Additional Setup for Batch Crop Anything
+
+To use the Batch Crop Anything pipeline with SAM2, you need to install SAM2 separately:
 
     cd /opt # if the folder does not exist: mkdir /opt && cd /opt
     git clone https://github.com/facebookresearch/sam2.git && cd sam2
