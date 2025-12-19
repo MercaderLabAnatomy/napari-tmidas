@@ -40,13 +40,9 @@ It is recommended though to install the **latest development version**. Please a
 
 ### Additional Setup for Batch Crop Anything
 
-To use the Batch Crop Anything pipeline with SAM2, you need to install SAM2 separately:
+To use the Batch Crop Anything pipeline with SAM2, you only need to install ffmpeg manually. SAM2 and its model checkpoints will be automatically installed when you first run the pipeline:
 
-    cd /opt # if the folder does not exist: mkdir /opt && cd /opt
-    git clone https://github.com/facebookresearch/sam2.git && cd sam2
-    pip install -e .
-    curl -L https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -o checkpoints/sam2.1_hiera_large.pt
-    mamba install -c conda-forge ffmpeg # we also need ffmpeg
+    mamba install -c conda-forge ffmpeg
 
 If you want to batch compress image data using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
 
