@@ -3,6 +3,7 @@
 [![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/macromeer/napari-tmidas/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
 [![Python Version](https://img.shields.io/pypi/pyversions/napari-tmidas.svg?color=green)](https://python.org)
+[![Downloads](https://static.pepy.tech/badge/napari-tmidas)](https://pepy.tech/project/napari-tmidas)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 
 This napari plugin consists of a growing collection of pipelines for fast batch processing of confocal and whole slide microscopy images of biological tissues. This is a WIP and based on the [T-MIDAS terminal](https://github.com/MercaderLabAnatomy/T-MIDAS).
@@ -65,8 +66,11 @@ You can then find the installed plugin in the Plugins tab.
 
 ### Microscopy Image Conversion
 
-Currently, this pipeline supports the conversion of `.nd2, .lif, .ndpi, .czi` and acquifer data. After scanning a folder of your choice for microscopy image data, select a file in the first column of the table and preview and export any image data it contains.
+Converts `.lif, .nd2, .czi, .ndpi` and Acquifer data to TIF or OME-Zarr formats. Scan a folder, select files, and export with preserved spatial metadata.
 
+**Supported Formats:**
+- **TIF** - Standard format for compatibility
+- **OME-Zarr** - Recommended for large datasets, [spec v0.5](https://ngff.openmicroscopy.org/latest/) compliant with automatic physical metadata extraction (voxel sizes, spacing)
 
 <img src="https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b" alt="Microscopy Image Conversion Widget" style="width:75%; height:auto;">
 
@@ -98,6 +102,7 @@ Note that whenever you click on an `Original File` or `Processed File` in the ta
 The image processing capabilities are powered by several excellent open-source tools:
 - [Cellpose 4](https://github.com/MouseLand/cellpose): Advanced cell segmentation
 - [Trackastra](https://github.com/weigertlab/trackastra): Cell tracking and analysis
+- [VisCy](https://github.com/mehta-lab/VisCy): Virtual staining using deep learning
 - [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
 - [Spotiflow](https://github.com/weigertlab/spotiflow): Accurate and efficient spot detection for fluorescence microscopy
 
@@ -109,6 +114,7 @@ Detailed documentation for specific processing functions:
 - [Basic Processing Functions](docs/basic_processing.md) - Label and intensity operations, channel splitting/merging, time series
 - [Cellpose Segmentation](docs/cellpose_segmentation.md) - Deep learning cell/nucleus segmentation
 - [TrackAstra Tracking](docs/trackastra_tracking.md) - Cell tracking across time-lapse data
+- [VisCy Virtual Staining](docs/viscy_virtual_staining.md) - Virtual staining of phase/DIC images using deep learning
 
 **Analysis and Quality Control**
 - [Grid View: Intensity + Labels Overlay](docs/grid_view_overlay.md) - Visual QC for segmentation results
