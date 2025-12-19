@@ -1774,7 +1774,7 @@ class ConversionWorker(QThread):
         base_name: str,
         series_index: int,
     ) -> bool:
-        """Save image data as ZARR with proper OME-ZARR structure for napari-ome-zarr"""
+        """Save image data as ZARR with proper OME-ZARR structure conforming to spec"""
         try:
             print(f"Saving ZARR: {output_path}")
 
@@ -1783,9 +1783,32 @@ class ConversionWorker(QThread):
 
             store = parse_url(output_path, mode="w").store
 
-            # Convert to Dask array if needed
+            # Convert to Dask array with appropriate chunks
+            # OME-Zarr best practice: keep X,Y intact, chunk along T/Z
+            # Codec limit: chunks must be <2GB
             if not hasattr(image_data, "dask"):
                 image_data = da.from_array(image_data, chunks="auto")
+
+            # Check if chunks exceed compression codec limit (2GB)
+            max_chunk_bytes = 1_500_000_000  # 1.5GB safe limit
+            chunk_bytes = (
+                np.prod(image_data.chunksize) * image_data.dtype.itemsize
+            )
+
+            if chunk_bytes > max_chunk_bytes:
+                print(
+                    f"Rechunking: current chunks ({chunk_bytes / 1e9:.2f} GB) exceed codec limit"
+                )
+                # Keep spatial dims (Y, X) and channel intact, rechunk T and Z
+                new_chunks = list(image_data.chunksize)
+                # Reduce T and Z proportionally to get under limit
+                scale = (max_chunk_bytes / chunk_bytes) ** 0.5
+                for i in range(min(2, len(new_chunks))):
+                    new_chunks[i] = max(1, int(new_chunks[i] * scale))
+                image_data = image_data.rechunk(tuple(new_chunks))
+                print(
+                    f"Rechunked to {image_data.chunksize} ({np.prod(image_data.chunksize) * image_data.dtype.itemsize / 1e9:.2f} GB/chunk)"
+                )
 
             # Handle axes reordering for proper OME-ZARR structure
             axes = metadata.get("axes", "").lower()
@@ -1813,22 +1836,34 @@ class ConversionWorker(QThread):
                 else base_name
             )
 
-            # Save with OME-ZARR - let napari-ome-zarr handle colormaps
+            # Build proper OME-Zarr coordinate transformations from metadata
+            scale_transform = self._build_scale_transform(
+                metadata, axes, image_data.shape
+            )
+
+            # Save with OME-ZARR including physical metadata
             with ProgressBar():
                 root = zarr.group(store=store)
 
-                # Set minimal metadata - let napari-ome-zarr reader handle the rest
+                # Set layer name for napari compatibility
                 root.attrs["name"] = layer_name
 
-                # Write the image with proper OME-ZARR structure
+                # Write the image with proper OME-ZARR structure and physical metadata
+                # coordinate_transformations expects a list of lists (one per resolution level)
                 write_image(
                     image_data,
                     group=root,
                     axes=axes or "zyx",
+                    coordinate_transformations=(
+                        [[scale_transform]] if scale_transform else None
+                    ),
                     scaler=None,
                     storage_options={"compression": "zstd"},
                 )
 
+            print(
+                f"Successfully saved ZARR with metadata: axes={axes}, scale={scale_transform}"
+            )
             return True
 
         except (OSError, PermissionError, ImportError) as e:
@@ -1838,6 +1873,50 @@ class ConversionWorker(QThread):
             import gc
 
             gc.collect()
+
+    def _build_scale_transform(
+        self, metadata: dict, axes: str, shape: tuple
+    ) -> dict:
+        """
+        Build OME-Zarr coordinate transformation from microscopy metadata.
+
+        Converts extracted resolution, spacing, and unit information into proper
+        OME-Zarr scale transformation conforming to the specification.
+        """
+        if not axes:
+            return None
+
+        # Initialize scale array with defaults (1.0 for all dimensions)
+        ndim = len(shape)
+        scales = [1.0] * ndim
+
+        # Get physical metadata
+        resolution = metadata.get(
+            "resolution"
+        )  # (x_res, y_res) in pixels/unit
+        spacing = metadata.get("spacing")  # z spacing in physical units
+        unit = metadata.get("unit", "micrometer")  # Physical unit
+
+        # Map axes to scale values based on extracted metadata
+        for i, axis in enumerate(axes):
+            if axis == "x" and resolution and len(resolution) >= 1:
+                # X resolution: convert from pixels/unit to unit/pixel
+                if resolution[0] > 0:
+                    scales[i] = 1.0 / resolution[0]
+            elif axis == "y" and resolution and len(resolution) >= 2:
+                # Y resolution: convert from pixels/unit to unit/pixel
+                if resolution[1] > 0:
+                    scales[i] = 1.0 / resolution[1]
+            elif axis == "z" and spacing and spacing > 0:
+                # Z spacing is already in physical units per slice
+                scales[i] = spacing
+            # Time and channel axes remain at 1.0 (no physical scaling)
+
+        # Build the scale transformation
+        scale_transform = {"type": "scale", "scale": scales}
+
+        print(f"Built scale transformation: {scales} (unit: {unit})")
+        return scale_transform
 
 
 class MicroscopyImageConverterWidget(QWidget):
