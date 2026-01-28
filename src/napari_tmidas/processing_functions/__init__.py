@@ -5,15 +5,19 @@ Package for processing functions that can be registered with the batch processin
 import importlib
 import os
 import pkgutil
+import sys
 from typing import Dict, List
 
 # Keep the registry global
 from napari_tmidas._registry import BatchProcessingRegistry
 
 
-def discover_and_load_processing_functions() -> List[str]:
+def discover_and_load_processing_functions(reload: bool = False) -> List[str]:
     """
     Discover and load all processing functions from the processing_functions package.
+
+    Args:
+        reload: If True, force reload of modules even if already imported
 
     Returns:
         List of registered function names
@@ -27,8 +31,15 @@ def discover_and_load_processing_functions() -> List[str]:
     ):
         if not is_pkg:  # Only load non-package modules
             try:
-                # Import the module
-                importlib.import_module(f"{package}.{module_name}")
+                module_fullname = f"{package}.{module_name}"
+                
+                # If reload requested and module already loaded, reload it
+                if reload and module_fullname in sys.modules:
+                    importlib.reload(sys.modules[module_fullname])
+                else:
+                    # Import the module
+                    importlib.import_module(module_fullname)
+                
                 print(f"Loaded processing function module: {module_name}")
             except ImportError as e:
                 # Log the error but continue with other modules
