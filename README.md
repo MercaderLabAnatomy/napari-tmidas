@@ -26,13 +26,15 @@ Now you can install `napari-tmidas` via [pip]:
 
     pip install napari-tmidas
 
-**For deep learning features** (Batch Crop Anything with SAM2, Spotiflow, Careamics, Trackastra), also install:
+**For deep learning features** (Batch Crop Anything with SAM2, VisCy, Spotiflow, CAREamics, Trackastra, Cellpose), also install:
 
     pip install 'napari-tmidas[deep-learning]'
 
 Or install everything at once:
 
     pip install 'napari-tmidas[all]'
+
+> **Note**: AI methods (VisCy, CAREamics, Spotiflow, Cellpose, Trackastra) run in isolated environments that are automatically created on first use. This prevents dependency conflicts and requires no manual setup.
 
 It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
 
@@ -74,7 +76,7 @@ Converts `.lif, .nd2, .czi, .ndpi` and Acquifer data to TIF or OME-Zarr formats.
 
 ### Image Processing
 
-1. You start with entering the path to the folder containing the images to be processed (currently supports TIF, later also ZARR) and optionally a filter for filename suffix
+1. You start with entering the path to the folder containing the images to be processed (supports TIFF and OME-Zarr) and optionally a filter for filename suffix
 
 ![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
 
