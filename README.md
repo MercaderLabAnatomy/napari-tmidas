@@ -94,32 +94,50 @@ Converts `.lif, .nd2, .czi, .ndpi` and Acquifer data to TIF or OME-Zarr formats.
 Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
 
 
-#### Processing Function Credits
+#### AI-Powered Processing Functions 🤖
 
-The image processing capabilities are powered by several excellent open-source tools:
-- [Cellpose 4](https://github.com/MouseLand/cellpose): Advanced cell segmentation
-- [Trackastra](https://github.com/weigertlab/trackastra): Cell tracking and analysis
-- [VisCy](https://github.com/mehta-lab/VisCy): Virtual staining using deep learning
-- [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
-- [Spotiflow](https://github.com/weigertlab/spotiflow): Accurate and efficient spot detection for fluorescence microscopy
+napari-tmidas integrates state-of-the-art deep learning methods for microscopy image analysis. Each method runs in a dedicated environment to prevent conflicts and is automatically installed on first use.
 
-#### Processing Function Documentation
+**🔬 Image Enhancement & Restoration**
+- **[VisCy Virtual Staining](docs/viscy_virtual_staining.md)** - Transform phase/DIC microscopy into virtual fluorescence (nuclei + membrane channels)
+  - Powered by [VisCy](https://github.com/mehta-lab/VisCy)
+  - VSCyto3D model for 3D/4D data
+  - No labels needed - learn from transmitted light alone
+  
+- **[CAREamics Denoising](docs/careamics_denoising.md)** - Content-aware image restoration using Noise2Void/CARE
+  - Powered by [CAREamics](https://github.com/CAREamics/careamics)
+  - Train on noisy images (no ground truth needed)
+  - Preserves fine structures while removing noise
 
-Detailed documentation for specific processing functions:
+**🎯 Detection & Segmentation**
+- **[Spotiflow Spot Detection](docs/spotiflow_detection.md)** - Accurate detection of spots/puncta in fluorescence images
+  - Powered by [Spotiflow](https://github.com/weigertlab/spotiflow)
+  - Multiple pretrained models (2D/3D)
+  - Subpixel localization for precise coordinates
+  
+- **[Cellpose Segmentation](docs/cellpose_segmentation.md)** - Universal cell/nucleus segmentation
+  - Powered by [Cellpose 4](https://github.com/MouseLand/cellpose)
+  - Cellpose-SAM for improved generalization
+  - Works on 2D, 3D, and time-lapse data
 
-**Core Processing**
+**🔍 Tracking & Analysis**
+- **[Trackastra Tracking](docs/trackastra_tracking.md)** - Cell tracking across time-lapse data
+  - Powered by [Trackastra](https://github.com/weigertlab/trackastra)
+  - Graph-based tracking with deep learning
+  - Handles divisions and complex cell behavior
+
+#### Additional Processing Functions
+
+**Core Operations**
 - [Basic Processing Functions](docs/basic_processing.md) - Label and intensity operations, channel splitting/merging, time series
-- [Cellpose Segmentation](docs/cellpose_segmentation.md) - Deep learning cell/nucleus segmentation
-- [TrackAstra Tracking](docs/trackastra_tracking.md) - Cell tracking across time-lapse data
-- [VisCy Virtual Staining](docs/viscy_virtual_staining.md) - Virtual staining of phase/DIC images using deep learning
 
-**Analysis and Quality Control**
+**Analysis & Quality Control**
 - [Grid View: Intensity + Labels Overlay](docs/grid_view_overlay.md) - Visual QC for segmentation results
 - [Intensity-Based Label Filtering](docs/intensity_label_filter.md) - Filter labels by signal intensity
 - [Regionprops Analysis](docs/regionprops_analysis.md) - Extract quantitative properties from labels
 
-**Advanced Processing**
-- [Advanced Processing Functions](docs/advanced_processing.md) - Denoising (CAREamics), spot detection (Spotiflow), SciPy/scikit-image filters, compression, colocalization
+**Advanced Methods**
+- [Advanced Processing Functions](docs/advanced_processing.md) - SciPy/scikit-image filters, compression, colocalization
 
 ### Batch Label Inspection
 If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
