@@ -94,13 +94,37 @@ The plugin automatically detects your data format:
 
 ## Interactive Controls
 
-### Point Prompts
+### Prompt Modes
+
+SAM2 supports two ways to specify objects:
+
+#### Point Mode (Default)
+Click on image to add point prompts. Best for complex boundaries or small objects.
 
 | Action | Effect |
 |--------|--------|
 | **Click** | Add positive point (include this region) |
 | **Shift+Click** | Add negative point (exclude this region) |
+
+#### Box Mode
+Draw rectangles around objects. Best for quick segmentation of simple objects.
+
+1. Select **Box Mode** from the UI
+2. Draw rectangle around object
+3. SAM2 segments the region inside the box
+4. Can add more rectangles for multiple objects
+5. Shift+draw to refine/subtract from existing box
+
+**When to use each:**
+- **Points**: Fine details, intricate boundaries, removing noise
+- **Box**: Quick segmentation, well-defined rectangular regions, speed
+
+### Navigation
+
+| Action | Effect |
+|--------|--------|
 | **Left/Right Click** | Navigate to adjacent frames (3D mode) |
+| **Dimension Slider** | Jump to specific frame/slice (3D mode) |
 
 ### Table Selection
 
