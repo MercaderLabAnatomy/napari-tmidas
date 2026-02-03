@@ -80,29 +80,15 @@ mamba activate napari-tmidas
 python -m pip install "napari[all]"
 ```
 
-### Step 2: Choose Your napari-tmidas Version
+### Step 2: Install napari-tmidas
 
-| Use Case | Command |
+| Your Needs | Command |
 |----------|---------|
-| **Just want to process images** | `pip install napari-tmidas` |
-| **Need AI features** (SAM2, Cellpose, etc.) | `pip install 'napari-tmidas[deep-learning]'` |
-| **Want everything (recommended)** | `pip install 'napari-tmidas[all]'` |
-| **Want the latest development features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
+| **Just process & convert images** | `pip install napari-tmidas` |
+| **Need AI features** (SAM2, Cellpose, Spotiflow, etc.) | `pip install 'napari-tmidas[deep-learning]'` |
+| **Want the latest dev features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
 
-### Step 3: Optional - SAM2 Setup
-
-If using Batch Crop Anything with SAM2, install ffmpeg:
-
-```bash
-mamba install -c conda-forge ffmpeg  # Enables video processing for 3D data
-```
-
-### What You Get
-
-- **Basic install**: File conversion, basic processing, label inspection, colocalization
-- **Deep learning install** (+): Cellpose segmentation, SAM2 crop, Spotiflow, VisCy, CAREamics, Trackastra
-- **All install** (+): Everything + all optional features
-- **Git install** (+): Latest features not yet in stable release (recommended for active development)
+**Recommended for most users:** `pip install 'napari-tmidas[deep-learning]'`
 
 ## 🖼️ Screenshots
 
