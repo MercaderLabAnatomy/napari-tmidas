@@ -52,10 +52,18 @@ except (ImportError, ValueError) as e:
     # ValueError: binary incompatibility (e.g., numpy version mismatch)
     KMedoids = None
     _HAS_KMEDOIDS = False
-    print(
-        f"scikit-learn-extra not available ({type(e).__name__}). "
-        "Install with: pip install scikit-learn-extra"
-    )
+    error_msg = str(e)
+    if "numpy.dtype size changed" in error_msg:
+        print(
+            "scikit-learn-extra has a NumPy binary incompatibility. "
+            "This is typically resolved by reinstalling scikit-learn-extra. "
+            "Run: pip install --force-reinstall --no-cache-dir scikit-learn-extra"
+        )
+    else:
+        print(
+            f"scikit-learn-extra not available ({type(e).__name__}). "
+            "Install with: pip install scikit-learn-extra"
+        )
 
 try:
     import pandas as pd

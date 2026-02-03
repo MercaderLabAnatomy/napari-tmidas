@@ -41,9 +41,17 @@ def discover_and_load_processing_functions(reload: bool = False) -> List[str]:
                     importlib.import_module(module_fullname)
                 
                 print(f"Loaded processing function module: {module_name}")
-            except ImportError as e:
+            except (ImportError, ValueError) as e:
                 # Log the error but continue with other modules
-                print(f"Failed to import {module_name}: {e}")
+                # ValueError catches NumPy binary incompatibility issues
+                error_msg = str(e)
+                if "numpy.dtype size changed" in error_msg:
+                    print(
+                        f"Failed to import {module_name}: NumPy binary incompatibility. "
+                        "Try: pip install --force-reinstall --no-cache-dir scikit-learn-extra"
+                    )
+                else:
+                    print(f"Failed to import {module_name}: {e}")
 
     # Return the list of registered functions
     return BatchProcessingRegistry.list_functions()

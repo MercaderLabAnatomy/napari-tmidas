@@ -67,6 +67,28 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
         )
 
+        # First, install PyTorch with CUDA 12.x support for sm_120 compatibility
+        # RTX PRO 4000 Blackwell has CUDA capability sm_120, which requires newer PyTorch
+        print("Installing PyTorch with CUDA 12.x support (for sm_120 compatibility)...")
+        try:
+            subprocess.check_call(
+                [
+                    env_python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                    "--index-url",
+                    "https://download.pytorch.org/whl/cu124",
+                ]
+            )
+            print("✓ PyTorch with CUDA 12.4 installed successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"✗ Failed to install PyTorch: {e}")
+            raise
+
         # Install packages one by one with error checking
         packages = ["cellpose", "zarr", "tifffile"]
         for package in packages:
