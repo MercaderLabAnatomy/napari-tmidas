@@ -58,7 +58,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 ### Core Workflows
 
-- **[Image Conversion](docs/basic_processing.md#file-conversion)** - Multi-format microscopy file conversion
+- **[File Conversion](docs/file_conversion.md)** - Multi-format microscopy file conversion (LIF, ND2, CZI, NDPI, Acquifer)
 - **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
