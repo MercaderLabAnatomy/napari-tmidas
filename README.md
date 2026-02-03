@@ -62,7 +62,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 - **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
-- **[Colocalization](docs/advanced_processing.md#colocalization)** - Multi-channel ROI analysis
+- **[Colocalization](docs/advanced_processing.md#colocalization-analysis)** - Multi-channel ROI analysis
 
 ### Advanced Features
 
