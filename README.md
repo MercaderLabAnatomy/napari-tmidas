@@ -7,184 +7,150 @@
 [![DOI](https://zenodo.org/badge/943353883.svg)](https://doi.org/10.5281/zenodo.17988815)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 
-This napari plugin consists of a growing collection of pipelines for fast batch processing of confocal and whole slide microscopy images of biological tissues. This is a WIP and based on the [T-MIDAS terminal](https://github.com/MercaderLabAnatomy/T-MIDAS).
+**AI-powered batch processing for microscopy images**
 
-## Features
-Currently, **napari-tmidas** provides pipelines as widgets for batch image conversion and processing, object cropping, label image inspection and ROI colocalization (cf. [usage](#usage) below). You can request new batch image processing features in [issues](https://github.com/MercaderLabAnatomy/napari-tmidas/issues).
+Transform, analyze, and quantify microscopy data at scale with deep learning - from file conversion to segmentation, tracking, and analysis.
 
-## Installation
+## ✨ Key Features
 
-(Video installation guides: https://www.youtube.com/@macromeer/videos)
+🤖 **5 AI Methods Built-In**
+- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose) • Tracking (Trackastra)
+- Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
-First, install Napari in a virtual environment:
+🔄 **Universal File Conversion**
+- Convert LIF, ND2, CZI, NDPI, Acquifer → TIFF or OME-Zarr
+- Preserve spatial metadata automatically
 
-    mamba create -y -n napari-tmidas -c conda-forge python=3.11
-    mamba activate napari-tmidas
-    python -m pip install "napari[all]"
+⚡ **Batch Processing**
+- Process entire folders with one click • 40+ processing functions • Progress tracking & quality control
 
-Now you can install `napari-tmidas` via [pip]:
+📊 **Complete Analysis Pipeline**
+- Segmentation → Tracking → Quantification → Colocalization
 
-    pip install napari-tmidas
+## 🚀 Quick Start
 
-**For deep learning features** (Batch Crop Anything with SAM2, Spotiflow, Careamics, Trackastra), also install:
+```bash
+# Install napari and the plugin
+mamba create -y -n napari-tmidas -c conda-forge python=3.11
+mamba activate napari-tmidas
+pip install "napari[all]"
+pip install napari-tmidas
 
-    pip install 'napari-tmidas[deep-learning]'
+# Launch napari
+napari
+```
 
-Or install everything at once:
+Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](https://www.youtube.com/@macromeer/videos)
 
-    pip install 'napari-tmidas[all]'
+> **💡 Tip**: AI methods auto-install their dependencies on first use - no manual setup required!
 
-It is recommended though to install the **latest development version**. Please also execute this command from time to time in the activated environment to benefit from newly added features:
+## 📖 Documentation
 
-    pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git
+### AI-Powered Methods
 
-### Additional Setup for Batch Crop Anything
+| Method | Description | Documentation |
+|--------|-------------|---------------|
+| 🎨 **VisCy** | Virtual staining from phase/DIC | [Guide](docs/viscy_virtual_staining.md) |
+| 🔧 **CAREamics** | Noise2Void/CARE denoising | [Guide](docs/careamics_denoising.md) |
+| 🎯 **Spotiflow** | Spot/puncta detection | [Guide](docs/spotiflow_detection.md) |
+| 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
+| 📈 **Trackastra** | Cell tracking over time | [Guide](docs/trackastra_tracking.md) |
 
-To use the Batch Crop Anything pipeline with SAM2, you only need to install ffmpeg manually. SAM2 and its model checkpoints will be automatically installed when you first run the pipeline:
+### Core Workflows
 
-    mamba install -c conda-forge ffmpeg
+- **[Image Conversion](docs/basic_processing.md#file-conversion)** - Multi-format microscopy file conversion
+- **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
+- **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
+- **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
+- **[Colocalization](docs/advanced_processing.md#colocalization-analysis)** - Multi-channel ROI analysis
 
-If you want to batch compress image data using [Zstandard](https://github.com/facebook/zstd), use the package manager of your operating system to install it:
+### Advanced Features
 
-   ~~sudo apt-get install zstd~~    # Pre-installed on Linux :man_shrugging:
+- [SAM2 Crop Anything](docs/advanced_processing.md#sam2) - Interactive object cropping
+- [Advanced Filters](docs/advanced_processing.md) - SciPy/scikit-image filters
+- [Batch Label Inspection](docs/basic_processing.md#label-inspection) - Manual correction workflow
 
-    brew install zstd            # for macOS (requires Homebrew)
-    pip install zstandard        # Windows with Python >= 3.7
+## 💻 Installation Options
 
-And you are done!
+**Recommended (latest features):**
+```bash
+pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git
+```
 
-## Usage
+**Stable release:**
+```bash
+pip install napari-tmidas
+```
 
-To use the plugin, start napari in the activated virtual environment with this terminal command:
+**With deep learning (optional):**
+```bash
+pip install 'napari-tmidas[deep-learning]'  # Includes SAM2
+pip install 'napari-tmidas[all]'            # Everything
+```
 
-    mamba run -n napari-tmidas napari
+**Additional setup for SAM2:**
+```bash
+mamba install -c conda-forge ffmpeg  # Required for video processing
+```
 
-You can then find the installed plugin in the Plugins tab.
+## 🖼️ Screenshots
 
-### Microscopy Image Conversion
+<details>
+<summary><b>File Conversion Widget</b></summary>
 
-Converts `.lif, .nd2, .czi, .ndpi` and Acquifer data to TIF or OME-Zarr formats. Scan a folder, select files, and export with preserved spatial metadata.
+<img src="https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b" alt="File Conversion" width="600">
 
-**Supported Formats:**
-- **TIF** - Standard format for compatibility
-- **OME-Zarr** - Recommended for large datasets, [spec v0.5](https://ngff.openmicroscopy.org/latest/) compliant with automatic physical metadata extraction (voxel sizes, spacing)
+Convert proprietary formats to open standards with metadata preservation.
+</details>
 
-<img src="https://github.com/user-attachments/assets/e377ca71-2f30-447d-825e-d2feebf7061b" alt="Microscopy Image Conversion Widget" style="width:75%; height:auto;">
+<details>
+<summary><b>Batch Processing Interface</b></summary>
 
+<img src="https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce" alt="Batch Processing" width="600">
 
-### Image Processing
+Select files → Choose processing function → Run on entire dataset.
+</details>
 
-1. You start with entering the path to the folder containing the images to be processed (currently supports TIF, later also ZARR) and optionally a filter for filename suffix
+<details>
+<summary><b>Label Inspection</b></summary>
 
-![image](https://github.com/user-attachments/assets/41ecb689-9abe-4371-83b5-9c5eb37069f9)
+<img src="https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e" alt="Label Inspection" width="600">
 
-2. After indexing the files, a table appears with the found images. You can click on them to inspect them in the viewer.
+Inspect and manually correct segmentation results.
+</details>
 
-![image](https://github.com/user-attachments/assets/8360942a-be8f-49ec-bc25-385ee43bd601)
+<details>
+<summary><b>SAM2 Crop Anything</b></summary>
 
-3. Next, select a processing function, set parameters if applicable and `Start Batch Processing`.
+<img src="https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443" alt="Crop Anything" width="600">
 
-![image](https://github.com/user-attachments/assets/05929660-6672-4f76-89da-4f17749ccfad)
+Interactive object selection and cropping with SAM2.
+</details>
 
-4. You can click on the images in the table to show them in the viewer. For example first click on one of the `Original Files`, and then the corresponding `Processed File` to see an overlay.
+## 🤝 Contributing
 
-<img src="https://github.com/user-attachments/assets/cfe84828-c1cc-4196-9a53-5dfb82d5bfce" alt="Image Processing Widget" style="width:75%; height:auto;">
+Contributions are welcome! Please ensure tests pass before submitting PRs:
 
+```bash
+pip install tox
+tox
+```
 
-Note that whenever you click on an `Original File` or `Processed File` in the table, it will replace the one that is currently shown in the viewer. So naturally, you'd first select the original image, and then the processed image to correctly see the image pair that you want to inspect.
+## 📄 License
 
+BSD-3 License - see [LICENSE](LICENSE) for details.
 
-#### Processing Function Credits
+## 🐛 Issues
 
-The image processing capabilities are powered by several excellent open-source tools:
-- [Cellpose 4](https://github.com/MouseLand/cellpose): Advanced cell segmentation
-- [Trackastra](https://github.com/weigertlab/trackastra): Cell tracking and analysis
-- [VisCy](https://github.com/mehta-lab/VisCy): Virtual staining using deep learning
-- [CAREamics](https://github.com/CAREamics/careamics): Content-aware image restoration and enhancement
-- [Spotiflow](https://github.com/weigertlab/spotiflow): Accurate and efficient spot detection for fluorescence microscopy
+Found a bug or have a feature request? [Open an issue](https://github.com/MercaderLabAnatomy/napari-tmidas/issues)
 
-#### Processing Function Documentation
+## 🙏 Acknowledgments
 
-Detailed documentation for specific processing functions:
+Built with [napari](https://github.com/napari/napari) and powered by:
+- [Cellpose](https://github.com/MouseLand/cellpose) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
 
-**Core Processing**
-- [Basic Processing Functions](docs/basic_processing.md) - Label and intensity operations, channel splitting/merging, time series
-- [Cellpose Segmentation](docs/cellpose_segmentation.md) - Deep learning cell/nucleus segmentation
-- [TrackAstra Tracking](docs/trackastra_tracking.md) - Cell tracking across time-lapse data
-- [VisCy Virtual Staining](docs/viscy_virtual_staining.md) - Virtual staining of phase/DIC images using deep learning
+---
 
-**Interactive Tools**
-- [Batch Crop Anything](docs/crop_anything.md) - AI-powered interactive object cropping with SAM2 (2D and 3D support)
-- [Batch Label Inspection](docs/batch_label_inspection.md) - Edit and verify segmentation labels
-
-**Analysis and Quality Control**
-- [Grid View: Intensity + Labels Overlay](docs/grid_view_overlay.md) - Visual QC for segmentation results
-- [Intensity-Based Label Filtering](docs/intensity_label_filter.md) - Filter labels by signal intensity
-- [Regionprops Analysis](docs/regionprops_analysis.md) - Extract quantitative properties from labels
-
-**Advanced Processing**
-- [Advanced Processing Functions](docs/advanced_processing.md) - Denoising (CAREamics), spot detection (Spotiflow), SciPy/scikit-image filters, compression, colocalization
-
-### Batch Label Inspection
-If you have already segmented a folder full of images and now you want to maybe inspect and edit each label image, you can use the `Plugins > T-MIDAS > Batch Label Inspection`, which automatically saves your changes to the existing label image once you click the `Save Changes and Continue` button (bottom right).
-
-<img src="https://github.com/user-attachments/assets/0bf8c6ae-4212-449d-8183-e91b23ba740e" alt="Batch Label Inspection Widget" style="width:75%; height:auto;">
-
-### Crop Anything
-
-This pipeline combines the Segment Anything Model (SAM2; supports YX, ZYX and TYX data) for automatic object detection with an interactive interface for selecting and cropping multiple objects from images. To launch the widget, open `Plugins > T-MIDAS > Batch Crop Anything`. Cropping works like this: Enter 2D view and go to the first z slice where the object to be cropped is appearing. Activate/select the points layer and click on the object. Terminal shows progress. You can then proceed to select another object (always do this in 2D mode)
-
-<img src="https://github.com/user-attachments/assets/6d72c2a2-1064-4a27-b398-a9b86fcbc443" alt="Crop Anything Widget" style="width:75%; height:auto;">
-
-
-
-
-### ROI Colocalization
-
-This pipeline quantifies colocalization between labeled regions of interest (ROIs) across multiple image channels. It determines the extent of overlap between ROIs in a reference channel and those in one or two other channels. The output is a table of colocalization counts. Optionally, the size of reference channel ROIs, as well as the total or median size of colocalizing ROIs in the other channels, can be included. Colocalization is determined using Boolean masking. The number of colocalizing instances is determined by counting unique label IDs within the overlapping regions. Typically, the reference channel contains larger structures, while other channels contain smaller, potentially nested, structures. For example, the reference channel might contain cell bodies, with the second and third channels containing nuclei and sub-nuclear objects, respectively.
-
-<img src="https://github.com/user-attachments/assets/2f9022a0-7b88-4588-a448-250f07a634d7" alt="ROI Colocalization Widget" style="width:75%; height:auto;">
-
-## Contributing
-
-Contributions are very welcome. Tests can be run with [tox], please ensure
-the coverage at least stays the same before you submit a pull request.
-
-## License
-
-Distributed under the terms of the [BSD-3] license,
-"napari-tmidas" is free and open source software
-
-## Issues
-
-If you encounter any problems, please [file an issue] along with a detailed description.
-
-[napari]: https://github.com/napari/napari
-[copier]: https://copier.readthedocs.io/en/stable/
-[@napari]: https://github.com/napari
-[MIT]: http://opensource.org/licenses/MIT
-[BSD-3]: http://opensource.org/licenses/BSD-3-Clause
-[GNU GPL v3.0]: http://www.gnu.org/licenses/gpl-3.0.txt
-[GNU LGPL v3.0]: http://www.gnu.org/licenses/lgpl-3.0.txt
-[Apache Software License 2.0]: http://www.apache.org/licenses/LICENSE-2.0
-[Mozilla Public License 2.0]: https://www.mozilla.org/media/MPL/2.0/index.txt
-[napari-plugin-template]: https://github.com/napari/napari-plugin-template
-
-[file an issue]: https://github.com/macromeer/napari-tmidas/issues
-
-----------------------------------
-
-This [napari] plugin was generated with [copier] using the [napari-plugin-template].
-
-<!--
-Don't miss the full getting started guide to set up your new package:
-https://github.com/napari/napari-plugin-template#getting-started
-
-and review the napari docs for plugin developers:
-https://napari.org/stable/plugins/index.html
--->
-
-[napari]: https://github.com/napari/napari
-[tox]: https://tox.readthedocs.io/en/latest/
+[PyPI]: https://pypi.org/project/napari-tmidas
 [pip]: https://pypi.org/project/pip/
-[PyPI]: https://pypi.org/
+[tox]: https://tox.readthedocs.io/en/latest/

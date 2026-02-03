@@ -4,17 +4,15 @@
 import numpy as np
 import pytest
 
-# Try importing the functions - they may not be available if sklearn-extra is not installed
-try:
-    from napari_tmidas.processing_functions.intensity_label_filter import (
-        _calculate_label_mean_intensities,
-        _cluster_intensities,
-        _filter_labels_by_threshold,
-    )
+# Import the module and check if k-medoids is available
+from napari_tmidas.processing_functions.intensity_label_filter import (
+    _HAS_KMEDOIDS,
+    _calculate_label_mean_intensities,
+    _cluster_intensities,
+    _filter_labels_by_threshold,
+)
 
-    HAS_KMEDOIDS = True
-except ImportError:
-    HAS_KMEDOIDS = False
+HAS_KMEDOIDS = _HAS_KMEDOIDS
 
 
 @pytest.mark.skipif(

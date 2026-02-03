@@ -1,11 +1,17 @@
 # src/napari_tmidas/_tests/test_registry.py
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions import discover_and_load_processing_functions
 
 
 class TestBatchProcessingRegistry:
     def setup_method(self):
         """Clear registry before each test"""
         BatchProcessingRegistry._processing_functions.clear()
+    
+    def teardown_method(self):
+        """Restore registry after each test"""
+        BatchProcessingRegistry._processing_functions.clear()
+        discover_and_load_processing_functions(reload=True)
 
     def test_register_function(self):
         """Test registering a processing function"""

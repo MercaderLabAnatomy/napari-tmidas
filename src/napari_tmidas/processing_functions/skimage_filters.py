@@ -2,6 +2,9 @@
 """
 Processing functions that depend on scikit-image.
 """
+import concurrent.futures
+import os
+
 import numpy as np
 
 try:
@@ -61,7 +64,7 @@ if SKIMAGE_AVAILABLE:
         Parameters
         ----------
         image : np.ndarray
-            Input image
+            Input image (supports 2D, 3D, and 4D arrays like YX, ZYX, TYX, TZYX)
         clip_limit : float
             Clipping limit for contrast limiting (normalized to 0-1 range, e.g., 0.01 = 1%)
             Higher values give more contrast but may amplify noise
@@ -72,9 +75,18 @@ if SKIMAGE_AVAILABLE:
         -------
         np.ndarray
             CLAHE-enhanced image with same dtype as input
+        
+        Notes
+        -----
+        For large multi-dimensional datasets (TZYX), processing is parallelized across
+        the first dimension to utilize multiple CPU cores effectively.
         """
         # Store original dtype to convert back later
         original_dtype = image.dtype
+        
+        # Print diagnostic info for multi-dimensional data
+        if image.ndim > 2:
+            print(f"Applying CLAHE to {image.ndim}D image with shape {image.shape}")
 
         # Auto-calculate kernel size if not specified
         if kernel_size <= 0:
@@ -87,13 +99,64 @@ if SKIMAGE_AVAILABLE:
         # Ensure kernel_size is odd
         if kernel_size % 2 == 0:
             kernel_size += 1
-
-        # Apply CLAHE using scikit-image's equalize_adapthist
-        # Note: clip_limit in equalize_adapthist is already normalized (0-1 range)
-        # This returns float64 in range [0, 1]
-        result = skimage.exposure.equalize_adapthist(
-            image, kernel_size=kernel_size, clip_limit=clip_limit
-        )
+        
+        if image.ndim > 2:
+            print(f"Using kernel_size={kernel_size}, clip_limit={clip_limit}")
+        
+        # For 4D data (TZYX), parallelize across first dimension for better performance
+        if image.ndim == 4 and image.shape[0] > 1:
+            print(f"Parallelizing CLAHE across {image.shape[0]} timepoints/slices using {max(1, os.cpu_count() - 1)} workers...")
+            
+            def process_slice(idx):
+                """Process a single slice along first dimension"""
+                result_slice = skimage.exposure.equalize_adapthist(
+                    image[idx], kernel_size=kernel_size, clip_limit=clip_limit
+                )
+                if (idx + 1) % max(1, image.shape[0] // 10) == 0:
+                    print(f"  Processed {idx + 1}/{image.shape[0]} slices")
+                return result_slice
+            
+            # Process in parallel
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, os.cpu_count() - 1)
+            ) as executor:
+                futures = [executor.submit(process_slice, i) for i in range(image.shape[0])]
+                results = [future.result() for future in futures]
+            
+            result = np.stack(results, axis=0)
+            print("CLAHE processing complete!")
+            
+        elif image.ndim == 3 and image.shape[0] > 5:
+            # For 3D data with many slices, also parallelize
+            print(f"Parallelizing CLAHE across {image.shape[0]} slices using {max(1, os.cpu_count() - 1)} workers...")
+            
+            def process_slice(idx):
+                """Process a single 2D slice"""
+                result_slice = skimage.exposure.equalize_adapthist(
+                    image[idx], kernel_size=kernel_size, clip_limit=clip_limit
+                )
+                if (idx + 1) % max(1, image.shape[0] // 10) == 0:
+                    print(f"  Processed {idx + 1}/{image.shape[0]} slices")
+                return result_slice
+            
+            # Process in parallel
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, os.cpu_count() - 1)
+            ) as executor:
+                futures = [executor.submit(process_slice, i) for i in range(image.shape[0])]
+                results = [future.result() for future in futures]
+            
+            result = np.stack(results, axis=0)
+            print("CLAHE processing complete!")
+        else:
+            # For 2D or small 3D data, use native implementation
+            if image.ndim > 2:
+                print("Processing...")
+            result = skimage.exposure.equalize_adapthist(
+                image, kernel_size=kernel_size, clip_limit=clip_limit
+            )
+            if image.ndim > 2:
+                print("CLAHE processing complete!")
 
         # Convert back to original dtype to preserve compatibility
         if np.issubdtype(original_dtype, np.integer):
