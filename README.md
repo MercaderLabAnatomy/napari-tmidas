@@ -113,6 +113,10 @@ Detailed documentation for specific processing functions:
 - [TrackAstra Tracking](docs/trackastra_tracking.md) - Cell tracking across time-lapse data
 - [VisCy Virtual Staining](docs/viscy_virtual_staining.md) - Virtual staining of phase/DIC images using deep learning
 
+**Interactive Tools**
+- [Batch Crop Anything](docs/crop_anything.md) - AI-powered interactive object cropping with SAM2 (2D and 3D support)
+- [Batch Label Inspection](docs/batch_label_inspection.md) - Edit and verify segmentation labels
+
 **Analysis and Quality Control**
 - [Grid View: Intensity + Labels Overlay](docs/grid_view_overlay.md) - Visual QC for segmentation results
 - [Intensity-Based Label Filtering](docs/intensity_label_filter.md) - Filter labels by signal intensity
