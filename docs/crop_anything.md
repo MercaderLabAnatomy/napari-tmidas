@@ -13,9 +13,9 @@ This plugin enables:
 
 ## Installation
 
-### Basic Installation
+### Installation
 
-The plugin is included in napari-tmidas. For deep learning features, install with the `deep-learning` extra:
+Batch Crop Anything requires the deep learning components. Install with:
 
 ```bash
 pip install 'napari-tmidas[deep-learning]'

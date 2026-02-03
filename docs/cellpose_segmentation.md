@@ -15,16 +15,15 @@ Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** with improve
 
 ## Installation
 
-Cellpose can be installed in your napari-tmidas environment, or the plugin will automatically create a dedicated environment when first used.
-
-### Manual Installation (Recommended)
+Cellpose is automatically available when you install napari-tmidas with deep learning support:
 
 ```bash
-mamba activate napari-tmidas
-pip install cellpose[gui]
+pip install 'napari-tmidas[deep-learning]'
 ```
 
-### Automatic Installation
+If you installed the basic version without deep learning, the plugin will automatically create a dedicated `cellpose-env` environment when first used.
+
+### What Happens on First Use
 
 If Cellpose is not detected, the plugin will:
 1. Create a dedicated `cellpose-env` conda environment
