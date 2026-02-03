@@ -47,11 +47,14 @@ try:
     from sklearn_extra.cluster import KMedoids
 
     _HAS_KMEDOIDS = True
-except ImportError:
+except (ImportError, ValueError) as e:
+    # ImportError: package not installed
+    # ValueError: binary incompatibility (e.g., numpy version mismatch)
     KMedoids = None
     _HAS_KMEDOIDS = False
     print(
-        "scikit-learn-extra not available. Install with: pip install scikit-learn-extra"
+        f"scikit-learn-extra not available ({type(e).__name__}). "
+        "Install with: pip install scikit-learn-extra"
     )
 
 try:
