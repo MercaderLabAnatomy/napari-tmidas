@@ -73,15 +73,7 @@ The threshold is set at the midpoint between the lowest and second-lowest cluste
 
 The intensity filtering functions require the `scikit-learn-extra` package for k-medoids clustering:
 
-```bash
-pip install scikit-learn-extra
-```
-
-Or install with the clustering optional dependency:
-
-```bash
-pip install napari-tmidas[clustering]
-```
+The `scikit-learn-extra` package is automatically installed as part of napari-tmidas, so no additional installation is needed.
 
 ## Algorithm Details
 

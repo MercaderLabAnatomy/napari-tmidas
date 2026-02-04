@@ -58,40 +58,37 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 ### Core Workflows
 
-- **[Image Conversion](docs/basic_processing.md#file-conversion)** - Multi-format microscopy file conversion
+- **[File Conversion](docs/file_conversion.md)** - Multi-format microscopy file conversion (LIF, ND2, CZI, NDPI, Acquifer)
 - **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
-- **[Colocalization](docs/advanced_processing.md#colocalization)** - Multi-channel ROI analysis
+- **[Colocalization](docs/advanced_processing.md#colocalization-analysis)** - Multi-channel ROI analysis
 
 ### Advanced Features
 
-- [SAM2 Crop Anything](docs/advanced_processing.md#sam2) - Interactive object cropping
+- [SAM2 Crop Anything](docs/crop_anything.md) - Interactive object cropping
 - [Advanced Filters](docs/advanced_processing.md) - SciPy/scikit-image filters
-- [Batch Label Inspection](docs/basic_processing.md#label-inspection) - Manual correction workflow
+- [Batch Label Inspection](docs/batch_label_inspection.md) - Manual correction workflow
 
-## 💻 Installation Options
+## 💻 Installation
 
-**Recommended (latest features):**
+### Step 1: Install napari
+
 ```bash
-pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git
+mamba create -y -n napari-tmidas -c conda-forge python=3.11
+mamba activate napari-tmidas
+python -m pip install "napari[all]"
 ```
 
-**Stable release:**
-```bash
-pip install napari-tmidas
-```
+### Step 2: Install napari-tmidas
 
-**With deep learning (optional):**
-```bash
-pip install 'napari-tmidas[deep-learning]'  # Includes SAM2
-pip install 'napari-tmidas[all]'            # Everything
-```
+| Your Needs | Command |
+|----------|---------|
+| **Just process & convert images** | `pip install napari-tmidas` |
+| **Need AI features** (SAM2, Cellpose, Spotiflow, etc.) | `pip install 'napari-tmidas[deep-learning]'` |
+| **Want the latest dev features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
 
-**Additional setup for SAM2:**
-```bash
-mamba install -c conda-forge ffmpeg  # Required for video processing
-```
+**Recommended for most users:** `pip install 'napari-tmidas[deep-learning]'`
 
 ## 🖼️ Screenshots
 
