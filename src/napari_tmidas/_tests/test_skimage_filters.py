@@ -257,3 +257,22 @@ class TestCLAHE:
         assert result_float32.dtype == np.float32
         assert result_float32.max() <= 1.0
         assert result_float32.min() >= 0.0
+
+    def test_clahe_max_workers_parameter(self):
+        """Test that max_workers parameter is respected"""
+        # Create a 4D image that will trigger parallel processing
+        image_4d = np.random.rand(10, 50, 100, 100) * 0.5
+
+        # Test with different worker counts
+        result_1 = equalize_histogram(image_4d, max_workers=1)
+        result_4 = equalize_histogram(image_4d, max_workers=4)
+        result_8 = equalize_histogram(image_4d, max_workers=8)
+
+        # All should produce same shape
+        assert result_1.shape == image_4d.shape
+        assert result_4.shape == image_4d.shape
+        assert result_8.shape == image_4d.shape
+
+        # Results should be nearly identical (some floating point differences are OK)
+        np.testing.assert_allclose(result_1, result_4, rtol=1e-5)
+        np.testing.assert_allclose(result_1, result_8, rtol=1e-5)
