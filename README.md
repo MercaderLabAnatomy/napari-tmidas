@@ -68,7 +68,8 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 - [Batch Crop Anything](docs/crop_anything.md) - Interactive object cropping with SAM2
 - [Batch Label Inspection](docs/batch_label_inspection.md) - Manual label verification and editing
-- [Advanced Filters](docs/advanced_processing.md) - SciPy/scikit-image filters
+- [SciPy Filters](docs/advanced_processing.md#scipy-filters) - Gaussian, median, morphological operations
+- [Scikit-Image Filters](docs/advanced_processing.md#scikit-image-filters) - CLAHE, thresholding, edge detection
 
 ## 💻 Installation
 
