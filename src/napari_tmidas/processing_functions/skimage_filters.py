@@ -3,7 +3,6 @@
 Processing functions that depend on scikit-image.
 """
 import concurrent.futures
-import os
 
 import numpy as np
 
@@ -49,10 +48,18 @@ if SKIMAGE_AVAILABLE:
                 "default": 0,
                 "description": "Size of the local region (0 = auto-calculate based on image size). For small features use smaller values (e.g., 32), for large features use larger values (e.g., 128)",
             },
+            "max_workers": {
+                "type": int,
+                "default": 4,
+                "description": "Maximum number of parallel workers (default: 4). Lower values use less memory but are slower. Range: 1-16",
+            },
         },
     )
     def equalize_histogram(
-        image: np.ndarray, clip_limit: float = 0.01, kernel_size: int = 0
+        image: np.ndarray,
+        clip_limit: float = 0.01,
+        kernel_size: int = 0,
+        max_workers: int = 4,
     ) -> np.ndarray:
         """
         Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to enhance local contrast.
@@ -70,23 +77,29 @@ if SKIMAGE_AVAILABLE:
             Higher values give more contrast but may amplify noise
         kernel_size : int
             Size of the contextual regions (0 = auto-calculate based on image size)
+        max_workers : int
+            Maximum number of parallel workers for processing large datasets (default: 4)
+            Lower values reduce memory usage, higher values increase speed
 
         Returns
         -------
         np.ndarray
             CLAHE-enhanced image with same dtype as input
-        
+
         Notes
         -----
         For large multi-dimensional datasets (TZYX), processing is parallelized across
-        the first dimension to utilize multiple CPU cores effectively.
+        the first dimension to utilize multiple CPU cores effectively. The max_workers
+        parameter controls memory usage vs speed tradeoff.
         """
         # Store original dtype to convert back later
         original_dtype = image.dtype
-        
+
         # Print diagnostic info for multi-dimensional data
         if image.ndim > 2:
-            print(f"Applying CLAHE to {image.ndim}D image with shape {image.shape}")
+            print(
+                f"Applying CLAHE to {image.ndim}D image with shape {image.shape}"
+            )
 
         # Auto-calculate kernel size if not specified
         if kernel_size <= 0:
@@ -99,14 +112,19 @@ if SKIMAGE_AVAILABLE:
         # Ensure kernel_size is odd
         if kernel_size % 2 == 0:
             kernel_size += 1
-        
+
         if image.ndim > 2:
             print(f"Using kernel_size={kernel_size}, clip_limit={clip_limit}")
-        
+
+        # Clamp max_workers to reasonable range
+        max_workers = max(1, min(max_workers, 16))
+
         # For 4D data (TZYX), parallelize across first dimension for better performance
         if image.ndim == 4 and image.shape[0] > 1:
-            print(f"Parallelizing CLAHE across {image.shape[0]} timepoints/slices using {max(1, os.cpu_count() - 1)} workers...")
-            
+            print(
+                f"Parallelizing CLAHE across {image.shape[0]} timepoints/slices using {max_workers} workers..."
+            )
+
             def process_slice(idx):
                 """Process a single slice along first dimension"""
                 result_slice = skimage.exposure.equalize_adapthist(
@@ -115,21 +133,26 @@ if SKIMAGE_AVAILABLE:
                 if (idx + 1) % max(1, image.shape[0] // 10) == 0:
                     print(f"  Processed {idx + 1}/{image.shape[0]} slices")
                 return result_slice
-            
-            # Process in parallel
+
+            # Process in parallel with limited workers to control memory usage
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(1, os.cpu_count() - 1)
+                max_workers=max_workers
             ) as executor:
-                futures = [executor.submit(process_slice, i) for i in range(image.shape[0])]
+                futures = [
+                    executor.submit(process_slice, i)
+                    for i in range(image.shape[0])
+                ]
                 results = [future.result() for future in futures]
-            
+
             result = np.stack(results, axis=0)
             print("CLAHE processing complete!")
-            
+
         elif image.ndim == 3 and image.shape[0] > 5:
             # For 3D data with many slices, also parallelize
-            print(f"Parallelizing CLAHE across {image.shape[0]} slices using {max(1, os.cpu_count() - 1)} workers...")
-            
+            print(
+                f"Parallelizing CLAHE across {image.shape[0]} slices using {max_workers} workers..."
+            )
+
             def process_slice(idx):
                 """Process a single 2D slice"""
                 result_slice = skimage.exposure.equalize_adapthist(
@@ -138,14 +161,17 @@ if SKIMAGE_AVAILABLE:
                 if (idx + 1) % max(1, image.shape[0] // 10) == 0:
                     print(f"  Processed {idx + 1}/{image.shape[0]} slices")
                 return result_slice
-            
-            # Process in parallel
+
+            # Process in parallel with limited workers to control memory usage
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(1, os.cpu_count() - 1)
+                max_workers=max_workers
             ) as executor:
-                futures = [executor.submit(process_slice, i) for i in range(image.shape[0])]
+                futures = [
+                    executor.submit(process_slice, i)
+                    for i in range(image.shape[0])
+                ]
                 results = [future.result() for future in futures]
-            
+
             result = np.stack(results, axis=0)
             print("CLAHE processing complete!")
         else:
