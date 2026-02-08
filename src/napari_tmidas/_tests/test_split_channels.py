@@ -2,6 +2,8 @@
 
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,7 +11,11 @@ import pytest
 # Add the source directory to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from napari_tmidas.processing_functions.basic import split_channels
+from napari_tmidas.processing_functions.basic import (
+    get_timepoint_count,
+    sort_files_by_timepoints,
+    split_channels,
+)
 
 
 class TestSplitChannels:
@@ -210,6 +216,114 @@ class TestSplitChannels:
 
         with pytest.raises(ValueError, match="at least 3 dimensions"):
             split_channels(image_2d, num_channels=3, time_steps=0)
+
+
+class TestTimepointSorting:
+    """Test the timepoint sorting functionality"""
+
+    def test_get_timepoint_count(self):
+        """Test timepoint count detection from TIFF files"""
+        # This test requires tifffile to be installed
+        pytest.importorskip("tifffile")
+        import tifffile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test TIFF with different timepoint counts
+            test_cases = [
+                ("single_timepoint.tif", np.random.rand(100, 100, 3), 1),
+                ("time_series_10.tif", np.random.rand(10, 100, 100, 3), 10),
+                ("time_series_50.tif", np.random.rand(50, 100, 100, 3), 50),
+            ]
+
+            for filename, data, expected_t in test_cases:
+                filepath = os.path.join(tmpdir, filename)
+                # Save with explicit axes information
+                if data.ndim == 4:
+                    # TCYX format
+                    tifffile.imwrite(filepath, data, metadata={"axes": "TCYX"})
+                else:
+                    # CYX format (no time dimension)
+                    tifffile.imwrite(filepath, data, metadata={"axes": "CYX"})
+
+                # Test timepoint detection
+                detected_t = get_timepoint_count(filepath)
+                assert detected_t == expected_t, (
+                    f"Expected {expected_t} timepoints for {filename}, "
+                    f"but detected {detected_t}"
+                )
+
+    def test_sort_files_by_timepoints(self):
+        """Test sorting files into timepoint subfolders"""
+        pytest.importorskip("tifffile")
+        import tifffile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            # Create test files with different timepoint counts
+            test_files = []
+            file_configs = [
+                ("img1.tif", np.random.rand(100, 100, 3), "CYX", 1),
+                ("img2.tif", np.random.rand(100, 100, 3), "CYX", 1),
+                ("img3.tif", np.random.rand(10, 100, 100, 3), "TCYX", 10),
+                ("img4.tif", np.random.rand(10, 100, 100, 3), "TCYX", 10),
+                ("img5.tif", np.random.rand(50, 100, 100, 3), "TCYX", 50),
+            ]
+
+            for filename, data, axes, _ in file_configs:
+                filepath = str(input_dir / filename)
+                tifffile.imwrite(filepath, data, metadata={"axes": axes})
+                test_files.append(filepath)
+
+            # Sort files by timepoints
+            timepoint_map = sort_files_by_timepoints(
+                test_files, str(output_dir)
+            )
+
+            # Verify folder structure
+            assert (output_dir / "T1").exists(), "T1 folder should exist"
+            assert (output_dir / "T10").exists(), "T10 folder should exist"
+            assert (output_dir / "T50").exists(), "T50 folder should exist"
+
+            # Verify file counts
+            assert (
+                1 in timepoint_map and len(timepoint_map[1]) == 2
+            ), "Should have 2 files with T=1"
+            assert (
+                10 in timepoint_map and len(timepoint_map[10]) == 2
+            ), "Should have 2 files with T=10"
+            assert (
+                50 in timepoint_map and len(timepoint_map[50]) == 1
+            ), "Should have 1 file with T=50"
+
+            # Verify files were copied correctly
+            assert len(list((output_dir / "T1").glob("*.tif"))) == 2
+            assert len(list((output_dir / "T10").glob("*.tif"))) == 2
+            assert len(list((output_dir / "T50").glob("*.tif"))) == 1
+
+    def test_split_channels_with_timepoint_sorting_flag(self):
+        """Test that sort_by_timepoints parameter doesn't break normal splitting"""
+        # Create a simple test image
+        yxc_image = np.random.rand(100, 100, 3)
+
+        # Test with sort_by_timepoints=False (default behavior)
+        result_no_sort = split_channels(
+            yxc_image, num_channels=3, sort_by_timepoints=False
+        )
+
+        # Test with sort_by_timepoints=True (should still split correctly)
+        # Note: Without proper file context, sorting won't actually happen,
+        # but the splitting should still work
+        result_with_sort = split_channels(
+            yxc_image, num_channels=3, sort_by_timepoints=True
+        )
+
+        # Both should produce the same result
+        assert result_no_sort.shape == result_with_sort.shape
+        assert result_no_sort.shape == (3, 100, 100)
 
 
 if __name__ == "__main__":
