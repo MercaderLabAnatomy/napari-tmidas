@@ -5,8 +5,11 @@ Basic image processing functions
 import concurrent.futures
 import inspect
 import os
+import shutil
 import traceback
 import warnings
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -28,6 +31,139 @@ try:
 except ImportError:
     tifffile = None
     _HAS_TIFFFILE = False
+
+
+# ============================================================================
+# Helper functions for timepoint sorting
+# ============================================================================
+
+
+def get_timepoint_count(image_path):
+    """
+    Read image metadata and determine the number of timepoints without loading image data.
+
+    Parameters
+    ----------
+    image_path : str or Path
+        Path to the image file
+
+    Returns
+    -------
+    int or None
+        Number of timepoints, or None if unable to determine
+    """
+    if not _HAS_TIFFFILE:
+        print("Warning: tifffile not available, cannot determine timepoints")
+        return 1
+
+    try:
+        with tifffile.TiffFile(image_path) as tif:
+            # Get shape from metadata without loading the image data
+            if len(tif.series) > 0:
+                series = tif.series[0]
+                shape = series.shape
+                axes = series.axes
+
+                # Check if axes information is available
+                if "T" in axes:
+                    t_idx = axes.index("T")
+                    if t_idx < len(shape):
+                        return shape[t_idx]
+
+            # Fallback: get shape from first page
+            if len(tif.pages) > 0:
+                # Check ImageJ metadata for axis information
+                if hasattr(tif, "imagej_metadata") and tif.imagej_metadata:
+                    metadata = tif.imagej_metadata
+                    if "frames" in metadata:
+                        return metadata["frames"]
+
+                # For multi-page TIFF, infer from structure
+                num_pages = len(tif.pages)
+
+                # If no explicit T axis found, assume single timepoint
+                if num_pages == 1:
+                    return 1  # Single timepoint
+
+                # If we can't determine, assume single timepoint
+                return 1
+
+    except (OSError, ValueError, AttributeError) as e:
+        print(f"Warning: Could not read {image_path}: {e}")
+        return None
+
+    return None
+
+
+def sort_files_by_timepoints(
+    file_list: List[str], output_folder: str
+) -> Dict[int, List[str]]:
+    """
+    Sort a list of image files into timepoint subfolders.
+
+    Parameters
+    ----------
+    file_list : List[str]
+        List of image file paths to sort
+    output_folder : str
+        Base output folder where timepoint subfolders will be created
+
+    Returns
+    -------
+    Dict[int, List[str]]
+        Dictionary mapping timepoint counts to lists of sorted file paths
+        Format: {num_timepoints: [file_path1, file_path2, ...]}
+    """
+    output_folder = Path(output_folder)
+    timepoint_map = {}
+
+    print(f"\n{'='*60}")
+    print("SORTING FILES BY TIMEPOINTS")
+    print(f"{'='*60}")
+
+    for img_path in file_list:
+        print(f"Processing: {Path(img_path).name}...", end=" ")
+
+        # Get timepoint count
+        num_timepoints = get_timepoint_count(img_path)
+
+        if num_timepoints is None:
+            print("SKIPPED (could not determine timepoints)")
+            continue
+
+        # Create output folder for this timepoint count
+        timepoint_folder = output_folder / f"T{num_timepoints}"
+        timepoint_folder.mkdir(parents=True, exist_ok=True)
+
+        # Copy the file
+        dest_path = timepoint_folder / Path(img_path).name
+
+        try:
+            shutil.copy2(img_path, dest_path)
+            print(f"COPIED to T{num_timepoints}/")
+
+            # Add to map
+            if num_timepoints not in timepoint_map:
+                timepoint_map[num_timepoints] = []
+            timepoint_map[num_timepoints].append(str(dest_path))
+
+        except OSError as e:
+            print(f"ERROR: {e}")
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print("SORTING COMPLETE")
+    print(f"{'='*60}")
+    for timepoints, files in sorted(timepoint_map.items()):
+        print(f"T{timepoints}: {len(files)} files")
+    print(f"{'='*60}\n")
+
+    return timepoint_map
+
+
+# ============================================================================
+# Basic processing functions
+# ============================================================================
 
 
 def _to_array(data: np.ndarray) -> np.ndarray:
@@ -577,13 +713,18 @@ def max_z_projection_tzyx(image: np.ndarray) -> np.ndarray:
             "default": 0,
             "min": 0,
             "max": 1000,
-            "description": "Number of time steps (leave 0 if not a time series)",
+            "description": "Number of time steps - leave at 0 if: (1) not a time series, (2) using sort_by_timepoints, or (3) timepoints vary per image",
         },
         "output_format": {
             "type": str,
             "default": "python",
             "options": ["python", "fiji"],
             "description": "Output dimension order: python (standard) or fiji (ImageJ/Fiji compatible)",
+        },
+        "sort_by_timepoints": {
+            "type": bool,
+            "default": False,
+            "description": "Auto-organize images by timepoint count into T1/, T10/, etc. subfolders (leave time_steps at 0 when using this)",
         },
     },
 )
@@ -592,6 +733,8 @@ def split_channels(
     num_channels: int = 3,
     time_steps: int = 0,
     output_format: str = "python",
+    sort_by_timepoints: bool = False,
+    _source_filepath: Optional[str] = None,
 ) -> np.ndarray:
     """
     Split the image into separate channels based on the specified number of channels.
@@ -602,10 +745,57 @@ def split_channels(
         num_channels: Number of channels in the image (default: 3)
         time_steps: Number of time steps if time series (default: 0, meaning not a time series)
         output_format: Dimension order format, either "python" (standard) or "fiji" (ImageJ compatible)
+        sort_by_timepoints: If True, files are first organized into timepoint subfolders before splitting
 
     Returns:
         Stacked array of channels with shape (num_channels, ...)
+
+    Note:
+        When sort_by_timepoints is enabled:
+        - Files are copied into T1/, T10/, T50/ etc. subfolders based on their timepoint count
+        - The split operation then processes files within each timepoint subfolder
+        - This is useful when your dataset contains images with varying timepoint counts
     """
+    # Handle timepoint sorting if requested
+    if sort_by_timepoints:
+        # Get current file context from processing worker
+        file_list = None
+        output_folder = None
+
+        for frame_info in inspect.stack():
+            frame_locals = frame_info.frame.f_locals
+            if "file_list" in frame_locals:
+                file_list = frame_locals.get("file_list")
+            if "output_folder" in frame_locals:
+                output_folder = frame_locals.get("output_folder")
+
+        # Check if we need to perform sorting (only on first file)
+        # Use a module-level flag to track if sorting has been done for this batch
+        if not hasattr(split_channels, "_timepoint_sorted_output"):
+            split_channels._timepoint_sorted_output = None
+
+        if (
+            file_list
+            and output_folder
+            and split_channels._timepoint_sorted_output != output_folder
+        ):
+            print("\n" + "=" * 70)
+            print("TIMEPOINT SORTING ENABLED")
+            print("=" * 70)
+            print(f"Input files: {len(file_list)}")
+            print(f"Output folder: {output_folder}")
+
+            # Sort files by timepoints
+            sort_files_by_timepoints(file_list, output_folder)
+
+            # Mark that we've sorted for this output folder
+            split_channels._timepoint_sorted_output = output_folder
+
+            print(
+                "\nTimepoint subfolders created. Files will be split within each subfolder."
+            )
+            print("=" * 70 + "\n")
+
     # Validate input
     if image.ndim < 3:
         raise ValueError(
@@ -614,6 +804,23 @@ def split_channels(
 
     print(f"Image shape: {image.shape}")
     is_timelapse = time_steps > 0
+
+    # Better heuristic: if we have 5+ dimensions, first dimension is likely T
+    # even if time_steps=0 (e.g., when using sort_by_timepoints with varying timepoints)
+    if (
+        not is_timelapse
+        and image.ndim >= 5
+        and (
+            image.shape[0] > 16
+            or (1 < image.shape[0] <= 16 and image.shape[0] != num_channels)
+        )
+    ):
+        # Check if first dimension could be time (typically has reasonable size, not 1-16 like channels)
+        is_timelapse = True
+        print(
+            f"Auto-detected time dimension: T={image.shape[0]} (time_steps parameter was 0)"
+        )
+
     is_3d = (
         image.ndim > 3
     )  # More than 3 dimensions likely means 3D + channels or time series

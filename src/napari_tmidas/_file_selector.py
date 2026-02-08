@@ -1226,8 +1226,9 @@ class ParameterWidget(QWidget):
         self.parameters = parameters
         self.param_widgets = {}
 
-        layout = QFormLayout()
-        self.setLayout(layout)
+        # Use VBoxLayout to stack parameters vertically with descriptions
+        main_layout = QVBoxLayout()
+        self.setLayout(main_layout)
 
         # Create widgets for each parameter
         for param_name, param_info in parameters.items():
@@ -1236,9 +1237,32 @@ class ParameterWidget(QWidget):
             min_value = param_info.get("min")
             max_value = param_info.get("max")
             description = param_info.get("description", "")
+            options = param_info.get("options")  # For dropdown parameters
+
+            # Create a container for this parameter
+            param_container = QWidget()
+            param_layout = QVBoxLayout()
+            param_layout.setContentsMargins(0, 5, 0, 5)
+            param_container.setLayout(param_layout)
+
+            # Create a horizontal layout for label and widget
+            input_layout = QHBoxLayout()
+
+            # Add parameter name label (no description here)
+            name_label = QLabel(f"{param_name}:")
+            name_label.setMinimumWidth(120)
+            input_layout.addWidget(name_label)
 
             # Create appropriate widget based on parameter type
-            if param_type is int:
+            if options:
+                # Use QComboBox for parameters with predefined options
+                widget = QComboBox()
+                widget.addItems([str(opt) for opt in options])
+                if default_value is not None:
+                    index = widget.findText(str(default_value))
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+            elif param_type is int:
                 widget = QSpinBox()
                 if min_value is not None:
                     widget.setMinimum(min_value)
@@ -1266,8 +1290,21 @@ class ParameterWidget(QWidget):
                     str(default_value) if default_value is not None else ""
                 )
 
-            # Add widget to layout with label
-            layout.addRow(f"{param_name} ({description}):", widget)
+            input_layout.addWidget(widget)
+            input_layout.addStretch()
+            param_layout.addLayout(input_layout)
+
+            # Add description label below the input widget with word wrap
+            if description:
+                desc_label = QLabel(description)
+                desc_label.setWordWrap(True)
+                desc_label.setStyleSheet(
+                    "color: gray; font-size: 10px; padding-left: 10px;"
+                )
+                desc_label.setMaximumWidth(400)  # Prevent excessive width
+                param_layout.addWidget(desc_label)
+
+            main_layout.addWidget(param_container)
             self.param_widgets[param_name] = widget
 
     def get_parameter_values(self) -> Dict[str, Any]:
@@ -1278,7 +1315,18 @@ class ParameterWidget(QWidget):
         for param_name, widget in self.param_widgets.items():
             param_type = self.parameters[param_name]["type"]
 
-            if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            if isinstance(widget, QComboBox):
+                # For dropdown, get the selected text and convert to appropriate type
+                text_value = widget.currentText()
+                try:
+                    values[param_name] = (
+                        param_type(text_value)
+                        if param_type is not str
+                        else text_value
+                    )
+                except (ValueError, TypeError):
+                    values[param_name] = text_value
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 values[param_name] = widget.value()
             elif isinstance(widget, QCheckBox):
                 values[param_name] = widget.isChecked()
@@ -2054,6 +2102,10 @@ class FileResultsWidget(QWidget):
 
         # Add description label
         self.function_description = QLabel("")
+        self.function_description.setWordWrap(True)
+        self.function_description.setStyleSheet(
+            "color: gray; font-style: italic;"
+        )
         processing_layout.addWidget(self.function_description)
 
         # Create parameters section (will be populated when function is selected)
