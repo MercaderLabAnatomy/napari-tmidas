@@ -13,6 +13,7 @@ as the first argument, and any additional keyword arguments for parameters.
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import os
 import sys
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -1664,6 +1665,32 @@ class ProcessingWorker(QThread):
                 }
             else:
                 processing_params = self.param_values
+
+            # Filter parameters based on function signature
+            # Check if function accepts **kwargs or has specific parameters
+            try:
+                sig = inspect.signature(self.processing_func)
+                # Check if function accepts **kwargs
+                has_var_keyword = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+
+                if not has_var_keyword:
+                    # Function doesn't accept **kwargs, so filter parameters
+                    valid_params = set(sig.parameters.keys())
+                    processing_params = {
+                        k: v
+                        for k, v in processing_params.items()
+                        if k in valid_params
+                    }
+            except (ValueError, TypeError):
+                # If we can't inspect the signature, try to filter out internal params
+                processing_params = {
+                    k: v
+                    for k, v in processing_params.items()
+                    if not k.startswith("_")
+                }
 
             processed_result = self.processing_func(image, **processing_params)
 
