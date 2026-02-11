@@ -254,7 +254,7 @@ TrackAstra assigns consistent IDs such that:
 
 TrackAstra is developed by the Weigert Lab:
 - [TrackAstra GitHub](https://github.com/weigertlab/trackastra)
-- [TrackAstra Paper](https://www.nature.com/articles/s41592-024-02459-2)
+- [TrackAstra Paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf)
 
 ## See Also
 
