@@ -352,6 +352,9 @@ class LIFLoader(FormatLoader):
         if not filepath.lower().endswith(".lif"):
             return False
 
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             # Quick validation by attempting to open
             lif_file = LifFile(filepath)
@@ -365,6 +368,9 @@ class LIFLoader(FormatLoader):
     @staticmethod
     def get_series_count(filepath: str) -> int:
         """Get number of series in LIF file with better error handling"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             lif_file = LifFile(filepath)
             # Count images more safely
@@ -383,6 +389,9 @@ class LIFLoader(FormatLoader):
         """
         Load LIF series with improved memory management and error handling
         """
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         lif_file = None
         try:
             print(f"Loading LIF series {series_index} from {filepath}")
@@ -676,6 +685,9 @@ class LIFLoader(FormatLoader):
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         """Extract metadata with better error handling"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             lif_file = LifFile(filepath)
             images = list(lif_file.get_iter_image())
@@ -739,11 +751,16 @@ class ND2Loader(FormatLoader):
 
     @staticmethod
     def can_load(filepath: str) -> bool:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
         return filepath.lower().endswith(".nd2")
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
         """Get number of series (positions) in ND2 file"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with nd2.ND2File(filepath) as nd2_file:
                 # The 'P' dimension represents positions/series
@@ -761,6 +778,9 @@ class ND2Loader(FormatLoader):
         """
         Load a specific series from ND2 file
         """
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             # First, get basic info about the file
             with nd2.ND2File(filepath) as nd2_file:
@@ -913,6 +933,9 @@ class ND2Loader(FormatLoader):
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         """Extract metadata with proper handling of series information"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with nd2.ND2File(filepath) as nd2_file:
                 dims = nd2_file.sizes
@@ -978,10 +1001,15 @@ class TIFFSlideLoader(FormatLoader):
 
     @staticmethod
     def can_load(filepath: str) -> bool:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
         return filepath.lower().endswith((".ndpi", ".svs"))
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with TiffSlide(filepath) as slide:
                 return len(slide.level_dimensions)
@@ -994,6 +1022,9 @@ class TIFFSlideLoader(FormatLoader):
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with TiffSlide(filepath) as slide:
                 if series_index >= len(slide.level_dimensions):
@@ -1020,6 +1051,9 @@ class TIFFSlideLoader(FormatLoader):
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with TiffSlide(filepath) as slide:
                 if series_index >= len(slide.level_dimensions):
@@ -1050,6 +1084,9 @@ class CZILoader(FormatLoader):
         if not filepath.lower().endswith(".czi"):
             return False
 
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         # Test if we can actually open the file
         try:
             with pyczi.open_czi(filepath) as czidoc:
@@ -1075,6 +1112,9 @@ class CZILoader(FormatLoader):
         - If scenes exist, each scene is a series
         - If no scenes, there's 1 series (the whole image)
         """
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with pyczi.open_czi(filepath) as czidoc:
                 scenes_bbox = czidoc.scenes_bounding_rectangle
@@ -1105,7 +1145,13 @@ class CZILoader(FormatLoader):
     ) -> Union[np.ndarray, da.Array]:
         """
         Load a specific series from CZI file using correct pylibCZIrw API
+
+        Note: pylibCZIrw's read() method only reads a single plane at a time,
+        so we need to loop through all T, Z, C indices to build the full array.
         """
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             print(f"Loading CZI series {series_index} from {filepath}")
 
@@ -1117,7 +1163,7 @@ class CZILoader(FormatLoader):
                 print(f"Total bounding box: {total_bbox}")
                 print(f"Scenes: {len(scenes_bbox) if scenes_bbox else 0}")
 
-                # Determine if we're dealing with scenes or single image
+                # Determine scene ID
                 if scenes_bbox:
                     # Multi-scene file
                     scene_indices = list(scenes_bbox.keys())
@@ -1125,52 +1171,142 @@ class CZILoader(FormatLoader):
                         raise SeriesIndexError(
                             f"Scene index {series_index} out of range (0-{len(scene_indices)-1})"
                         )
-
-                    # Get the actual scene ID (may not be sequential 0,1,2...)
                     scene_id = scene_indices[series_index]
                     print(f"Loading scene ID: {scene_id}")
-
-                    # Read the specific scene
-                    # The scene parameter in read() expects the actual scene ID
-                    image_data = czidoc.read(scene=scene_id)
-
                 else:
                     # Single scene file
                     if series_index != 0:
                         raise SeriesIndexError(
                             f"Single scene file only supports series index 0, got {series_index}"
                         )
-
+                    scene_id = None
                     print("Loading single scene CZI")
-                    # Read without specifying scene
-                    image_data = czidoc.read()
+
+                # Extract dimension sizes from total_bbox
+                T_start, T_size = total_bbox.get("T", (0, 1))
+                Z_start, Z_size = total_bbox.get("Z", (0, 1))
+                C_start, C_size = total_bbox.get("C", (0, 1))
+                Y_start, Y_size = total_bbox.get("Y", (0, 1))
+                X_start, X_size = total_bbox.get("X", (0, 1))
 
                 print(
-                    f"Raw CZI data shape: {image_data.shape}, dtype: {image_data.dtype}"
+                    f"Dimensions: T={T_size}, Z={Z_size}, C={C_size}, Y={Y_size}, X={X_size}"
                 )
 
-                # Simply squeeze out all singleton dimensions
-                if hasattr(image_data, "dask"):
-                    image_data = da.squeeze(image_data)
+                # Read a single plane to get dtype and actual Y, X dimensions
+                plane_params = {"T": T_start, "Z": Z_start, "C": C_start}
+                if scene_id is not None:
+                    sample_plane = czidoc.read(
+                        plane=plane_params, scene=scene_id
+                    )
                 else:
-                    image_data = np.squeeze(image_data)
+                    sample_plane = czidoc.read(plane=plane_params)
+
+                # Remove the trailing singleton dimension from the plane
+                sample_plane = sample_plane.squeeze()
+                dtype = sample_plane.dtype
+                y_dim, x_dim = sample_plane.shape
+
+                print(
+                    f"Sample plane shape after squeeze: {sample_plane.shape}, dtype: {dtype}"
+                )
+
+                # Calculate total size
+                total_size_gb = (
+                    T_size
+                    * Z_size
+                    * C_size
+                    * y_dim
+                    * x_dim
+                    * np.dtype(dtype).itemsize
+                ) / (1024**3)
+                print(f"Estimated total size: {total_size_gb:.2f} GB")
+
+                # Build the full array by reading all planes
+                # Use the actual Y, X dimensions from the sample plane
+                full_shape = (T_size, C_size, Z_size, y_dim, x_dim)
+
+                # For large datasets, use Dask for lazy loading
+                if total_size_gb > 2.0:
+                    print("Using Dask for lazy loading")
+
+                    def load_plane(t, c, z):
+                        """Load a single plane"""
+                        plane_dict = {
+                            "T": T_start + t,
+                            "Z": Z_start + z,
+                            "C": C_start + c,
+                        }
+                        with pyczi.open_czi(filepath) as czidoc_inner:
+                            if scene_id is not None:
+                                plane = czidoc_inner.read(
+                                    plane=plane_dict, scene=scene_id
+                                )
+                            else:
+                                plane = czidoc_inner.read(plane=plane_dict)
+                            return plane.squeeze()
+
+                    # Create delayed array
+                    import dask.array as da
+                    from dask import delayed
+
+                    delayed_planes = []
+                    for t in range(T_size):
+                        t_planes = []
+                        for c in range(C_size):
+                            c_planes = []
+                            for z in range(Z_size):
+                                delayed_plane = delayed(load_plane)(t, c, z)
+                                dask_plane = da.from_delayed(
+                                    delayed_plane,
+                                    shape=(y_dim, x_dim),
+                                    dtype=dtype,
+                                )
+                                c_planes.append(dask_plane)
+                            c_stack = da.stack(c_planes, axis=0)
+                            t_planes.append(c_stack)
+                        t_stack = da.stack(t_planes, axis=0)
+                        delayed_planes.append(t_stack)
+
+                    image_data = da.stack(delayed_planes, axis=0)
+                    print(f"Created Dask array with shape: {image_data.shape}")
+
+                else:
+                    # For smaller datasets, load everything into memory
+                    print("Loading all data into memory")
+                    image_data = np.empty(full_shape, dtype=dtype)
+
+                    total_planes = T_size * C_size * Z_size
+                    plane_count = 0
+
+                    for t in range(T_size):
+                        for c in range(C_size):
+                            for z in range(Z_size):
+                                plane_dict = {
+                                    "T": T_start + t,
+                                    "Z": Z_start + z,
+                                    "C": C_start + c,
+                                }
+                                if scene_id is not None:
+                                    plane = czidoc.read(
+                                        plane=plane_dict, scene=scene_id
+                                    )
+                                else:
+                                    plane = czidoc.read(plane=plane_dict)
+
+                                image_data[t, c, z, :, :] = plane.squeeze()
+
+                                plane_count += 1
+                                if (
+                                    plane_count % 100 == 0
+                                    or plane_count == total_planes
+                                ):
+                                    print(
+                                        f"Loaded {plane_count}/{total_planes} planes..."
+                                    )
 
                 print(f"Final CZI data shape: {image_data.shape}")
-
-                # Check if we need to use Dask for large arrays
-                size_gb = (
-                    image_data.nbytes
-                    if hasattr(image_data, "nbytes")
-                    else np.prod(image_data.shape) * 4
-                ) / (1024**3)
-
-                if size_gb > 2.0 and not hasattr(image_data, "dask"):
-                    print(
-                        f"Large CZI data ({size_gb:.2f}GB), converting to Dask array"
-                    )
-                    return da.from_array(image_data, chunks="auto")
-                else:
-                    return image_data
+                return image_data
 
         except (
             OSError,
@@ -1186,6 +1322,9 @@ class CZILoader(FormatLoader):
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
         """Extract metadata using correct pylibCZIrw API"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             with pyczi.open_czi(filepath) as czidoc:
                 scenes_bbox = czidoc.scenes_bounding_rectangle
@@ -1234,54 +1373,21 @@ class CZILoader(FormatLoader):
 
                 # Get actual data to determine final dimensions after squeezing
                 try:
-                    if scenes_bbox:
-                        scene_indices = list(scenes_bbox.keys())
-                        scene_id = scene_indices[series_index]
-                        sample_data = czidoc.read(scene=scene_id)
-                    else:
-                        sample_data = czidoc.read()
+                    # Don't actually load data, just use the bounding box info
+                    # The load_series method now properly handles all dimensions
 
-                    # Squeeze to match what load_series() returns
-                    if hasattr(sample_data, "dask"):
-                        sample_data = da.squeeze(sample_data)
-                    else:
-                        sample_data = np.squeeze(sample_data)
+                    # Extract dimension sizes
+                    T_start, T_size = total_bbox.get("T", (0, 1))
+                    Z_start, Z_size = total_bbox.get("Z", (0, 1))
+                    C_start, C_size = total_bbox.get("C", (0, 1))
+                    Y_start, Y_size = total_bbox.get("Y", (0, 1))
+                    X_start, X_size = total_bbox.get("X", (0, 1))
 
-                    actual_shape = sample_data.shape
-                    actual_ndim = len(actual_shape)
-                    print(
-                        f"Actual squeezed shape for metadata: {actual_shape}"
-                    )
+                    # Build axes string: always TCZYX order
+                    axes = "TCZYX"
+                    actual_shape = (T_size, C_size, Z_size, Y_size, X_size)
 
-                    # Create axes based on actual squeezed dimensions
-                    if actual_ndim == 2:
-                        axes = "YX"
-                    elif actual_ndim == 3:
-                        # Check which dimension survived the squeeze
-                        unsqueezed_dims = []
-                        for dim, (_start, size) in total_bbox.items():
-                            if size > 1 and dim in ["T", "Z", "C"]:
-                                unsqueezed_dims.append(dim)
-
-                        if unsqueezed_dims:
-                            axes = f"{unsqueezed_dims[0]}YX"  # First non-singleton dim + YX
-                        else:
-                            axes = "ZYX"  # Default fallback
-                    elif actual_ndim == 4:
-                        axes = "TCYX"  # Most common 4D case
-                    elif actual_ndim == 5:
-                        axes = "TZCYX"
-                    else:
-                        # Fallback: just use YX and pad with standard dims
-                        standard_dims = ["T", "Z", "C"]
-                        axes = "".join(standard_dims[: actual_ndim - 2]) + "YX"
-
-                    # Ensure axes length matches actual dimensions
-                    axes = axes[:actual_ndim]
-
-                    print(
-                        f"Final axes for squeezed data: '{axes}' (length: {len(axes)})"
-                    )
+                    print(f"CZI dimensions: {axes} = {actual_shape}")
 
                 except (AttributeError, RuntimeError) as e:
                     print(f"Could not get sample data for metadata: {e}")
@@ -1366,6 +1472,9 @@ class AcquiferLoader(FormatLoader):
     @staticmethod
     def can_load(filepath: str) -> bool:
         """Check if directory contains Acquifer-specific patterns"""
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         if not os.path.isdir(filepath):
             return False
 
@@ -1401,6 +1510,9 @@ class AcquiferLoader(FormatLoader):
     @staticmethod
     def _load_dataset(directory):
         """Load and cache Acquifer dataset"""
+        # Normalize the directory path
+        directory = os.path.abspath(os.path.expanduser(directory))
+
         if directory in AcquiferLoader._dataset_cache:
             return AcquiferLoader._dataset_cache[directory]
 
@@ -1436,6 +1548,9 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def get_series_count(filepath: str) -> int:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
             return len(dataset.coords.get("Well", [1]))
@@ -1444,6 +1559,9 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def load_series(filepath: str, series_index: int) -> np.ndarray:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
@@ -1470,6 +1588,9 @@ class AcquiferLoader(FormatLoader):
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
+        # Normalize the file path
+        filepath = os.path.abspath(os.path.expanduser(filepath))
+
         try:
             dataset = AcquiferLoader._load_dataset(filepath)
 
@@ -1532,8 +1653,11 @@ class ScanFolderWorker(QThread):
 
             include_acquifer = "acquifer" in [f.lower() for f in self.filters]
 
+            # Normalize and expand the folder path
+            folder_path = os.path.abspath(os.path.expanduser(self.folder))
+
             # Collect files and directories
-            for root, dirs, files in os.walk(self.folder):
+            for root, dirs, files in os.walk(folder_path):
                 # Add matching files
                 for file in files:
                     if any(
@@ -2052,7 +2176,15 @@ class MicroscopyImageConverterWidget(QWidget):
     def scan_folder(self):
         """Scan folder for image files"""
         folder = self.folder_edit.text()
-        if not folder or not os.path.isdir(folder):
+        if not folder:
+            self.status_label.setText("Please select a valid folder")
+            return
+
+        # Normalize and expand the path
+        folder = os.path.abspath(os.path.expanduser(folder))
+        self.folder_edit.setText(folder)  # Update field with normalized path
+
+        if not os.path.isdir(folder):
             self.status_label.setText("Please select a valid folder")
             return
 
