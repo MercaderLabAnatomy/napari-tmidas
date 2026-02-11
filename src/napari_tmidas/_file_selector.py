@@ -1592,6 +1592,8 @@ class ProcessingWorker(QThread):
                 print(
                     f"Processing first layer of multi-layer file: {filepath}"
                 )
+                # Initialize image to None to detect extraction issues
+                image = None
                 # Take the first image layer
                 for data, add_kwargs, layer_type in image_data:
                     if layer_type == "image":
@@ -1606,9 +1608,16 @@ class ProcessingWorker(QThread):
                                     f"Channel axis: {metadata['channel_axis']}"
                                 )
                         break
-                else:
+
+                # If no image layer found with break, check the else fallback
+                if image is None:
                     # No image layer found, take first available
-                    image = image_data[0][0]
+                    if len(image_data) > 0:
+                        image = image_data[0][0]
+                    else:
+                        raise ValueError(
+                            f"No image data found in multi-layer file: {filepath}"
+                        )
             else:
                 image = image_data
 
@@ -1691,6 +1700,19 @@ class ProcessingWorker(QThread):
                     for k, v in processing_params.items()
                     if not k.startswith("_")
                 }
+
+            # Debug: check image type before processing
+            if isinstance(image, list):
+                print(
+                    f"WARNING: image is a list with {len(image)} elements before processing"
+                )
+                print(
+                    f"First element type: {type(image[0]) if image else 'empty'}"
+                )
+                # Extract first element if it's a single-element list
+                if len(image) == 1:
+                    print("Extracting single element from list")
+                    image = image[0]
 
             processed_result = self.processing_func(image, **processing_params)
 
