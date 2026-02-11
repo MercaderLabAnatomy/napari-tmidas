@@ -419,6 +419,103 @@ def get_zarr_info(filepath: str) -> dict:
     return info
 
 
+def save_as_zarr(
+    data: np.ndarray,
+    filepath: str,
+    axes: str = "TCZYX",
+    scale: tuple = None,
+    chunks: tuple = "auto",
+) -> None:
+    """
+    Save data as OME-Zarr format with metadata
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Image data to save
+    filepath : str
+        Output path ending in .zarr
+    axes : str
+        Dimension labels (e.g., 'TCZYX', 'ZYX', 'YX')
+    scale : tuple, optional
+        Physical scale for each dimension
+    chunks : tuple or str
+        Chunk size for zarr storage, 'auto' for automatic chunking
+    """
+    try:
+        import zarr
+        from ome_zarr.io import parse_url
+        from ome_zarr.writer import write_image
+
+        # Ensure filepath ends with .zarr
+        if not filepath.endswith(".zarr"):
+            filepath = filepath + ".zarr"
+
+        # Create zarr store
+        store = parse_url(filepath, mode="w").store
+        root = zarr.group(store=store)
+
+        # Infer axes if not provided
+        if not axes or len(axes) != data.ndim:
+            ndim = data.ndim
+            if ndim == 2:
+                axes = "YX"
+            elif ndim == 3:
+                axes = "ZYX"
+            elif ndim == 4:
+                axes = "CZYX"
+            elif ndim == 5:
+                axes = "TCZYX"
+            else:
+                axes = "YX"[-ndim:]  # Fallback
+
+        axes = axes.lower()[: data.ndim]
+
+        # Build scale transformation if provided
+        scale_transform = None
+        if scale:
+            scale_transform = {
+                "type": "scale",
+                "scale": list(scale),
+            }
+
+        # Determine appropriate chunks
+        if chunks == "auto":
+            # Auto-chunk: keep last 2 dims (Y, X) intact, chunk others
+            auto_chunks = list(data.shape)
+            for i in range(len(auto_chunks) - 2):
+                auto_chunks[i] = 1
+            chunks = tuple(auto_chunks)
+
+        print(f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}")
+
+        # Write as OME-Zarr
+        write_image(
+            image=data,
+            group=root,
+            axes=axes,
+            coordinate_transformations=(
+                [[scale_transform]] if scale_transform else None
+            ),
+            storage_options={"chunks": chunks, "compression": "zstd"},
+        )
+
+        print(f"Successfully saved OME-Zarr to: {filepath}")
+
+    except ImportError as e:
+        print(f"OME-Zarr not available: {e}. Saving as basic Zarr...")
+        # Fallback to basic zarr without OME metadata
+        import zarr
+
+        if chunks == "auto":
+            chunks = True  # Let zarr decide
+
+        zarr.save(filepath, data, chunks=chunks, compressor=zarr.Blosc())
+        print(f"Saved basic Zarr to: {filepath}")
+    except Exception as e:
+        raise ValueError(f"Failed to save Zarr: {e}") from e
+
+
 def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
     """
     Load image from file, supporting both TIFF and Zarr formats with proper metadata handling
@@ -1421,6 +1518,7 @@ class ProcessingWorker(QThread):
         output_folder,
         input_suffix,
         output_suffix,
+        output_format="tiff",
     ):
         super().__init__()
         self.file_list = file_list
@@ -1429,6 +1527,7 @@ class ProcessingWorker(QThread):
         self.output_folder = output_folder
         self.input_suffix = input_suffix
         self.output_suffix = output_suffix
+        self.output_format = output_format  # 'tiff' or 'zarr'
         self.stop_requested = False
         self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
 
@@ -1698,12 +1797,19 @@ class ProcessingWorker(QThread):
                         print(
                             f"Saving layer {layer_name} as {save_dtype.__name__} with bigtiff={use_bigtiff}"
                         )
-                        tifffile.imwrite(
-                            output_path,
-                            img.astype(save_dtype),
-                            compression="zlib",
-                            bigtiff=use_bigtiff,
-                        )
+                        if self.output_format == "zarr":
+                            save_as_zarr(
+                                output_path,
+                                img.astype(save_dtype),
+                                is_label=True,
+                            )
+                        else:
+                            tifffile.imwrite(
+                                output_path,
+                                img.astype(save_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
 
                         processed_files.append(output_path)
                 else:
@@ -1750,22 +1856,36 @@ class ProcessingWorker(QThread):
                             print(
                                 f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
                             )
-                            tifffile.imwrite(
-                                output_path,
-                                img.astype(save_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
+                            if self.output_format == "zarr":
+                                save_as_zarr(
+                                    output_path,
+                                    img.astype(save_dtype),
+                                    is_label=True,
+                                )
+                            else:
+                                tifffile.imwrite(
+                                    output_path,
+                                    img.astype(save_dtype),
+                                    compression="zlib",
+                                    bigtiff=use_bigtiff,
+                                )
                         else:
                             print(
                                 f"Regular image, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
                             )
-                            tifffile.imwrite(
-                                output_path,
-                                img.astype(image_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
+                            if self.output_format == "zarr":
+                                save_as_zarr(
+                                    output_path,
+                                    img.astype(image_dtype),
+                                    is_label=False,
+                                )
+                            else:
+                                tifffile.imwrite(
+                                    output_path,
+                                    img.astype(image_dtype),
+                                    compression="zlib",
+                                    bigtiff=use_bigtiff,
+                                )
 
                         processed_files.append(output_path)
 
@@ -1824,8 +1944,11 @@ class ProcessingWorker(QThread):
             else:
                 new_filename_base = name + self.output_suffix
 
-            # For zarr input, default to .tif output unless processing function specifies otherwise
-            if filepath.lower().endswith(".zarr") and ext == ".zarr":
+            # Set extension based on output format
+            if self.output_format == "zarr":
+                ext = ".zarr"
+            elif filepath.lower().endswith(".zarr") and ext == ".zarr":
+                # For zarr input with TIFF output, default to .tif
                 ext = ".tif"
 
             # Check if the first dimension should be treated as channels
@@ -1915,24 +2038,38 @@ class ProcessingWorker(QThread):
                         save_dtype = np.uint32
 
                         print(
-                            f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                            f"Label image detected, saving as {save_dtype.__name__}"
                         )
-                        tifffile.imwrite(
-                            channel_filepath,
-                            channel_image.astype(save_dtype),
-                            compression="zlib",
-                            bigtiff=use_bigtiff,
-                        )
+                        if self.output_format == "zarr":
+                            save_as_zarr(
+                                channel_image.astype(save_dtype),
+                                channel_filepath,
+                                axes="TCZYX"[: channel_image.ndim],
+                            )
+                        else:
+                            tifffile.imwrite(
+                                channel_filepath,
+                                channel_image.astype(save_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
                     else:
                         print(
-                            f"Regular image channel, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
+                            f"Regular image channel, saving with dtype {image_dtype}"
                         )
-                        tifffile.imwrite(
-                            channel_filepath,
-                            channel_image.astype(image_dtype),
-                            compression="zlib",
-                            bigtiff=use_bigtiff,
-                        )
+                        if self.output_format == "zarr":
+                            save_as_zarr(
+                                channel_image.astype(image_dtype),
+                                channel_filepath,
+                                axes="TCZYX"[: channel_image.ndim],
+                            )
+                        else:
+                            tifffile.imwrite(
+                                channel_filepath,
+                                channel_image.astype(image_dtype),
+                                compression="zlib",
+                                bigtiff=use_bigtiff,
+                            )
 
                     processed_files.append(channel_filepath)
 
@@ -1971,25 +2108,35 @@ class ProcessingWorker(QThread):
 
                 if is_label:
                     save_dtype = np.uint32
-                    print(
-                        f"Saving label image as {save_dtype.__name__} with bigtiff={use_bigtiff}"
-                    )
-                    tifffile.imwrite(
-                        new_filepath,
-                        processed_image.astype(save_dtype),
-                        compression="zlib",
-                        bigtiff=use_bigtiff,
-                    )
+                    print(f"Saving label image as {save_dtype.__name__}")
+                    if self.output_format == "zarr":
+                        save_as_zarr(
+                            processed_image.astype(save_dtype),
+                            new_filepath,
+                            axes="TCZYX"[: processed_image.ndim],
+                        )
+                    else:
+                        tifffile.imwrite(
+                            new_filepath,
+                            processed_image.astype(save_dtype),
+                            compression="zlib",
+                            bigtiff=use_bigtiff,
+                        )
                 else:
-                    print(
-                        f"Saving image with dtype {image_dtype} and bigtiff={use_bigtiff}"
-                    )
-                    tifffile.imwrite(
-                        new_filepath,
-                        processed_image.astype(image_dtype),
-                        compression="zlib",
-                        bigtiff=use_bigtiff,
-                    )
+                    print(f"Saving image with dtype {image_dtype}")
+                    if self.output_format == "zarr":
+                        save_as_zarr(
+                            processed_image.astype(image_dtype),
+                            new_filepath,
+                            axes="TCZYX"[: processed_image.ndim],
+                        )
+                    else:
+                        tifffile.imwrite(
+                            new_filepath,
+                            processed_image.astype(image_dtype),
+                            compression="zlib",
+                            bigtiff=use_bigtiff,
+                        )
 
                 return {
                     "original_file": filepath,
@@ -2127,6 +2274,22 @@ class FileResultsWidget(QWidget):
             "Leave blank to use source folder"
         )
         output_layout.addWidget(self.output_folder)
+
+        # Output format selector
+        format_layout = QHBoxLayout()
+        format_label = QLabel("Output format:")
+        format_layout.addWidget(format_label)
+
+        self.output_format = QComboBox()
+        self.output_format.addItems(["TIFF", "Zarr"])
+        self.output_format.setCurrentText("TIFF")  # Default to TIFF
+        self.output_format.setToolTip(
+            "TIFF: Standard format, widely compatible\n"
+            "Zarr: Efficient for large multi-dimensional data, preserves chunking"
+        )
+        format_layout.addWidget(self.output_format)
+        format_layout.addStretch()
+        output_layout.addLayout(format_layout)
 
         # Thread count selector
         thread_layout = QHBoxLayout()
@@ -2338,6 +2501,9 @@ class FileResultsWidget(QWidget):
                 f"Processing with {worker_thread_count} threads"
             )
 
+        # Get output format
+        output_format = self.output_format.currentText().lower()
+
         # Create and start the worker thread
         self.worker = ProcessingWorker(
             self.file_list,
@@ -2346,6 +2512,7 @@ class FileResultsWidget(QWidget):
             output_folder,
             self.input_suffix,
             output_suffix,
+            output_format=output_format,
         )
 
         # Set the thread count from the UI or function attribute

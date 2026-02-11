@@ -41,6 +41,8 @@ dependencies = [
     "tiffslide",
     "acquifer-napari",
     "psygnal>=0.9.0",
+    "zarr>=2.16.0",
+    "ome-zarr>=0.8.0",
 ]
 
 [project.optional-dependencies]
