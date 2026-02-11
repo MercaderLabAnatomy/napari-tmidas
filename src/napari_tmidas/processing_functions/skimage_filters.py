@@ -32,6 +32,90 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
+    def _equalize_histogram_dask(
+        image, clip_limit: float, kernel_size: int, max_workers: int
+    ):
+        """
+        Apply CLAHE to a Dask array using map_overlap for proper chunk-wise processing.
+
+        Uses dask.array.map_overlap to handle overlapping regions needed for
+        adaptive histogram equalization. This processes chunks in parallel without
+        loading the full array into memory.
+        """
+        try:
+            import dask.array as da
+        except ImportError as e:
+            raise ImportError(
+                "Dask is required for processing large Zarr arrays. "
+                "Install with: pip install dask[array]"
+            ) from e
+
+        original_dtype = image.dtype
+
+        # Auto-calculate kernel size if not specified
+        if kernel_size <= 0:
+            # Use 1/8 of the smaller spatial dimension
+            min_dim = min(image.shape[-2:])
+            kernel_size = max(16, min(128, min_dim // 8))
+
+        # Ensure kernel_size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        print(
+            f"Processing Dask array with CLAHE: "
+            f"kernel_size={kernel_size}, clip_limit={clip_limit}"
+        )
+        print(f"Array shape: {image.shape}, chunks: {image.chunks}")
+
+        def apply_clahe_chunk(chunk):
+            """Apply CLAHE to a chunk with proper dtype handling"""
+            # Apply CLAHE to this chunk
+            result = skimage.exposure.equalize_adapthist(
+                chunk, kernel_size=kernel_size, clip_limit=clip_limit
+            )
+
+            # Convert back to original dtype
+            if np.issubdtype(original_dtype, np.integer):
+                iinfo = np.iinfo(original_dtype)
+                result = (result * (iinfo.max - iinfo.min) + iinfo.min).astype(
+                    original_dtype
+                )
+            else:
+                result = result.astype(original_dtype)
+
+            return result
+
+        # Calculate overlap depth - need at least kernel_size//2 overlap on each side
+        # For spatial dimensions only (last 2 dims: Y, X)
+        depth = kernel_size // 2
+
+        # Create depth dict: no overlap for T,C,Z; overlap for Y,X
+        if image.ndim == 5:  # TCZYX
+            depth_dict = {0: 0, 1: 0, 2: 0, 3: depth, 4: depth}
+        elif image.ndim == 4:  # CZYX or TZYX
+            depth_dict = {0: 0, 1: 0, 2: depth, 3: depth}
+        elif image.ndim == 3:  # ZYX
+            depth_dict = {0: 0, 1: depth, 2: depth}
+        else:  # YX
+            depth_dict = {0: depth, 1: depth}
+
+        print(f"Using overlap depth: {depth} pixels on Y,X dimensions")
+
+        # Use map_overlap for proper boundary handling
+        result = da.map_overlap(
+            apply_clahe_chunk,
+            image,
+            depth=depth_dict,
+            boundary="reflect",  # Reflect at boundaries
+            dtype=original_dtype,
+        )
+
+        print(
+            "CLAHE applied to Dask array (will process chunks in parallel on compute)"
+        )
+        return result
+
     # CLAHE (Contrast Limited Adaptive Histogram Equalization)
     @BatchProcessingRegistry.register(
         name="CLAHE (Adaptive Histogram Equalization)",
@@ -60,6 +144,7 @@ if SKIMAGE_AVAILABLE:
         clip_limit: float = 0.01,
         kernel_size: int = 0,
         max_workers: int = 4,
+        _source_filepath: str = None,
     ) -> np.ndarray:
         """
         Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to enhance local contrast.
@@ -70,8 +155,9 @@ if SKIMAGE_AVAILABLE:
 
         Parameters
         ----------
-        image : np.ndarray
+        image : np.ndarray or dask.array
             Input image (supports 2D, 3D, and 4D arrays like YX, ZYX, TYX, TZYX)
+            Can be a Dask array for out-of-core processing of large Zarr files
         clip_limit : float
             Clipping limit for contrast limiting (normalized to 0-1 range, e.g., 0.01 = 1%)
             Higher values give more contrast but may amplify noise
@@ -80,10 +166,12 @@ if SKIMAGE_AVAILABLE:
         max_workers : int
             Maximum number of parallel workers for processing large datasets (default: 4)
             Lower values reduce memory usage, higher values increase speed
+        _source_filepath : str, optional
+            Internal parameter for Zarr-aware processing (passed automatically)
 
         Returns
         -------
-        np.ndarray
+        np.ndarray or dask.array
             CLAHE-enhanced image with same dtype as input
 
         Notes
@@ -91,7 +179,22 @@ if SKIMAGE_AVAILABLE:
         For large multi-dimensional datasets (TZYX), processing is parallelized across
         the first dimension to utilize multiple CPU cores effectively. The max_workers
         parameter controls memory usage vs speed tradeoff.
+
+        For Dask arrays from Zarr files, uses map_blocks for efficient chunk-wise processing
+        without loading the entire array into memory.
         """
+        # Check if input is a Dask array
+        is_dask = hasattr(image, "chunks") and hasattr(image, "map_blocks")
+
+        if is_dask:
+            print(
+                f"Applying CLAHE to Dask array with shape {image.shape}, "
+                f"chunks {image.chunks}"
+            )
+            return _equalize_histogram_dask(
+                image, clip_limit, kernel_size, max_workers
+            )
+
         # Store original dtype to convert back later
         original_dtype = image.dtype
 

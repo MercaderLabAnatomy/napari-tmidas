@@ -1651,8 +1651,25 @@ class ProcessingWorker(QThread):
                 or "grid" in function_name.lower()
             )
 
+            # Check if this is a Zarr file - some functions support Dask arrays
+            is_zarr_input = filepath.lower().endswith(".zarr")
+
+            # Check if function accepts _source_filepath (indicates Zarr-aware)
+            is_zarr_aware = False
+            if is_zarr_input:
+                try:
+                    sig = inspect.signature(self.processing_func)
+                    is_zarr_aware = "_source_filepath" in sig.parameters
+                except (ValueError, TypeError):
+                    pass
+
             # Convert dask array to numpy for processing functions that don't support dask
-            if hasattr(image, "chunks") and hasattr(image, "compute"):
+            # Exception: keep as Dask for Zarr-aware functions to enable chunk processing
+            if (
+                hasattr(image, "chunks")
+                and hasattr(image, "compute")
+                and not is_zarr_aware
+            ):
                 print("Converting dask array to numpy for processing...")
                 # For very large arrays, we might want to process in chunks
                 try:
@@ -1663,6 +1680,11 @@ class ProcessingWorker(QThread):
                     )
                     # Could implement chunked processing here if needed
                     raise
+            elif is_zarr_aware and hasattr(image, "chunks"):
+                print(
+                    f"Keeping Dask array for Zarr-aware processing "
+                    f"(shape: {image.shape}, chunks: {image.chunks})"
+                )
 
             # Apply processing with parameters
             # For zarr files, pass the original filepath to enable optimized processing
@@ -1715,6 +1737,20 @@ class ProcessingWorker(QThread):
                     image = image[0]
 
             processed_result = self.processing_func(image, **processing_params)
+
+            # If result is a Dask array, compute it now (lazy evaluation complete)
+            if hasattr(processed_result, "chunks") and hasattr(
+                processed_result, "compute"
+            ):
+                print(
+                    f"Computing Dask result (shape: {processed_result.shape})..."
+                )
+                try:
+                    processed_result = processed_result.compute()
+                    print("Dask computation complete!")
+                except MemoryError as e:
+                    print(f"Memory error during Dask computation: {e}")
+                    raise
 
             if processed_result is None:
                 # Allow processing functions to signal that this file should be skipped
