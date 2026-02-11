@@ -401,11 +401,51 @@ if SKIMAGE_AVAILABLE:
         image: np.ndarray, min_size: int = 100
     ) -> np.ndarray:
         """
-        Remove small labels from label images
+        Remove small labels from label images.
+
+        Works for 2D, 3D, and higher dimensional label images (4D = TZYX, CZYX, etc.).
+        For 4D+ data, processes each 3D volume independently.
+        Removes connected components (objects) whose area (2D) or volume (3D)
+        is smaller than or equal to min_size.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Label image (2D, 3D, 4D, or higher dimensional)
+        min_size : int
+            Minimum size threshold in pixels/voxels. Objects with size <= min_size are removed.
+
+        Returns
+        -------
+        np.ndarray
+            Label image with small objects removed
         """
-        return skimage.morphology.remove_small_objects(
-            image, min_size=min_size
-        )
+        # For 4D+ data, process each 3D volume separately
+        if image.ndim > 3:
+            print(
+                f"Processing {image.ndim}D label image with shape {image.shape}"
+            )
+            result = np.zeros_like(image)
+            # Process each 3D volume in the first dimension
+            for i in range(image.shape[0]):
+                result[i] = remove_small_objects(image[i], min_size=min_size)
+            return result
+
+        # Use max_size parameter for scikit-image >= 0.26.0
+        # which removes objects with size <= max_size
+        # This matches the behavior we want (remove objects <= min_size)
+        try:
+            # Try new API (scikit-image >= 0.26)
+            return skimage.morphology.remove_small_objects(
+                image, max_size=min_size
+            )
+        except TypeError:
+            # Fall back to old API (scikit-image < 0.26)
+            # Note: old min_size removes objects < min_size (strictly less than)
+            # To match new behavior, we add 1
+            return skimage.morphology.remove_small_objects(
+                image, min_size=min_size + 1
+            )
 
     @BatchProcessingRegistry.register(
         name="Invert Image",
