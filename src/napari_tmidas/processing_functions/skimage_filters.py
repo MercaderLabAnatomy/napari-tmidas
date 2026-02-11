@@ -39,8 +39,8 @@ if SKIMAGE_AVAILABLE:
         Apply CLAHE to a Dask array, processing each T,C combination independently.
 
         CLAHE operates on histograms, so it MUST be applied to complete ZYX volumes
-        independently for each T and each C. We iterate over T,C and apply map_overlap
-        to each ZYX volume for proper chunk-wise processing with overlap on Y,X dims.
+        independently for each T and each C. Uses map_blocks to ensure chunks don't
+        span T or C boundaries, then applies map_overlap for spatial processing.
         """
         try:
             import dask.array as da
@@ -68,12 +68,33 @@ if SKIMAGE_AVAILABLE:
         )
         print(f"Array shape: {image.shape}, chunks: {image.chunks}")
 
-        def apply_clahe_zyx(zyx_volume):
-            """Apply CLAHE to a ZYX volume with proper dtype handling"""
-            # Apply CLAHE to this ZYX volume
-            result = skimage.exposure.equalize_adapthist(
-                zyx_volume, kernel_size=kernel_size, clip_limit=clip_limit
-            )
+        def apply_clahe_block(block, block_id=None):
+            """
+            Apply CLAHE to a block that contains complete ZYX volumes for specific T,C.
+            The block should have T,C dimensions with size 1 (single timepoint/channel).
+            """
+            # Remove singleton T,C dimensions for processing
+            if block.ndim == 5:  # TCZYX with T=1, C=1
+                zyx = block[0, 0]  # Get ZYX volume
+                result_zyx = skimage.exposure.equalize_adapthist(
+                    zyx, kernel_size=kernel_size, clip_limit=clip_limit
+                )
+                # Restore T,C dimensions
+                result = result_zyx[np.newaxis, np.newaxis, ...]
+            elif block.ndim == 4:  # CZYX or TZYX with first dim=1
+                zyx = block[0]  # Get ZYX volume
+                result_zyx = skimage.exposure.equalize_adapthist(
+                    zyx, kernel_size=kernel_size, clip_limit=clip_limit
+                )
+                result = result_zyx[np.newaxis, ...]
+            elif block.ndim == 3:  # ZYX
+                result = skimage.exposure.equalize_adapthist(
+                    block, kernel_size=kernel_size, clip_limit=clip_limit
+                )
+            else:  # 2D
+                result = skimage.exposure.equalize_adapthist(
+                    block, kernel_size=kernel_size, clip_limit=clip_limit
+                )
 
             # Convert back to original dtype
             if np.issubdtype(original_dtype, np.integer):
@@ -86,60 +107,60 @@ if SKIMAGE_AVAILABLE:
 
             return result
 
-        # Calculate overlap depth - need at least kernel_size//2 overlap on each side
-        # For spatial dimensions only (Y, X)
+        # Calculate overlap depth for spatial dimensions
         depth = kernel_size // 2
-        print(f"Using overlap depth: {depth} pixels on Y,X dimensions")
 
-        # Process based on dimensionality
+        # Rechunk to ensure T,C dimensions have chunk size 1
+        # and Z dimension is not chunked (complete Z stacks)
         if image.ndim == 5:  # TCZYX
             print(
                 f"Processing {image.shape[0]} timepoints × {image.shape[1]} channels"
             )
-            # Process each T,C combination independently
-            t_results = []
-            for t in range(image.shape[0]):
-                c_results = []
-                for c in range(image.shape[1]):
-                    zyx_volume = image[t, c]
-                    # Apply map_overlap to ZYX volume with overlap on Y,X
-                    result_zyx = da.map_overlap(
-                        apply_clahe_zyx,
-                        zyx_volume,
-                        depth={
-                            0: 0,
-                            1: depth,
-                            2: depth,
-                        },  # Z:0, Y:depth, X:depth
-                        boundary="reflect",
-                        dtype=original_dtype,
-                    )
-                    c_results.append(result_zyx)
-                t_results.append(da.stack(c_results, axis=0))
-            result = da.stack(t_results, axis=0)
+            # Rechunk: each chunk should be (1,1,Z,Y,X) to keep complete ZYX volumes
+            target_chunks = (1, 1, image.shape[2], "auto", "auto")
+            image_rechunked = image.rechunk(target_chunks)
+            print(f"Rechunked to: {image_rechunked.chunks}")
 
-        elif image.ndim == 4:  # Could be CZYX or TZYX
-            # Assume first dim is T or C, process each independently
-            print(f"Processing {image.shape[0]} volumes (T or C dimension)")
-            volume_results = []
-            for i in range(image.shape[0]):
-                zyx_volume = image[i]
-                result_zyx = da.map_overlap(
-                    apply_clahe_zyx,
-                    zyx_volume,
-                    depth={0: 0, 1: depth, 2: depth},  # Z:0, Y:depth, X:depth
-                    boundary="reflect",
-                    dtype=original_dtype,
-                )
-                volume_results.append(result_zyx)
-            result = da.stack(volume_results, axis=0)
+            # Apply map_overlap with depth only on Y,X
+            result = da.map_overlap(
+                apply_clahe_block,
+                image_rechunked,
+                depth={
+                    0: 0,
+                    1: 0,
+                    2: 0,
+                    3: depth,
+                    4: depth,
+                },  # T,C,Z:0, Y,X:depth
+                boundary="reflect",
+                dtype=original_dtype,
+            )
+
+        elif image.ndim == 4:  # CZYX or TZYX
+            print(f"Processing {image.shape[0]} volumes")
+            # Rechunk: (1,Z,Y,X) to keep complete ZYX volumes
+            target_chunks = (1, image.shape[1], "auto", "auto")
+            image_rechunked = image.rechunk(target_chunks)
+            print(f"Rechunked to: {image_rechunked.chunks}")
+
+            result = da.map_overlap(
+                apply_clahe_block,
+                image_rechunked,
+                depth={0: 0, 1: 0, 2: depth, 3: depth},  # T/C,Z:0, Y,X:depth
+                boundary="reflect",
+                dtype=original_dtype,
+            )
 
         elif image.ndim == 3:  # ZYX
             print("Processing single ZYX volume")
+            # Rechunk: (Z,Y,X) complete Z
+            target_chunks = (image.shape[0], "auto", "auto")
+            image_rechunked = image.rechunk(target_chunks)
+
             result = da.map_overlap(
-                apply_clahe_zyx,
-                image,
-                depth={0: 0, 1: depth, 2: depth},  # Z:0, Y:depth, X:depth
+                apply_clahe_block,
+                image_rechunked,
+                depth={0: 0, 1: depth, 2: depth},  # Z:0, Y,X:depth
                 boundary="reflect",
                 dtype=original_dtype,
             )
@@ -147,9 +168,9 @@ if SKIMAGE_AVAILABLE:
         else:  # 2D (YX)
             print("Processing single 2D image")
             result = da.map_overlap(
-                apply_clahe_zyx,
+                apply_clahe_block,
                 image,
-                depth={0: depth, 1: depth},  # Y:depth, X:depth
+                depth={0: depth, 1: depth},  # Y,X:depth
                 boundary="reflect",
                 dtype=original_dtype,
             )
