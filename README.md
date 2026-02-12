@@ -60,6 +60,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 - **[File Conversion](docs/file_conversion.md)** - Multi-format microscopy file conversion (LIF, ND2, CZI, NDPI, Acquifer)
 - **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
+- **[Label-Based Cropping](docs/label_based_cropping.md)** - Interactive ROI extraction with label expansion
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
 - **[Colocalization](docs/advanced_processing.md#colocalization-analysis)** - Multi-channel ROI analysis

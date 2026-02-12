@@ -9,17 +9,18 @@ The Label-Based Image Cropping pipeline allows you to crop and mask images using
 
 ## Key Features
 
-### Automatic Label Expansion
+### Interactive Label Expansion
 
-The pipeline intelligently handles different image dimensionalities:
+The pipeline provides **opt-in** label expansion with immediate visual feedback:
 
-**2D Label to 3D Image**: If you draw a 2D label on a single z-slice and your image is 3D (Z, Y, X), the label is automatically repeated across all z-slices.
+**Expand Labels Across Z**: Copies the label from your current visible z-slice to all other z-slices in that frame. Click the checkbox to expand, then inspect and edit the labels before cropping.
 
-**2D Label to 4D Image (with time)**: If you draw a 2D label in 2D viewing mode and your image has both time and z-dimensions (T, Z, Y, X), the label is automatically expanded to:
-- All z-slices for that time frame, then
-- Repeated across all time frames
+**Expand Across Time Frames**: Copies the label from your current frame to all other time frames. Useful when the same region should be cropped across the entire time series.
 
-**Per-Frame Labels**: You can draw different labels in different time frames, and each will be expanded to cover all z-slices within that frame.
+**Manual Control**: Both expansion options are **unchecked by default**. You must explicitly enable them when needed. Labels update immediately in the viewer so you can:
+- Inspect the expansion result
+- Manually edit any expanded slices
+- Verify before cropping
 
 ### Masking
 
@@ -31,15 +32,17 @@ Everything outside the drawn label is masked to zero (background value). Only pi
 
 1. **Load your data**: Open your intensity image and create a labels layer in napari
 2. **Draw labels**: Use napari's built-in drawing tools to draw a label in the labels layer
-   - For 2D images: simply draw the region
-   - For 3D images: draw in one z-slice; it will automatically apply to all z-slices
-   - For 4D images: draw in one time frame; it will apply to all z-slices in that frame
+   - Draw in the current visible z-slice/frame you're viewing
 3. **Select layers**: In the Label-Based Image Cropping dock widget:
    - Select your Image Layer
    - Select your Label Layer (with your drawn labels)
    - Give the output a name (default: "cropped")
-4. **Crop**: Click "Crop Image"
-5. **Verify**: The cropped result will be added as a new layer
+4. **Expand labels (optional)**:
+   - Check "Expand labels across Z" to copy current slice to all z-slices
+   - Check "Expand across time frames" to copy current frame to all frames
+   - Labels update immediately - inspect and edit as needed
+5. **Crop**: Click "Crop Image"
+6. **Verify**: The cropped result will be added as a new layer
 
 ### Batch Processing
 
@@ -63,22 +66,28 @@ When working with 3D volumetric data (Z, Y, X):
 1. Set napari to 2D mode (View → Toggle 3D)
 2. Navigate to the z-slice you want to label
 3. Draw your label in that slice
-4. Click "Crop Image"
-5. The label will automatically expand to all z-slices
+4. Check "Expand labels across Z"
+5. Inspect the expanded labels in other z-slices
+6. Edit any slices if needed
+7. Click "Crop Image"
 
 ### Working with Time-Series Data
 
 For time-lapse data (T, Z, Y, X):
-1. Enable 2D viewing mode
-2. Navigate to the time frame and z-slice you want to label
-3. Draw your label
-4. Click "Crop Image"
-5. The label expands to all z-slices in the current frame, then applies to all frames
 
-To use different labels for different frames:
-1. Go to each frame individually
-2. Draw the label for that frame
-3. The pipeline will preserve per-frame labels
+**Same label in all frames**:
+1. Draw label in one frame
+2. Check "Expand labels across Z" (for that frame's z-slices)
+3. Check "Expand across time frames" (to copy to all frames)
+4. Click "Crop Image"
+
+**Different labels per frame**:
+1. Draw label in frame 1
+2. Check "Expand labels across Z"
+3. Navigate to frame 2, draw different label
+4. Check "Expand labels across Z" again
+5. Repeat for each frame
+6. Click "Crop Image" (uses current labels as-is)
 
 ## Parameters
 
@@ -87,11 +96,14 @@ To use different labels for different frames:
 - **Image Layer**: The image you want to crop
 - **Label Layer**: The labels defining the region to keep
 - **Output Name**: Name for the cropped result layer (default: "cropped")
-- **Auto-expand 2D labels**: Automatically expand 2D labels to 3D/4D (default: enabled)
+- **Expand labels across Z**: Copy current z-slice to all z-slices (default: unchecked)
+- **Expand across time frames (T)**: Copy current frame to all frames (default: unchecked)
 
 ### Batch Processing Parameters
 
 - **label_image_path**: Path to label image (auto-detected if not specified)
+- **expand_z**: Expand 2D labels across z-slices (default: False)
+- **expand_time**: Expand labels across time frames (default: False)
 - **output_format**: Format for saved output
   - `"same"`: Keep original format
   - `"tif"`: Save as TIFF
