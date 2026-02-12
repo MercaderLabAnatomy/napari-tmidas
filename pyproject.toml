@@ -69,6 +69,7 @@ deep-learning = [
     "cmake",
     "hydra-core",
     "eva-decord",
+    "iopath",
 ]
 all = [
     "napari-tmidas[testing,clustering,deep-learning]",
