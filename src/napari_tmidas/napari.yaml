@@ -33,6 +33,9 @@ contributions:
     - id: napari-tmidas._roi_colocalization
       python_name: napari_tmidas._roi_colocalization:roi_colocalization_analyzer
       title: Batch ROI Colocalization Analysis
+    - id: napari-tmidas._label_based_cropping
+      python_name: napari_tmidas._label_based_cropping_widget:napari_experimental_provide_dock_widget
+      title: Label-Based Image Cropping
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
@@ -59,3 +62,5 @@ contributions:
       display_name: Batch Crop Anything
     - command: napari-tmidas._roi_colocalization
       display_name: Batch ROI Colocalization Analysis
+    - command: napari-tmidas._label_based_cropping
+      display_name: Label-Based Image Cropping
