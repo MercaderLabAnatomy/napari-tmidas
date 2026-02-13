@@ -6,8 +6,6 @@
 [![Downloads](https://static.pepy.tech/badge/napari-tmidas)](https://pepy.tech/project/napari-tmidas)
 [![DOI](https://zenodo.org/badge/943353883.svg)](https://doi.org/10.5281/zenodo.17988815)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
-[![Buy me a pizza](https://img.shields.io/badge/-🍕-8B4513?logo=github&logoColor=white)](https://github.com/sponsors/macromeer)
-
 
 
 **Automated batch processing for microscopy images**
@@ -16,7 +14,7 @@ Transform, analyze, and quantify microscopy data at scale including deep learnin
 
 ## ✨ Key Features
 
-🤖 **5 AI Methods Built-In**
+🤖 **AI Methods Built-In**
 - Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose) • Tracking (Trackastra)
 - Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
