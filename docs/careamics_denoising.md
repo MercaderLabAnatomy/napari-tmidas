@@ -1,42 +1,65 @@
-# CAREamics Denoising
+# CAREamics Denoising (Noise2Void)
 
-Content-aware image restoration and enhancement for microscopy images using deep learning.
+Deep learning-based image denoising using Noise2Void algorithm for microscopy images.
 
 ## Overview
 
-CAREamics (Content-Aware Restoration of Microscopy ImageS) is a deep learning framework for denoising, deconvolution, and content restoration of microscopy images. It implements several state-of-the-art algorithms including:
+This plugin integrates CAREamics Noise2Void denoising for batch processing of microscopy images in napari-tmidas.
 
-- **Noise2Void (N2V)**: Self-supervised denoising without clean images
-- **CARE**: Supervised restoration when paired training data is available
-- **N2V2**: Improved Noise2Void with better performance
-- **Struct N2V**: Structure-preserving Noise2Void variant
+**Important**: This feature requires you to **train a Noise2Void model first** using CAREamics tutorials, then use that trained model to batch process your images in napari-tmidas.
 
-This enables you to restore noisy or low-SNR (Signal-to-Noise Ratio) microscopy images, revealing fine structures and improving downstream analysis.
+**Currently Supported**: Noise2Void (N2V) models only  
+**Coming Soon**: CARE, N2V2, and other algorithms
+
+### What is Noise2Void?
+
+Noise2Void is a self-supervised denoising method that learns to denoise images without requiring clean reference images. It only needs noisy images for training, making it ideal for microscopy where clean ground truth is often unavailable.
+
+**Key Features:**
+- No clean images needed for training
+- Learns from your own noisy data
+- Preserves image structures
+- Works with 2D, 3D, and time-lapse data
+
+## Workflow Overview
+
+```
+1. Train Model (CAREamics)  →  2. Batch Process (napari-tmidas)
+   ├─ Use CAREamics tutorial       ├─ Load images
+   ├─ Train on your data            ├─ Select N2V model
+   └─ Save checkpoint               └─ Process all images
+```
 
 ## Requirements
 
 - **Input image type**: Fluorescence microscopy (widefield, confocal, light-sheet)
 - **Dimensionality**: 2D (YX), 3D (ZYX), or time-lapse (TYX, TZYX)
-- **Model requirement**: Pre-trained CAREamics checkpoint file (.ckpt)
+- **Model requirement**: Trained Noise2Void checkpoint file (.ckpt)
 - **Supported formats**: TIFF, Zarr
 
 ## Model Information
 
-**Supported Algorithms:**
-- **Noise2Void**: Train on single noisy images, no ground truth needed
-- **CARE**: Supervised learning with paired low/high quality images
-- **N2V2**: Enhanced N2V with structured noise handling
-- **Struct N2V**: Preserves image structures better than standard N2V
+**Training Your Model:**
 
-**Architecture Options:**
-- U-Net based models (2D and 3D)
-- Customizable depth and feature channels
-- Support for various activation functions and normalization schemes
+You must train a Noise2Void model using CAREamics before using this plugin. Follow these tutorials:
+
+- **2D images**: [Mouse Nuclei N2V Tutorial](https://careamics.github.io/0.1/applications/Noise2Void/Mouse_Nuclei/)
+- **3D images**: [Flywing N2V Tutorial](https://careamics.github.io/0.1/applications/Noise2Void/Flywing/)
+
+After training, your model checkpoint will be saved at:
+```
+{experiment_name}/checkpoints/last.ckpt
+```
+
+**Using Pretrained Models:**
+
+Alternatively, you can use pretrained models from HuggingFace:
+- `careamics/N2V_SEM_demo` - Scanning Electron Microscopy
+- See more at: https://huggingface.co/careamics
 
 **References:**
 - Krull et al. (2019) "Noise2Void - Learning Denoising from Single Noisy Images" CVPR
 - Weigert et al. (2018) "Content-aware image restoration: pushing the limits of fluorescence microscopy" Nature Methods
-- Höck et al. (2021) "N2V2 - Fixing Noise2Void Checkerboard Artifacts with Modified Sampling" arXiv
 
 ## Installation
 
@@ -50,16 +73,73 @@ This one-time setup may take 5-10 minutes depending on your internet connection 
 
 ## Usage
 
-### Training Your Own Model
+### Step 1: Train Your Noise2Void Model
 
-Before using CAREamics for denoising, you need to train a model on your specific imaging conditions. CAREamics provides tools for training:
+**Before using this plugin**, you must train a model using CAREamics tutorials:
+
+#### For 2D Images:
+
+Follow the [Mouse Nuclei N2V Tutorial](https://careamics.github.io/0.1/applications/Noise2Void/Mouse_Nuclei/):
 
 ```python
-# Training is typically done separately using CAREamics CLI or Python API
-# See https://github.com/CAREamics/careamics for training documentation
+from careamics import CAREamist
+from careamics.config import create_n2v_configuration
+
+# Create configuration
+config = create_n2v_configuration(
+    experiment_name="my_n2v_model",
+    data_type="array",
+    axes="YX",
+    patch_size=(64, 64),
+    batch_size=16,
+    num_epochs=50,
+)
+
+# Train model
+careamist = CAREamist(config)
+careamist.train(train_source=your_noisy_images)
+
+# Checkpoint saved to: my_n2v_model/checkpoints/last.ckpt
 ```
 
-### Basic Usage
+#### For 3D Images:
+
+Follow the [Flywing N2V Tutorial](https://careamics.github.io/0.1/applications/Noise2Void/Flywing/):
+
+```python
+config = create_n2v_configuration(
+    experiment_name="my_n2v_3d",
+    data_type="array",
+    axes="ZYX",
+    patch_size=(16, 64, 64),  # Z, Y, X
+    batch_size=2,
+    num_epochs=50,
+)
+
+careamist = CAREamist(config)
+careamist.train(train_source=your_3d_images)
+
+# Checkpoint saved to: my_n2v_3d/checkpoints/last.ckpt
+```
+
+### Step 2: Batch Process with napari-tmidas
+
+Once you have a trained model, use napari-tmidas for batch processing:
+
+#### Using Batch Processing GUI:
+
+1. Open napari with the tmidas plugin
+2. Go to `Plugins > napari-tmidas > Batch Processing`
+3. Select your input files (noisy TIFF images)
+4. Choose function: `CAREamics Denoise (N2V/CARE)`
+5. Configure parameters:
+   - **checkpoint_path**: Path to your trained model checkpoint
+     - e.g., `/home/user/my_n2v_model/checkpoints/last.ckpt`
+     - or: `careamics/N2V_SEM_demo` (pretrained model)
+   - **tile_size_x/y/z**: Leave defaults or adjust for memory constraints
+6. Click `Run Processing`
+
+#### Using Python API:
 
 ```python
 import napari
@@ -69,34 +149,15 @@ from napari_tmidas.processing_functions.careamics_denoising import careamics_den
 viewer = napari.Viewer()
 noisy_layer = viewer.open('noisy_image.tif')
 
-# Get the image data
-noisy_image = noisy_layer.data
-
-# Run denoising with your trained model
+# Denoise with your trained model
 denoised = careamics_denoise(
-    noisy_image,
-    checkpoint_path='/path/to/your/model.ckpt',
-    tile_size_x=128,
-    tile_size_y=128,
-    use_tta=True
+    noisy_layer.data,
+    checkpoint_path='/path/to/my_n2v_model/checkpoints/last.ckpt'
 )
 
 # Add results to viewer
 viewer.add_image(denoised, name='Denoised')
 ```
-
-### Using Batch Processing
-
-1. Train a CAREamics model on representative images from your dataset
-2. Open napari with the tmidas plugin
-3. Go to `Plugins > napari-tmidas > Batch Processing`
-4. Select your input files (noisy TIFF images)
-5. Choose function: `CAREamics Denoise (N2V/CARE)`
-6. Configure parameters:
-   - **checkpoint_path**: Path to your trained .ckpt file
-   - **tile_size_x/y/z**: Tile dimensions for processing
-   - **use_tta**: Enable test-time augmentation for better results
-7. Click `Run Processing`
 
 ### 3D Volumetric Data
 
@@ -136,54 +197,64 @@ denoised_timelapse = careamics_denoise(
     batch_size=4
 )
 ```
-
 ## Parameters
 
-### checkpoint_path (str, required)
-Path to the trained CAREamics model checkpoint file (.ckpt).
+### checkpoint_path (str, **required**)
+Path to your trained Noise2Void model checkpoint.
 
-**How to get a checkpoint**:
-1. Train a model using CAREamics on your data
-2. Use a pre-trained model if available for your imaging modality
-3. Contact the community for shared models
+**Options**:
+1. **Local checkpoint**: `/path/to/experiment/checkpoints/last.ckpt`
+   - Generated automatically after training with CAREamics
+   - Found in `{experiment_name}/checkpoints/` folder
+2. **Pretrained model**: `careamics/N2V_SEM_demo`
+   - Automatically downloaded from HuggingFace
+   - See available models at: https://huggingface.co/careamics
 
-### tile_size_x/y/z (int, default: varies)
-Size of image tiles for processing.
+### tile_size (str, default: "128,128,32")
+Size of image tiles for processing large images.
+
+**Format**: Comma-separated values `X,Y,Z` or `X,Y`
+
+**Examples**:
+- 3D data: `"128,128,32"` (X=128, Y=128, Z=32)
+- 2D data: `"128,128"` (X=128, Y=128)
 
 **Guidelines**:
-- Larger tiles: Faster but require more memory
-- Smaller tiles: Slower but work with limited GPU memory
-- Must match model's input size constraints
-- **Typical values**: 64, 128, 256
+- Larger tiles: Faster but require more GPU memory
+- Smaller tiles: Slower but work with limited memory
+- Adjust if you get out-of-memory errors
+- Common values: 64, 128, 256
 
-### tile_overlap_x/y/z (int, default: 8-16)
+### tile_overlap (str, default: "48,48,8")
 Overlap between adjacent tiles to reduce edge artifacts.
 
+**Format**: Comma-separated values `X,Y,Z` or `X,Y`
+
+**Examples**:
+- 3D data: `"48,48,8"` (X=48, Y=48, Z=8)
+- 2D data: `"48,48"` (X=48, Y=48)
+
 **Guidelines**:
-- Larger overlap: Better blending, slower processing
-- Typical: 1/8 to 1/4 of tile size
-- Minimum: 8 pixels
+- Larger overlap: Better results, slower processing
+- Typical: 30-50% of tile size
+- Usually default values work well
 
 ### batch_size (int, default: 1)
-Number of tiles processed simultaneously.
+Number of tiles processed simultaneously on GPU.
 
 **Guidelines**:
-- Larger batches: Faster processing
-- Limited by GPU memory
-- Increase if you have spare GPU memory
-- **Typical values**: 1-8 for large tiles, up to 32 for small tiles
+- Increase if you have GPU memory available (try 2, 4, 8)
+- Reduce to 1 if getting out-of-memory errors
+- Minimal quality impact, only affects speed
 
-### use_tta (bool, default: True)
-Enable test-time augmentation for improved results.
+### use_tta (bool, default: False)
+Enable test-time augmentation for slightly better results.
 
 **What it does**:
-- Processes image with multiple augmentations (flips, rotations)
-- Averages predictions for more robust denoising
-- Increases processing time by ~8x
-- Generally improves quality, especially near edges
-
-### force_dedicated_env (bool, default: False)
-Force using dedicated environment even if CAREamics is available in main environment.
+- Processes image with flips/rotations and averages results
+- Increases processing time significantly (~8x slower)
+- Slight quality improvement
+- **Recommendation**: Leave False unless quality is critical
 
 ## Output
 

@@ -140,7 +140,14 @@ def create_careamics_env():
     return manager.create_env()
 
 
-def run_careamics_in_env(func_name, args_dict):
+def recreate_careamics_env():
+    """Delete and recreate the CAREamics environment (e.g., for version updates)."""
+    print("Recreating CAREamics environment...")
+    manager.delete_env()
+    return manager.create_env()
+
+
+def run_careamics_in_env(func_name, args_dict, retry_count=0):
     """
     Run CAREamics in a dedicated environment.
 
@@ -150,6 +157,8 @@ def run_careamics_in_env(func_name, args_dict):
         Name of the CAREamics function to run (e.g., 'predict')
     args_dict : dict
         Dictionary of arguments for CAREamics function
+    retry_count : int
+        Number of retry attempts (used internally)
 
     Returns:
     --------
@@ -192,72 +201,109 @@ try:
 
     # Load model
     print(f"Loading model from {{os.path.basename('{args_dict['checkpoint_path']}')}}")
-    model = CAREamist('{args_dict['checkpoint_path']}',os.path.dirname('{args_dict['checkpoint_path']}'))
+    model = CAREamist('{args_dict['checkpoint_path']}')
 
-    # Determine dimensionality
+    # Determine dimensionality and format
     dims = len(image.shape)
-    is_3d = dims >= 3
+    print(f"Input: {{{{image.shape}}}} ({{'TZYX' if dims == 4 else 'TYX' if dims == 3 and image.shape[0] <= 10 else 'ZYX' if dims == 3 else 'YX'}})")
 
-    if is_3d:
-        print(f"Processing 3D data with shape: {{image.shape}}")
-        # Determine axes based on dimensionality
-        if dims == 3:
-            # ZYX format
-            axes = "ZYX"
-            tile_size = ({args_dict.get('tile_size_z', 64)},
-                         {args_dict.get('tile_size_y', 64)},
-                         {args_dict.get('tile_size_x', 64)})
-            tile_overlap = ({args_dict.get('tile_overlap_z', 32)},
-                           {args_dict.get('tile_overlap_y', 32)},
-                           {args_dict.get('tile_overlap_x', 32)})
-        elif dims == 4:
-            # Assuming TZYX format
-            axes = "TZYX"
-            tile_size = ({args_dict.get('tile_size_z', 64)},
-                         {args_dict.get('tile_size_y', 64)},
-                         {args_dict.get('tile_size_x', 64)})
-            tile_overlap = ({args_dict.get('tile_overlap_z', 32)},
-                           {args_dict.get('tile_overlap_y', 32)},
-                           {args_dict.get('tile_overlap_x', 32)})
-        else:
-            print(f"Warning: Unusual data shape: {{image.shape}}. Defaulting to 'TZYX'")
-            axes = "TZYX"
-            tile_size = ({args_dict.get('tile_size_z', 64)},
-                         {args_dict.get('tile_size_y', 64)},
-                         {args_dict.get('tile_size_x', 64)})
-            tile_overlap = ({args_dict.get('tile_overlap_z', 32)},
-                           {args_dict.get('tile_overlap_y', 32)},
-                           {args_dict.get('tile_overlap_x', 32)})
+    # Handle different data formats with progress reporting
+    if dims == 2:
+        # YX - 2D image
+        tile_size = ({args_dict.get('tile_size_y', 64)},
+                     {args_dict.get('tile_size_x', 64)})
+        tile_overlap = ({args_dict.get('tile_overlap_y', 32)},
+                       {args_dict.get('tile_overlap_x', 32)})
+        
+        print("Processing 2D image...")
+        prediction = model.predict(
+            source=image,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            batch_size={args_dict.get('batch_size', 1)},
+            tta={args_dict.get('use_tta', True)},
+        )
+        prediction = np.squeeze(prediction)
+        
+    elif dims == 3 and image.shape[0] <= 10:
+        # TYX - 2D with time (iterate through timepoints)
+        t_size = image.shape[0]
+        print(f"Processing 2D+time (T={{{{t_size}}}})...")
+        
+        tile_size = ({args_dict.get('tile_size_y', 64)},
+                     {args_dict.get('tile_size_x', 64)})
+        tile_overlap = ({args_dict.get('tile_overlap_y', 32)},
+                       {args_dict.get('tile_overlap_x', 32)})
+        
+        # Pre-allocate result array
+        prediction = np.zeros_like(image)
+        
+        # Process each timepoint
+        for t in range(t_size):
+            print(f"  T={{t+1}}/{{t_size}}...", end=" ", flush=True)
+            
+            pred_t = model.predict(
+                source=image[t],
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                batch_size={args_dict.get('batch_size', 1)},
+                tta={args_dict.get('use_tta', True)},
+            )
+            prediction[t] = np.squeeze(pred_t)
+            print("\u2713")
+            
+    elif dims == 3:
+        # ZYX - 3D image
+        print(f"Processing 3D (Z={{{{image.shape[0]}}}})...")
+        
+        tile_size = ({args_dict.get('tile_size_z', 64)},
+                     {args_dict.get('tile_size_y', 64)},
+                     {args_dict.get('tile_size_x', 64)})
+        tile_overlap = ({args_dict.get('tile_overlap_z', 32)},
+                       {args_dict.get('tile_overlap_y', 32)},
+                       {args_dict.get('tile_overlap_x', 32)})
+        
+        prediction = model.predict(
+            source=image,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            batch_size={args_dict.get('batch_size', 1)},
+            tta={args_dict.get('use_tta', True)},
+        )
+        prediction = np.squeeze(prediction)
+        
+    elif dims == 4:
+        # TZYX - 3D with time (iterate through timepoints)
+        t_size = image.shape[0]
+        print(f"Processing 3D+time (T={{{{t_size}}}}, Z={{{{image.shape[1]}}}})...")
+        
+        tile_size = ({args_dict.get('tile_size_z', 64)},
+                     {args_dict.get('tile_size_y', 64)},
+                     {args_dict.get('tile_size_x', 64)})
+        tile_overlap = ({args_dict.get('tile_overlap_z', 32)},
+                       {args_dict.get('tile_overlap_y', 32)},
+                       {args_dict.get('tile_overlap_x', 32)})
+        
+        # Pre-allocate result array
+        prediction = np.zeros_like(image)
+        
+        # Process each timepoint
+        for t in range(t_size):
+            print(f"  T={{{{t+1}}}}/{{{{t_size}}}}...", end=" ", flush=True)
+            
+            pred_t = model.predict(
+                source=image[t],
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                batch_size={args_dict.get('batch_size', 1)},
+                tta={args_dict.get('use_tta', True)},
+            )
+            prediction[t] = np.squeeze(pred_t)
+            print("\u2713")
     else:
-        print(f"Processing 2D data with shape: {{image.shape}}")
-        # 2D data
-        if dims == 2:
-            # YX format
-            axes = "YX"
-            tile_size = ({args_dict.get('tile_size_y', 64)},
-                         {args_dict.get('tile_size_x', 64)})
-            tile_overlap = ({args_dict.get('tile_overlap_y', 32)},
-                           {args_dict.get('tile_overlap_x', 32)})
-        else:
-            print(f"Warning: Unusual data shape: {{image.shape}}. Defaulting to 'YX'")
-            axes = "YX"
-            tile_size = ({args_dict.get('tile_size_y', 64)},
-                         {args_dict.get('tile_size_x', 64)})
-            tile_overlap = ({args_dict.get('tile_overlap_y', 32)},
-                           {args_dict.get('tile_overlap_x', 32)})
+        raise ValueError(f"Unsupported data shape: {{{{image.shape}}}}")
 
-    print(f"Using axes: {{axes}}, tile_size: {{tile_size}}, tile_overlap: {{tile_overlap}}")
-
-    # Run the prediction
-    print("Starting CAREamics prediction...")
-    prediction = model.predict(
-        source=image,
-        tile_size=tile_size,
-        tile_overlap=tile_overlap,
-        axes=axes,
-        batch_size={args_dict.get('batch_size', 1)},
-        tta={args_dict.get('use_tta', True)},
-    )
+    print(f"Output: {{{{prediction.shape}}}}")
 
     # Save result
     print(f"Saving result to {{os.path.basename('{output_file.name}')}}")
@@ -279,21 +325,58 @@ except Exception as e:
         script_file.flush()
 
     try:
-        # Run the script in the dedicated environment
+        # Run the script in the dedicated environment with real-time output
         env_python = get_env_python_path()
-        result = subprocess.run(
-            [env_python, script_file.name], capture_output=True, text=True
+        
+        # Use Popen for real-time output streaming
+        process = subprocess.Popen(
+            [env_python, script_file.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
         )
-
-        # Print output
-        print(result.stdout)
-
+        
+        # Collect output while streaming it
+        stdout_lines = []
+        stderr_lines = []
+        
+        # Stream stdout in real-time
+        for line in process.stdout:
+            print(line, end='')
+            stdout_lines.append(line)
+        
+        # Wait for process to complete and get stderr
+        process.wait()
+        stderr_output = process.stderr.read()
+        if stderr_output:
+            stderr_lines.append(stderr_output)
+        
         # Check for errors
-        if result.returncode != 0:
+        if process.returncode != 0:
+            error_output = stderr_output + ''.join(stdout_lines)
+            
+            # Check if this is a version mismatch error
+            is_version_mismatch = (
+                "Lightning v" in error_output and "newer than" in error_output
+            ) or (
+                "size mismatch" in error_output and retry_count == 0
+            )
+            
+            if is_version_mismatch and retry_count == 0:
+                print("\n⚠️  Detected version mismatch between checkpoint and environment")
+                print("🔄 Recreating environment with updated dependencies...\n")
+                recreate_careamics_env()
+                print("\n✓ Environment recreated. Retrying...\n")
+                # Retry once with the new environment
+                return run_careamics_in_env(func_name, args_dict, retry_count=1)
+            
             print("Error in CAREamics processing:")
-            print(result.stderr)
+            if stderr_output:
+                print(stderr_output)
             raise RuntimeError(
-                f"CAREamics denoising failed with error code {result.returncode}"
+                f"CAREamics denoising failed with error code {process.returncode}"
             )
 
         # Read and return the results

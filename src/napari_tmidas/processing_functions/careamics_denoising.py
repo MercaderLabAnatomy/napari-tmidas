@@ -39,45 +39,34 @@ except ImportError:
 @BatchProcessingRegistry.register(
     name="CAREamics Denoise (N2V/CARE)",
     suffix="_denoised",
-    description="Denoise images using CAREamics (Noise2Void or CARE model)",
+    description="Denoise images using CAREamics (Noise2Void or CARE model). Supports YX (2D), ZYX (3D), TYX (2D+time), and TZYX (3D+time).",
     parameters={
         "checkpoint_path": {
             "type": str,
             "default": "",
-            "description": "Path to the CAREamics model checkpoint file (.ckpt)",
+            "description": "Path to CAREamics model: checkpoint (.ckpt), BMZ archive (.zip), or model identifier (e.g., 'careamics/N2V_SEM_demo'). Leave empty to see help.",
         },
-        "tile_size_x": {
-            "type": int,
-            "default": 32,
-            "min": 16,
-            "max": 512,
-            "description": "Tile size in X dimension",
+        "tile_size": {
+            "type": str,
+            "default": "128,128,32",
+            "description": "Tile size as 'X,Y,Z' (e.g., '128,128,32' for 3D or '128,128' for 2D)",
         },
-        "tile_size_y": {
-            "type": int,
-            "default": 32,
-            "min": 16,
-            "max": 512,
-            "description": "Tile size in Y dimension",
-        },
-        "tile_size_z": {
-            "type": int,
-            "default": 0,
-            "min": 0,
-            "max": 256,
-            "description": "Tile size in Z dimension (for 3D data)",
+        "tile_overlap": {
+            "type": str,
+            "default": "48,48,8",
+            "description": "Tile overlap as 'X,Y,Z' (e.g., '48,48,8' for 3D or '48,48' for 2D)",
         },
         "batch_size": {
             "type": int,
             "default": 1,
             "min": 1,
             "max": 16,
-            "description": "Batch size for prediction",
+            "description": "Batch size for prediction (default: 1, from Flywing tutorial)",
         },
         "use_tta": {
             "type": bool,
-            "default": True,
-            "description": "Use test-time augmentation for better results",
+            "default": False,
+            "description": "Use test-time augmentation (default: False, from Flywing tutorial)",
         },
         "force_dedicated_env": {
             "type": bool,
@@ -89,22 +78,24 @@ except ImportError:
 def careamics_denoise(
     image: np.ndarray,
     checkpoint_path: str = "",
-    tile_size_z: int = 64,
-    tile_size_y: int = 64,
-    tile_size_x: int = 64,
-    tile_overlap_z: int = 8,
-    tile_overlap_y: int = 8,
-    tile_overlap_x: int = 8,
+    tile_size: str = "128,128,32",
+    tile_overlap: str = "48,48,8",
     batch_size: int = 1,
-    use_tta: bool = True,
+    use_tta: bool = False,
     force_dedicated_env: bool = False,
 ) -> np.ndarray:
     """
-    Denoise images using CAREamics models.
+    Denoise images using CAREamics models (Noise2Void or CARE).
 
-    This function loads a CAREamics model from a checkpoint file and uses it to denoise
-    the input image. The function supports both 2D and 3D data and handles tiling for
-    processing large images efficiently.
+    This function loads a CAREamics model from a checkpoint file or pretrained model
+    identifier and uses it to denoise the input image. The function supports YX (2D), 
+    ZYX (3D), TYX (2D with time), and TZYX (3D with time) data formats. For data with 
+    time dimension, the function iterates through each timepoint, similar to other 
+    processing functions.
+
+    Implementation follows CAREamics tutorials:
+    - 2D (Mouse Nuclei): https://careamics.github.io/0.1/applications/Noise2Void/Mouse_Nuclei/
+    - 3D (Flywing): https://careamics.github.io/0.1/applications/Noise2Void/Flywing/
 
     If CAREamics is not installed in the main environment, a dedicated virtual environment
     will be automatically created and managed.
@@ -112,25 +103,27 @@ def careamics_denoise(
     Parameters:
     -----------
     image : numpy.ndarray
-        Input image to denoise
+        Input image to denoise. Supported formats: YX, ZYX, TYX, TZYX
     checkpoint_path : str
-        Path to the CAREamics model checkpoint file (.ckpt)
-    tile_size_z : int
-        Tile size in Z dimension (for 3D data)
-    tile_size_y : int
-        Tile size in Y dimension
-    tile_size_x : int
-        Tile size in X dimension
-    tile_overlap_z : int
-        Tile overlap in Z dimension (for 3D data)
-    tile_overlap_y : int
-        Tile overlap in Y dimension
-    tile_overlap_x : int
-        Tile overlap in X dimension
+        Path to trained Noise2Void model checkpoint:
+        - Local checkpoint: '/path/to/experiment/checkpoints/last.ckpt'
+        - BMZ archive: '/path/to/model.zip'
+        - Model identifier: 'careamics/N2V_SEM_demo' (from HuggingFace)
+        Required. Leave empty to see help message.
+    tile_size : str
+        Tile size as comma-separated values 'X,Y,Z' or 'X,Y'. Default: '128,128,32'
+        Examples:
+            '128,128,32' for 3D data (X,Y,Z tile sizes)
+            '128,128' for 2D data (X,Y tile sizes)
+    tile_overlap : str
+        Tile overlap as comma-separated values 'X,Y,Z' or 'X,Y'. Default: '48,48,8'
+        Examples:
+            '48,48,8' for 3D data (X,Y,Z overlaps)
+            '48,48' for 2D data (X,Y overlaps)
     batch_size : int
-        Batch size for prediction
+        Batch size for prediction. Default: 1 (safe for most GPUs)
     use_tta : bool
-        Use test-time augmentation for better results
+        Use test-time augmentation for slightly better results (slower). Default: False
     force_dedicated_env : bool
         Force using dedicated environment even if CAREamics is available
 
@@ -138,11 +131,57 @@ def careamics_denoise(
     --------
     numpy.ndarray
         Denoised image with the same dimensions as the input
+
+    Notes:
+    ------
+    - For 2D data (YX): Uses axes="YX", tile_size=(tile_size_y, tile_size_x)
+    - For 3D data (ZYX): Uses axes="ZYX", tile_size=(tile_size_z, tile_size_y, tile_size_x)
+    - For TYX data: Iterates through T dimension, processing each timepoint as YX
+    - For TZYX data: Iterates through T dimension, processing each timepoint as ZYX
+    - Pretrained models are automatically downloaded from HuggingFace/BioImage Model Zoo
     """
-    # Verify checkpoint path
-    if not checkpoint_path or not os.path.exists(checkpoint_path):
-        print(f"Checkpoint file not found: {checkpoint_path}")
-        print("Please provide a valid checkpoint file path.")
+    # Parse tile size and overlap from comma-separated strings
+    try:
+        tile_parts = [int(x.strip()) for x in tile_size.split(',')]
+        if len(tile_parts) == 2:
+            tile_size_x, tile_size_y = tile_parts
+            tile_size_z = 32  # Default Z for 3D
+        elif len(tile_parts) == 3:
+            tile_size_x, tile_size_y, tile_size_z = tile_parts
+        else:
+            raise ValueError("tile_size must be 'X,Y' or 'X,Y,Z'")
+    except (ValueError, AttributeError) as e:
+        print(f"Error parsing tile_size '{tile_size}': {e}")
+        print("Using defaults: 128,128,32")
+        tile_size_x, tile_size_y, tile_size_z = 128, 128, 32
+    
+    try:
+        overlap_parts = [int(x.strip()) for x in tile_overlap.split(',')]
+        if len(overlap_parts) == 2:
+            tile_overlap_x, tile_overlap_y = overlap_parts
+            tile_overlap_z = 8  # Default Z for 3D
+        elif len(overlap_parts) == 3:
+            tile_overlap_x, tile_overlap_y, tile_overlap_z = overlap_parts
+        else:
+            raise ValueError("tile_overlap must be 'X,Y' or 'X,Y,Z'")
+    except (ValueError, AttributeError) as e:
+        print(f"Error parsing tile_overlap '{tile_overlap}': {e}")
+        print("Using defaults: 48,48,8")
+        tile_overlap_x, tile_overlap_y, tile_overlap_z = 48, 48, 8
+    
+    # Check if checkpoint/model identifier is provided
+    if not checkpoint_path:
+        print("=" * 70)
+        print("ERROR: No model checkpoint provided!")
+        print("\nYou must train a Noise2Void model first using CAREamics.")
+        print("See: https://careamics.github.io/0.1/applications/Noise2Void/")
+        print("\nAfter training, provide the checkpoint path:")
+        print("  checkpoint_path = '/path/to/experiment/checkpoints/last.ckpt'")
+        print("\nAlternatively, use a pretrained model:")
+        print("  checkpoint_path = 'careamics/N2V_SEM_demo'")
+        print("  (Available at: https://huggingface.co/careamics)")
+        print("\nNote: napari-tmidas currently supports Noise2Void models only.")
+        print("=" * 70)
         return image
 
     # Determine whether to use dedicated environment
@@ -175,19 +214,6 @@ def careamics_denoise(
             "use_tta": use_tta,
         }
 
-        # Calculate tile overlap automatically (e.g., 25% of tile size)
-        def compute_overlap(tile_size, fraction=0.25):
-            # Ensure overlap is at least 1 and less than tile size
-            overlap = max(1, int(tile_size * fraction))
-            return min(overlap, tile_size - 1)
-
-        # Inside careamics_denoise, after parsing tile sizes:
-        tile_overlap_z = (
-            compute_overlap(tile_size_z) if len(image.shape) >= 3 else None
-        )
-        tile_overlap_y = compute_overlap(tile_size_y)
-        tile_overlap_x = compute_overlap(tile_size_x)
-
         # Run CAREamics in the dedicated environment
         print("Running CAREamics in dedicated environment...")
         return run_careamics_in_env("predict", args)
@@ -196,99 +222,129 @@ def careamics_denoise(
         print("Running CAREamics in current environment...")
         # Use CAREamics directly in the current environment
         try:
-            print(f"Loading CAREamics model from: {checkpoint_path}")
-            # Initialize the CAREamist model
-            careamist = CAREamist(
-                checkpoint_path, os.path.dirname(checkpoint_path)
-            )
+            # Load model using correct CAREamics API
+            print(f"Loading model: {checkpoint_path}")
+            try:
+                careamist = CAREamist(checkpoint_path)
+                print("✓ Model loaded successfully\n")
+            except Exception as e:
+                print(f"✗ Error loading model: {e}")
+                print("\nTroubleshooting:")
+                print("- Ensure checkpoint file exists and is not corrupted")
+                print("- Check that model was trained with compatible CAREamics version")
+                print("- For pretrained models, verify identifier is correct")
+                return image
 
-            # Determine dimensionality
-            is_3d = len(image.shape) >= 3
+            # Determine data format and process accordingly
+            ndim = len(image.shape)
+            print(f"Processing: {image.shape}")
 
-            if is_3d:
-                print(f"Processing 3D data with shape: {image.shape}")
-                # Determine axes based on dimensionality
-                if len(image.shape) == 3:
-                    # ZYX format
+            if ndim == 2:
+                # YX format - 2D image
+                print("Format: 2D (YX)")
+                axes = "YX"
+                tile_size = (tile_size_y, tile_size_x)
+                tile_overlap = (tile_overlap_y, tile_overlap_x)
+                
+                prediction = careamist.predict(
+                    source=image,
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    batch_size=batch_size,
+                    tta=use_tta,
+                )
+                
+                # Squeeze output to match input shape
+                prediction = np.squeeze(prediction)
+                print(f"✓ Denoising complete. Output: {prediction.shape}\n")
+                return prediction
+
+            elif ndim == 3:
+                # Could be ZYX (3D) or TYX (2D with time)
+                # Check if first dimension is small (likely T) or large (likely Z)
+                if image.shape[0] <= 10:
+                    # Likely TYX - iterate through time
+                    print(f"Format: TYX (2D+time, T={image.shape[0]})")
+                    t_size = image.shape[0]
+                    axes = "YX"
+                    tile_size = (tile_size_y, tile_size_x)
+                    tile_overlap = (tile_overlap_y, tile_overlap_x)
+                    
+                    # Initialize result array
+                    result = np.zeros_like(image)
+                    
+                    # Process each timepoint
+                    for t in range(t_size):
+                        print(f"  Timepoint {t+1}/{t_size}...", end=" ")
+                        
+                        prediction = careamist.predict(
+                            source=image[t],
+                            tile_size=tile_size,
+                            tile_overlap=tile_overlap,
+                            batch_size=batch_size,
+                            tta=use_tta,
+                        )
+                        
+                        # Squeeze and store result
+                        result[t] = np.squeeze(prediction)
+                        print("✓")
+                    
+                    print(f"✓ Denoising complete. Output: {result.shape}\n")
+                    return result
+                else:
+                    # ZYX - 3D image
+                    print(f"Format: 3D (ZYX, Z={image.shape[0]})")
                     axes = "ZYX"
                     tile_size = (tile_size_z, tile_size_y, tile_size_x)
-                    tile_overlap = (
-                        tile_overlap_z,
-                        tile_overlap_y,
-                        tile_overlap_x,
+                    tile_overlap = (tile_overlap_z, tile_overlap_y, tile_overlap_x)
+                    
+                    prediction = careamist.predict(
+                        source=image,
+                        tile_size=tile_size,
+                        tile_overlap=tile_overlap,
+                        batch_size=batch_size,
+                        tta=use_tta,
                     )
-                    print(f"Using axes configuration: {axes}")
-                elif len(image.shape) == 4:
-                    # Assuming TZYX format
-                    axes = "TZYX"
-                    tile_size = (tile_size_z, tile_size_y, tile_size_x)
-                    tile_overlap = (
-                        tile_overlap_z,
-                        tile_overlap_y,
-                        tile_overlap_x,
+                    
+                    # Squeeze output to match input shape
+                    prediction = np.squeeze(prediction)
+                    print(f"✓ Denoising complete. Output: {prediction.shape}\n")
+                    return prediction
+
+            elif ndim == 4:
+                # TZYX - 3D with time, iterate through time
+                print(f"Format: TZYX (3D+time, T={image.shape[0]}, Z={image.shape[1]})")
+                t_size = image.shape[0]
+                axes = "ZYX"
+                tile_size = (tile_size_z, tile_size_y, tile_size_x)
+                tile_overlap = (tile_overlap_z, tile_overlap_y, tile_overlap_x)
+                
+                # Initialize result array
+                result = np.zeros_like(image)
+                
+                # Process each timepoint
+                for t in range(t_size):
+                    print(f"  Timepoint {t+1}/{t_size}...", end=" ")
+                    
+                    prediction = careamist.predict(
+                        source=image[t],
+                        tile_size=tile_size,
+                        tile_overlap=tile_overlap,
+                        batch_size=batch_size,
+                        tta=use_tta,
                     )
-                    print(f"Using axes configuration: {axes}")
-                else:
-                    # Unknown format, try to handle it
-                    print(
-                        f"Warning: Unusual data shape: {image.shape}. Defaulting to 'TZYX'"
-                    )
-                    axes = "TZYX"
-                    tile_size = (tile_size_z, tile_size_y, tile_size_x)
-                    tile_overlap = (
-                        tile_overlap_z,
-                        tile_overlap_y,
-                        tile_overlap_x,
-                    )
+                    
+                    # Squeeze and store result
+                    result[t] = np.squeeze(prediction)
+                    print("✓")
+                
+                print(f"✓ Denoising complete. Output: {result.shape}\n")
+                return result
+
             else:
-                print(f"Processing 2D data with shape: {image.shape}")
-                # 2D data
-                if len(image.shape) == 2:
-                    # YX format
-                    axes = "YX"
-                    tile_size = (tile_size_y, tile_size_x)
-                    tile_overlap = (tile_overlap_y, tile_overlap_x)
-                    print(f"Using axes configuration: {axes}")
-                else:
-                    # Unknown format, try to handle it
-                    print(
-                        f"Warning: Unusual data shape: {image.shape}. Defaulting to 'YX'"
-                    )
-                    axes = "YX"
-                    tile_size = (tile_size_y, tile_size_x)
-                    tile_overlap = (tile_overlap_y, tile_overlap_x)
-
-            # Run the prediction
-            print(
-                f"Running prediction with tile size: {tile_size}, overlap: {tile_overlap}"
-            )
-            print(f"Using batch size: {batch_size}, TTA: {use_tta}")
-
-            prediction = careamist.predict(
-                source=image,
-                tile_size=tile_size,
-                tile_overlap=tile_overlap,
-                axes=axes,
-                batch_size=batch_size,
-                tta=use_tta,
-            )
-
-            # # Handle output shape
-            # if prediction.shape != image.shape:
-            #     print(f"Warning: Prediction shape {prediction.shape} differs from input shape {image.shape}")
-            #     prediction = np.squeeze(prediction)
-
-            #     # If shapes still don't match, try to reshape
-            #     if prediction.shape != image.shape:
-            #         print(f"Warning: Shapes still don't match after squeezing. Using original dimensions.")
-            #         try:
-            #             prediction = prediction.reshape(image.shape)
-            #         except ValueError:
-            #             print("Error: Could not reshape prediction to match input shape.")
-            #             return image
-
-            # print(f"Denoising completed. Output shape: {prediction.shape}")
-            return prediction
+                print(f"✗ Error: Unsupported image dimensionality: {ndim}D")
+                print("Supported formats: YX (2D), ZYX (3D), TYX (2D+time), TZYX (3D+time)")
+                return image
 
         except (RuntimeError, ValueError, ImportError) as e:
             import traceback
