@@ -36,6 +36,9 @@ contributions:
     - id: napari-tmidas._label_based_cropping
       python_name: napari_tmidas._label_based_cropping_widget:napari_experimental_provide_dock_widget
       title: Label-Based Image Cropping
+    - id: napari-tmidas._frame_removal
+      python_name: napari_tmidas._frame_removal:frame_removal_widget
+      title: Frame Removal Tool
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
@@ -64,3 +67,5 @@ contributions:
       display_name: Batch ROI Colocalization Analysis
     - command: napari-tmidas._label_based_cropping
       display_name: Label-Based Image Cropping
+    - command: napari-tmidas._frame_removal
+      display_name: Frame Removal Tool

@@ -40,6 +40,11 @@ try:
 except ImportError:
     batch_crop_anything_widget = None
 
+try:
+    from ._frame_removal import frame_removal_widget
+except ImportError:
+    frame_removal_widget = None
+
 __all__ = (
     "napari_get_reader",
     "write_single_image",
@@ -49,4 +54,5 @@ __all__ = (
     "label_inspector_widget",
     "batch_crop_anything_widget",
     "roi_colocalization_analyzer",
+    "frame_removal_widget",
 )
