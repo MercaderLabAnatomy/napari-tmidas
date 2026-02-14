@@ -3,9 +3,16 @@ Tests for the Frame Removal Widget
 """
 
 import os
+import sys
 
 import numpy as np
 import pytest
+
+# Skip all Qt widget tests on macOS CI due to segfaults with headless Qt/OpenGL
+pytestmark = pytest.mark.skipif(
+    sys.platform == "darwin" and os.environ.get("CI") == "true",
+    reason="Qt widget tests cause segfaults on macOS CI (headless environment)",
+)
 
 
 def test_frame_removal_widget_import():
