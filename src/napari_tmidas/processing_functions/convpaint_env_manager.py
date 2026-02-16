@@ -352,24 +352,38 @@ print(f"Image shape: {{image.shape}}, dtype: {{image.dtype}}")
 
 # Segment
 print("Running segmentation...")
-segmentation = model.segment(image)
-print(f"Segmentation shape: {{segmentation.shape}}")
-
-# Remove singleton dimensions if present
-segmentation = np.squeeze(segmentation)
-print(f"Final segmentation shape: {{segmentation.shape}}")
-
-# Save output
-print("Saving output to: {output_path}")
-tifffile.imwrite("{output_path}", segmentation.astype(np.uint32), compression="zlib")
-
-# Clear memory
-del image, segmentation, model
-gc.collect()
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-elif torch.backends.mps.is_available():
-    torch.mps.empty_cache()
+try:
+    segmentation = model.segment(image)
+    print(f"Segmentation shape: {{segmentation.shape}}")
+    
+    # Clear input image from memory immediately after segmentation
+    del image
+    gc.collect()
+    
+    # Remove singleton dimensions if present
+    segmentation = np.squeeze(segmentation)
+    print(f"Final segmentation shape: {{segmentation.shape}}")
+    
+    # Save output
+    print("Saving output to: {output_path}")
+    tifffile.imwrite("{output_path}", segmentation.astype(np.uint32), compression="zlib")
+    
+finally:
+    # Clear memory regardless of success/failure
+    try:
+        del image
+    except NameError:
+        pass
+    try:
+        del segmentation
+    except NameError:
+        pass
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 print("Segmentation complete")
 """

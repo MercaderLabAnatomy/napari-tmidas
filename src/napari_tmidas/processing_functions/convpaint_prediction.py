@@ -77,6 +77,13 @@ except ImportError:
             "default": False,
             "description": "Force using dedicated environment even if napari-convpaint is available",
         },
+        "z_batch_size": {
+            "type": int,
+            "default": 20,
+            "min": 1,
+            "max": 200,
+            "description": "Number of Z-planes to process at once for 3D data (lower = less memory, slower). For large Z-stacks (>50 planes), use 10-20 to avoid OOM.",
+        },
     },
 )
 def convpaint_predict(
@@ -87,6 +94,7 @@ def convpaint_predict(
     background_label: int = 1,
     use_cpu: bool = False,
     force_dedicated_env: bool = False,
+    z_batch_size: int = 20,
 ) -> np.ndarray:
     """
     Semantic segmentation using pretrained convpaint models.
@@ -238,6 +246,8 @@ The output is automatically upsampled to match the input dimensions.
     print(f"Image downsample: {image_downsample}x")
     print(f"Output type: {output_type}")
     print(f"CPU mode: {use_cpu}")
+    if image.ndim >= 3 and (image.ndim == 3 and image.shape[0] < 100 or image.ndim == 4):
+        print(f"Z-batch size: {z_batch_size} planes (for memory management)")
     print(
         f"Using {'dedicated environment' if use_dedicated else 'current environment'}"
     )
@@ -262,7 +272,12 @@ The output is automatically upsampled to match the input dimensions.
         if image.shape[0] < 100:
             # Likely ZYX (3D Z-stack)
             print(f"Processing 3D image (ZYX) with {image.shape[0]} Z-planes...")
-            if use_dedicated:
+            if image.shape[0] > z_batch_size:
+                print(f"Large Z-stack detected. Processing in batches of {z_batch_size} planes...")
+                result = _process_zyx_in_batches(
+                    image, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+                )
+            elif use_dedicated:
                 result = run_convpaint_in_env(
                     image, model_path, image_downsample, use_cpu
                 )
@@ -276,7 +291,7 @@ The output is automatically upsampled to match the input dimensions.
                 f"Processing 2D time series (TYX) with {image.shape[0]} timepoints..."
             )
             result = _process_time_series(
-                image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False
+                image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False, z_batch_size=z_batch_size
             )
 
     elif ndim == 4:
@@ -285,7 +300,7 @@ The output is automatically upsampled to match the input dimensions.
             f"Processing 3D time series (TZYX) with {image.shape[0]} timepoints and {image.shape[1]} Z-planes..."
         )
         result = _process_time_series(
-            image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=True
+            image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=True, z_batch_size=z_batch_size
         )
 
     else:
@@ -399,7 +414,7 @@ def _segment_with_convpaint(image, model_path, image_downsample, use_cpu=False):
 
 
 def _process_time_series(
-    image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False
+    image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False, z_batch_size=20
 ):
     """
     Process time series data by iterating through timepoints.
@@ -424,6 +439,8 @@ def _process_time_series(
     numpy.ndarray
         Segmentation labels for all timepoints
     """
+    import gc
+    
     n_timepoints = image.shape[0]
     print(f"Processing {n_timepoints} timepoints...")
 
@@ -439,7 +456,13 @@ def _process_time_series(
         timepoint_img = image[t]  # (Y, X) or (Z, Y, X)
 
         # Segment this timepoint
-        if use_dedicated:
+        # For 3D timepoints with large Z-stacks, use batching
+        if is_3d and timepoint_img.shape[0] > z_batch_size:
+            print(f"  Processing Z-stack in batches of {z_batch_size} planes...")
+            timepoint_result = _process_zyx_in_batches(
+                timepoint_img, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+            )
+        elif use_dedicated:
             timepoint_result = run_convpaint_in_env(
                 timepoint_img, model_path, image_downsample, use_cpu
             )
@@ -450,8 +473,80 @@ def _process_time_series(
 
         # Store result
         results[t] = timepoint_result
+        
+        # Clean up memory after each timepoint
+        del timepoint_img, timepoint_result
+        gc.collect()
 
     print(f"\n✓ Processing complete. Output shape: {results.shape}")
+    return results
+
+
+def _process_zyx_in_batches(
+    image, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+):
+    """
+    Process a 3D ZYX image in batches along the Z-axis to reduce memory usage.
+
+    Parameters:
+    -----------
+    image : numpy.ndarray
+        Input 3D image (Z, Y, X)
+    model_path : str
+        Path to pretrained model
+    image_downsample : int
+        Downsampling factor
+    use_dedicated : bool
+        Whether to use dedicated environment
+    use_cpu : bool
+        Force CPU execution
+    z_batch_size : int
+        Number of Z-planes to process at once
+
+    Returns:
+    --------
+    numpy.ndarray
+        Segmentation labels for full Z-stack
+    """
+    import gc
+    
+    n_z_planes = image.shape[0]
+    output_shape = image.shape
+    results = np.zeros(output_shape, dtype=np.uint32)
+    
+    # Calculate number of batches
+    n_batches = int(np.ceil(n_z_planes / z_batch_size))
+    
+    print(f"Processing {n_z_planes} Z-planes in {n_batches} batches...")
+    
+    # Process each batch
+    for batch_idx in range(n_batches):
+        start_z = batch_idx * z_batch_size
+        end_z = min((batch_idx + 1) * z_batch_size, n_z_planes)
+        
+        print(f"  Batch {batch_idx+1}/{n_batches}: Z-planes {start_z+1}-{end_z}...")
+        
+        # Extract batch
+        batch_img = image[start_z:end_z]  # (batch_size, Y, X)
+        
+        # Segment batch
+        if use_dedicated:
+            batch_result = run_convpaint_in_env(
+                batch_img, model_path, image_downsample, use_cpu
+            )
+        else:
+            batch_result = _segment_with_convpaint(
+                batch_img, model_path, image_downsample, use_cpu
+            )
+        
+        # Store result
+        results[start_z:end_z] = batch_result
+        
+        # Clean up batch data
+        del batch_img, batch_result
+        gc.collect()
+    
+    print(f"✓ Z-batching complete. Output shape: {results.shape}")
     return results
 
 
