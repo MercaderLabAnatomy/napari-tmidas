@@ -15,26 +15,86 @@ from napari_tmidas._env_manager import BaseEnvironmentManager
 class ConvpaintEnvironmentManager(BaseEnvironmentManager):
     """Environment manager for napari-convpaint."""
 
-    def __init__(self):
+    def __init__(self, cuda_version: str = "auto"):
+        """
+        Initialize the Convpaint environment manager.
+        
+        Parameters:
+        -----------
+        cuda_version : str
+            CUDA version to use for PyTorch installation.
+            Options: "auto" (detect from system), "cu124", "cu130", "cpu"
+            Default: "auto"
+        """
         super().__init__("convpaint")
+        self.cuda_version = cuda_version
+
+    def _detect_cuda_version(self) -> str:
+        """Detect CUDA version from nvidia-smi."""
+        try:
+            result = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Parse CUDA version from nvidia-smi output
+                for line in result.stdout.split('\n'):
+                    if 'CUDA Version:' in line:
+                        import re
+                        match = re.search(r'CUDA Version:\s+(\d+\.\d+)', line)
+                        if match:
+                            cuda_ver = match.group(1)
+                            major, minor = cuda_ver.split('.')
+                            major = int(major)
+                            minor = int(minor)
+                            
+                            # Map to PyTorch CUDA versions
+                            if major == 13:
+                                return "cu130"
+                            elif major == 12:
+                                if minor >= 4:
+                                    return "cu124"
+                                elif minor >= 1:
+                                    return "cu121"
+                                else:
+                                    return "cu118"
+                            elif major == 11:
+                                return "cu118"
+                            
+                            print(f"Detected CUDA {cuda_ver}, using cu124 as fallback")
+                            return "cu124"
+        except Exception as e:
+            print(f"Could not detect CUDA version: {e}")
+        
+        return "cpu"
 
     def _install_dependencies(self, env_python: str) -> None:
         """Install napari-convpaint-specific dependencies."""
-        # Try to detect if CUDA is available
-        cuda_available = False
+        # Determine CUDA version to use
+        if self.cuda_version == "auto":
+            detected_cuda = self._detect_cuda_version()
+            print(f"Auto-detected CUDA version: {detected_cuda}")
+            cuda_to_use = detected_cuda
+        else:
+            cuda_to_use = self.cuda_version
+            print(f"Using specified CUDA version: {cuda_to_use}")
+
+        # Try to detect if CUDA is available in main environment
+        cuda_available = cuda_to_use != "cpu"
         try:
             import torch
-
-            cuda_available = torch.cuda.is_available()
+            cuda_available = cuda_available and torch.cuda.is_available()
             print(
                 f"CUDA is {'available' if cuda_available else 'not available'}"
             )
         except ImportError:
             print("PyTorch not detected in main environment")
 
-        if cuda_available:
+        if cuda_available and cuda_to_use != "cpu":
             # Install PyTorch with CUDA support
-            print("Installing PyTorch with CUDA support...")
+            print(f"Installing PyTorch with CUDA {cuda_to_use} support...")
             subprocess.check_call(
                 [
                     env_python,
@@ -44,7 +104,7 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
                     "torch",
                     "torchvision",
                     "--index-url",
-                    "https://download.pytorch.org/whl/cu124",
+                    f"https://download.pytorch.org/whl/{cuda_to_use}",
                 ]
             )
         else:
@@ -131,8 +191,8 @@ except Exception as e:
             return False
 
 
-# Global instance for backward compatibility
-manager = ConvpaintEnvironmentManager()
+# Global instance for backward compatibility (auto-detect CUDA)
+manager = ConvpaintEnvironmentManager(cuda_version="auto")
 
 
 def is_convpaint_installed():
@@ -150,16 +210,43 @@ def get_env_python_path():
     return manager.get_env_python_path()
 
 
-def create_convpaint_env():
-    """Create a dedicated virtual environment for napari-convpaint."""
+def create_convpaint_env(cuda_version: str = "auto"):
+    """
+    Create a dedicated virtual environment for napari-convpaint.
+    
+    Parameters:
+    -----------
+    cuda_version : str
+        CUDA version to use. Options: "auto", "cu124", "cu130", "cpu"
+        Default: "auto" (auto-detect from system)
+    """
+    if cuda_version != "auto":
+        # Create a new manager with specified CUDA version
+        custom_manager = ConvpaintEnvironmentManager(cuda_version=cuda_version)
+        return custom_manager.create_env()
     return manager.create_env()
 
 
-def recreate_convpaint_env():
-    """Delete and recreate the napari-convpaint environment (e.g., for version updates)."""
-    print("Recreating napari-convpaint environment...")
-    manager.delete_env()
-    return manager.create_env()
+def recreate_convpaint_env(cuda_version: str = "auto"):
+    """
+    Delete and recreate the napari-convpaint environment.
+    Useful for upgrading CUDA versions or updating dependencies.
+    
+    Parameters:
+    -----------
+    cuda_version : str
+        CUDA version to use. Options: "auto", "cu124", "cu130", "cpu"
+        Default: "auto" (auto-detect from system)
+    """
+    print(f"Recreating napari-convpaint environment with CUDA version: {cuda_version}...")
+    
+    if cuda_version != "auto":
+        # Create a new manager with specified CUDA version
+        custom_manager = ConvpaintEnvironmentManager(cuda_version=cuda_version)
+        return custom_manager.create_env()
+    else:
+        # create_env() automatically removes existing environment
+        return manager.create_env()
 
 
 def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):

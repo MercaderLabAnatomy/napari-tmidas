@@ -1317,6 +1317,9 @@ class ParameterWidget(QWidget):
     """
     Widget to display and edit processing function parameters
     """
+    
+    # Signal to notify when use_cpu parameter changes
+    use_cpu_changed = Signal(bool)
 
     def __init__(self, parameters: Dict[str, Dict[str, Any]]):
         super().__init__()
@@ -1382,6 +1385,11 @@ class ParameterWidget(QWidget):
                 widget = QCheckBox()
                 if default_value is not None:
                     widget.setChecked(bool(default_value))
+                # Connect use_cpu parameter to signal
+                if param_name == "use_cpu":
+                    widget.stateChanged.connect(
+                        lambda state: self.use_cpu_changed.emit(state == Qt.Checked)
+                    )
             else:
                 # Default to text input for other types
                 widget = QLineEdit(
@@ -2496,9 +2504,17 @@ class FileResultsWidget(QWidget):
         # Create and add new parameters widget
         if parameters:
             self.param_widget_instance = ParameterWidget(parameters)
+            # Connect use_cpu parameter to thread count widget
+            self.param_widget_instance.use_cpu_changed.connect(
+                self._update_thread_count_for_gpu
+            )
             self.parameters_widget.layout().addWidget(
                 self.param_widget_instance
             )
+            # Initial update of thread count based on current use_cpu value
+            if "use_cpu" in parameters:
+                use_cpu_value = parameters["use_cpu"].get("default", False)
+                self._update_thread_count_for_gpu(use_cpu_value)
         else:
             # Create empty widget if no parameters
             self.param_widget_instance = QLabel(
@@ -2506,6 +2522,25 @@ class FileResultsWidget(QWidget):
             )
             self.parameters_widget.layout().addWidget(
                 self.param_widget_instance
+            )
+
+    def _update_thread_count_for_gpu(self, use_cpu: bool):
+        """
+        Update thread count widget based on use_cpu parameter.
+        When GPU is used (use_cpu=False), limit to single thread.
+        """
+        if use_cpu:
+            # CPU mode: enable thread count selection
+            self.thread_count.setEnabled(True)
+            self.thread_count.setToolTip(
+                "Number of threads to use for parallel processing"
+            )
+        else:
+            # GPU mode: limit to single thread
+            self.thread_count.setValue(1)
+            self.thread_count.setEnabled(False)
+            self.thread_count.setToolTip(
+                "GPU processing requires single thread (automatically set to 1)"
             )
 
     def start_batch_processing(self):
@@ -2580,6 +2615,12 @@ class FileResultsWidget(QWidget):
             worker_thread_count = 1
             self.viewer.status = (
                 "Processing with a single thread (function is not thread-safe)"
+            )
+        # GPU-based processing should use single thread (unless use_cpu=True)
+        elif "use_cpu" in param_values and not param_values["use_cpu"]:
+            worker_thread_count = 1
+            self.viewer.status = (
+                "Processing with a single thread (GPU-based processing)"
             )
         else:
             self.viewer.status = (
