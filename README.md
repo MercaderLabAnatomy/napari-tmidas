@@ -150,7 +150,15 @@ Found a bug or have a feature request? [Open an issue](https://github.com/Mercad
 ## 🙏 Acknowledgments
 
 Built with [napari](https://github.com/napari/napari) and powered by:
-- [Cellpose](https://github.com/MouseLand/cellpose) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
+
+**AI/ML Methods:**
+- [Cellpose](https://github.com/MouseLand/cellpose) • [Convpaint](https://github.com/guiwitz/napari-convpaint) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
+
+**Core Scientific Stack:**
+- [NumPy](https://numpy.org/) • [scikit-image](https://scikit-image.org/) • [PyTorch](https://pytorch.org/)
+
+**File Format Support:**
+- [OME-Zarr](https://github.com/ome/ome-zarr-py) • [tifffile](https://github.com/cgohlke/tifffile) • [nd2](https://github.com/tlambert03/nd2) • [pylibCZIrw](https://github.com/ZEISS/pylibczi) • [readlif](https://github.com/nimne/readlif)
 
 ---
 
