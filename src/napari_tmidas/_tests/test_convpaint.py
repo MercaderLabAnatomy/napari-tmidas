@@ -40,7 +40,7 @@ class TestConvpaintPrediction:
         assert params["output_type"]["default"] == "semantic"
         assert params["background_label"]["default"] == 1
         assert params["use_cpu"]["default"] is False
-        assert params["z_batch_size"]["default"] == 20
+        assert params["z_batch_size"]["default"] == 0  # Disabled by default
 
     def test_convpaint_output_type_options(self):
         """Test output_type has correct options."""
@@ -224,15 +224,18 @@ class TestConvpaintBatching:
 
     def test_z_batch_size_parameter_validation(self):
         """Test z_batch_size parameter validation."""
+        # Ensure processing functions are loaded
+        discover_and_load_processing_functions()
+        
         func_info = BatchProcessingRegistry.get_function_info(
             "Convpaint Prediction"
         )
         params = func_info["parameters"]
         
         assert "z_batch_size" in params
-        assert params["z_batch_size"]["min"] == 1
+        assert params["z_batch_size"]["min"] == 0  # 0 = disabled
         assert params["z_batch_size"]["max"] == 200
-        assert params["z_batch_size"]["default"] == 20
+        assert params["z_batch_size"]["default"] == 0  # Disabled by default
 
     def test_process_zyx_in_batches_function_exists(self):
         """Test that the batching function exists."""
@@ -408,5 +411,45 @@ class TestConvpaintBatching:
             )
         
         # Batching should NOT be called for small Z-stacks
+        assert not batch_function_called
+        assert result.shape == image.shape
+
+    def test_batching_disabled_by_default(self):
+        """Test that batching is disabled when z_batch_size=0 (default)."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_time_series,
+        )
+        from unittest.mock import patch
+        
+        # Create TZYX data with 98 Z-planes (would trigger batching if enabled)
+        image = np.random.randint(0, 255, (2, 98, 100, 100), dtype=np.uint8)
+        
+        batch_function_called = False
+        def mock_batch_processing(*args, **kwargs):
+            nonlocal batch_function_called
+            batch_function_called = True
+            return np.ones(args[0].shape, dtype=np.uint32)
+        
+        def mock_regular_processing(img, *args, **kwargs):
+            return np.ones(img.shape, dtype=np.uint32)
+        
+        with patch(
+            'napari_tmidas.processing_functions.convpaint_prediction._process_zyx_in_batches',
+            side_effect=mock_batch_processing
+        ), patch(
+            'napari_tmidas.processing_functions.convpaint_prediction.run_convpaint_in_env',
+            side_effect=mock_regular_processing
+        ):
+            result = _process_time_series(
+                image,
+                model_path="dummy.pkl",
+                image_downsample=2,
+                use_dedicated=True,
+                use_cpu=False,
+                is_3d=True,
+                z_batch_size=0  # Default: disabled
+            )
+        
+        # Batching should NOT be called when disabled (even with 98 > 20 planes)
         assert not batch_function_called
         assert result.shape == image.shape
