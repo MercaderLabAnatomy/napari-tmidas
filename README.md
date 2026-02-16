@@ -16,7 +16,7 @@ Transform, analyze, and quantify microscopy data at scale including deep learnin
 ## ✨ Key Features
 
 🤖 **AI Methods Built-In**
-- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose) • Tracking (Trackastra)
+- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra)
 - Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
 🔄 **Universal File Conversion**
@@ -56,6 +56,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 | 🔧 **CAREamics** | Noise2Void/CARE denoising | [Guide](docs/careamics_denoising.md) |
 | 🎯 **Spotiflow** | Spot/puncta detection | [Guide](docs/spotiflow_detection.md) |
 | 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
+| 🎨 **Convpaint** | Custom semantic/instance segmentation | [Guide](docs/convpaint_prediction.md) |
 | 📈 **Trackastra** | Cell tracking over time | [Guide](docs/trackastra_tracking.md) |
 
 ### Core Workflows
