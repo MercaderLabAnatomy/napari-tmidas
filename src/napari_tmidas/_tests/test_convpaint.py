@@ -34,11 +34,13 @@ class TestConvpaintPrediction:
         assert "background_label" in params
         assert "use_cpu" in params
         assert "force_dedicated_env" in params
+        assert "z_batch_size" in params
         # Check parameter defaults
         assert params["image_downsample"]["default"] == 2
         assert params["output_type"]["default"] == "semantic"
         assert params["background_label"]["default"] == 1
         assert params["use_cpu"]["default"] is False
+        assert params["z_batch_size"]["default"] == 20
 
     def test_convpaint_output_type_options(self):
         """Test output_type has correct options."""
@@ -215,3 +217,196 @@ class TestConvpaintEnvManager:
         # This will return True or False depending on environment
         result = is_convpaint_installed()
         assert isinstance(result, bool)
+
+
+class TestConvpaintBatching:
+    """Test convpaint Z-stack batching functionality for memory management."""
+
+    def test_z_batch_size_parameter_validation(self):
+        """Test z_batch_size parameter validation."""
+        func_info = BatchProcessingRegistry.get_function_info(
+            "Convpaint Prediction"
+        )
+        params = func_info["parameters"]
+        
+        assert "z_batch_size" in params
+        assert params["z_batch_size"]["min"] == 1
+        assert params["z_batch_size"]["max"] == 200
+        assert params["z_batch_size"]["default"] == 20
+
+    def test_process_zyx_in_batches_function_exists(self):
+        """Test that the batching function exists."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_zyx_in_batches,
+        )
+        
+        assert callable(_process_zyx_in_batches)
+
+    def test_batching_output_shape(self):
+        """Test that batching preserves output shape."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_zyx_in_batches,
+        )
+        from unittest.mock import MagicMock, patch
+        
+        # Create a mock 3D image (50 Z-planes)
+        image = np.random.randint(0, 255, (50, 100, 100), dtype=np.uint8)
+        
+        # Mock the segmentation functions to return simple labels
+        def mock_segment(img, *args, **kwargs):
+            return np.ones(img.shape, dtype=np.uint32)
+        
+        with patch(
+            'napari_tmidas.processing_functions.convpaint_prediction.run_convpaint_in_env',
+            side_effect=mock_segment
+        ):
+            result = _process_zyx_in_batches(
+                image,
+                model_path="dummy.pkl",
+                image_downsample=2,
+                use_dedicated=True,
+                use_cpu=False,
+                z_batch_size=10
+            )
+        
+        # Output shape should match input shape
+        assert result.shape == image.shape
+        assert result.dtype == np.uint32
+
+    def test_batching_correct_number_of_batches(self):
+        """Test that correct number of batches are created."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_zyx_in_batches,
+        )
+        from unittest.mock import MagicMock, patch
+        
+        # Create image with 98 Z-planes (like user's case)
+        image = np.random.randint(0, 255, (98, 100, 100), dtype=np.uint8)
+        
+        call_count = 0
+        def mock_segment(img, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return np.ones(img.shape, dtype=np.uint32)
+        
+        with patch(
+            'napari_tmidas.processing_functions.convpaint_prediction.run_convpaint_in_env',
+            side_effect=mock_segment
+        ):
+            result = _process_zyx_in_batches(
+                image,
+                model_path="dummy.pkl",
+                image_downsample=2,
+                use_dedicated=True,
+                use_cpu=False,
+                z_batch_size=20
+            )
+        
+        # 98 planes / 20 batch_size = 5 batches (ceil)
+        expected_batches = 5
+        assert call_count == expected_batches
+
+    def test_batching_with_different_batch_sizes(self):
+        """Test batching with various batch sizes."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_zyx_in_batches,
+        )
+        from unittest.mock import patch
+        
+        image = np.random.randint(0, 255, (50, 64, 64), dtype=np.uint8)
+        
+        def mock_segment(img, *args, **kwargs):
+            return np.ones(img.shape, dtype=np.uint32)
+        
+        # Test different batch sizes
+        for batch_size in [5, 10, 25]:
+            with patch(
+                'napari_tmidas.processing_functions.convpaint_prediction.run_convpaint_in_env',
+                side_effect=mock_segment
+            ):
+                result = _process_zyx_in_batches(
+                    image,
+                    model_path="dummy.pkl",
+                    image_downsample=2,
+                    use_dedicated=True,
+                    use_cpu=False,
+                    z_batch_size=batch_size
+                )
+            
+            assert result.shape == image.shape
+            assert result.dtype == np.uint32
+
+    def test_time_series_uses_batching_for_large_zstacks(self):
+        """Test that TZYX data with large Z-stacks triggers batching."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_time_series,
+        )
+        from unittest.mock import patch
+        
+        # Create TZYX data (2 timepoints, 50 Z-planes each)
+        image = np.random.randint(0, 255, (2, 50, 100, 100), dtype=np.uint8)
+        
+        batch_function_called = False
+        def mock_batch_processing(*args, **kwargs):
+            nonlocal batch_function_called
+            batch_function_called = True
+            z_size = args[0].shape[0]
+            return np.ones((z_size, 100, 100), dtype=np.uint32)
+        
+        with patch(
+            'napari_tmidas.processing_functions.convpaint_prediction._process_zyx_in_batches',
+            side_effect=mock_batch_processing
+        ):
+            result = _process_time_series(
+                image,
+                model_path="dummy.pkl",
+                image_downsample=2,
+                use_dedicated=True,
+                use_cpu=False,
+                is_3d=True,
+                z_batch_size=20  # Trigger batching for 50 > 20
+            )
+        
+        # Batching should have been called for large Z-stacks
+        assert batch_function_called
+        assert result.shape == image.shape
+
+    def test_small_zstack_skips_batching(self):
+        """Test that small Z-stacks don't trigger batching."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _process_time_series,
+        )
+        from unittest.mock import patch
+        
+        # Create TZYX data with small Z-stack (15 planes < 20 batch_size)
+        image = np.random.randint(0, 255, (2, 15, 100, 100), dtype=np.uint8)
+        
+        batch_function_called = False
+        def mock_batch_processing(*args, **kwargs):
+            nonlocal batch_function_called
+            batch_function_called = True
+            return np.ones(args[0].shape, dtype=np.uint32)
+        
+        def mock_regular_processing(img, *args, **kwargs):
+            return np.ones(img.shape, dtype=np.uint32)
+        
+        with patch(
+            'napari_tmidas.processing_functions.convpaint_prediction._process_zyx_in_batches',
+            side_effect=mock_batch_processing
+        ), patch(
+            'napari_tmidas.processing_functions.convpaint_prediction.run_convpaint_in_env',
+            side_effect=mock_regular_processing
+        ):
+            result = _process_time_series(
+                image,
+                model_path="dummy.pkl",
+                image_downsample=2,
+                use_dedicated=True,
+                use_cpu=False,
+                is_3d=True,
+                z_batch_size=20
+            )
+        
+        # Batching should NOT be called for small Z-stacks
+        assert not batch_function_called
+        assert result.shape == image.shape
