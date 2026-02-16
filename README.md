@@ -130,6 +130,22 @@ Inspect and manually correct segmentation results.
 Interactive object selection and cropping with SAM2.
 </details>
 
+## 📋 TODO
+
+### Memory-Efficient Zarr Streaming
+
+**Current Limitation**: Processing functions pre-allocate full output arrays in memory before writing to zarr. For large TZYX time series (e.g., 100 timepoints × 1024×1024×20), this requires ~8+ GB peak memory even when using zarr output.
+
+**Planned Enhancement**: Implement incremental zarr writing across all processing functions:
+- Process one timepoint at a time
+- Write directly to zarr array on disk
+- Keep only single timepoint in memory (~80 MB vs 8 GB)
+- Maintain OME-Zarr metadata and chunking
+
+**Impact**: Enable processing of arbitrarily large time series limited only by disk space, not RAM. Critical for high-throughput microscopy workflows.
+
+**Affected Functions**: Convpaint prediction, Cellpose segmentation, CAREamics denoising, VisCy virtual staining, Trackastra tracking, and all batch processing operations with zarr output.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please ensure tests pass before submitting PRs:
