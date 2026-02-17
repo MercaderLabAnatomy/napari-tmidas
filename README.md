@@ -16,7 +16,7 @@ Transform, analyze, and quantify microscopy data at scale including deep learnin
 ## ✨ Key Features
 
 🤖 **AI Methods Built-In**
-- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra)
+- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra, Ultrack)
 - Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
 🔄 **Universal File Conversion**
@@ -58,6 +58,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 | 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
 | 🎨 **Convpaint** | Custom semantic/instance segmentation | [Guide](docs/convpaint_prediction.md) |
 | 📈 **Trackastra** | Cell tracking over time | [Guide](docs/trackastra_tracking.md) |
+| 🔗 **Ultrack** | Ensemble cell tracking with segmentation fusion | [Guide](docs/ultrack_tracking.md) |
 
 ### Core Workflows
 
@@ -168,7 +169,7 @@ Found a bug or have a feature request? [Open an issue](https://github.com/Mercad
 Built with [napari](https://github.com/napari/napari) and powered by:
 
 **AI/ML Methods:**
-- [Cellpose](https://github.com/MouseLand/cellpose) • [Convpaint](https://github.com/guiwitz/napari-convpaint) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
+- [Cellpose](https://github.com/MouseLand/cellpose) • [Convpaint](https://github.com/guiwitz/napari-convpaint) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [Ultrack](https://github.com/royerlab/ultrack) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
 
 **Core Scientific Stack:**
 - [NumPy](https://numpy.org/) • [scikit-image](https://scikit-image.org/) • [PyTorch](https://pytorch.org/)
