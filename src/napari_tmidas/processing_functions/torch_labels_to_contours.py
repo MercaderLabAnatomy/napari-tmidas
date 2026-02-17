@@ -10,12 +10,17 @@ This implementation produces identical output to ultrack's version while using
 PyTorch's GPU acceleration instead of CuPy.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import zarr
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    import torch
 
 try:
     import torch
@@ -23,10 +28,10 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    torch = None
+    torch = None  # type: ignore
 
 
-def _find_boundaries_torch(labels: torch.Tensor, mode: str = "outer") -> torch.Tensor:
+def _find_boundaries_torch(labels: "torch.Tensor", mode: str = "outer") -> "torch.Tensor":
     """
     PyTorch implementation of skimage.segmentation.find_boundaries.
     
@@ -113,7 +118,7 @@ def _find_boundaries_torch(labels: torch.Tensor, mode: str = "outer") -> torch.T
     return boundary
 
 
-def _gaussian_filter_torch(input: torch.Tensor, sigma: float) -> torch.Tensor:
+def _gaussian_filter_torch(input: "torch.Tensor", sigma: float) -> "torch.Tensor":
     """
     PyTorch implementation of Gaussian filtering.
     
