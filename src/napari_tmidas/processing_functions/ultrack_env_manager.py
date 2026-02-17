@@ -534,8 +534,8 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
         # Step 4: Install ultrack and related packages from pip
         log("Installing ultrack and dependencies from pip...")
         pip_packages = [
-            "ultrack>=0.13.0",
-            "zarr>=3.0.0",
+            "ultrack",  # Latest available version (0.7.1 as of Feb 2026)
+            "zarr",     # Zarr array storage (v3+ recommended)
             "tifffile",
         ]
         

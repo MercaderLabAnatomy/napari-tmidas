@@ -572,8 +572,12 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
     
     # Critical packages required by generated scripts
     critical_packages = {
-        "ultrack": "ultrack>=0.13.0",  # Main tracking package
-        "zarr": "zarr>=3.0.0",  # Required for zarr array storage
+        "numpy": "numpy",       # Core scientific computing
+        "scipy": "scipy",       # Scientific algorithms
+        "pandas": "pandas",     # Data structures
+        "skimage": "scikit-image",  # Image processing
+        "ultrack": "ultrack",  # Main tracking package (latest available)
+        "zarr": "zarr",  # Zarr array storage (v3+ auto-installed)
         "torch": "torch",       # Required for GPU-accelerated labels_to_contours
         "tifffile": "tifffile", # Required for TIFF I/O
     }
