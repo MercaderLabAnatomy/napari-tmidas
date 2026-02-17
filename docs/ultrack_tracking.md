@@ -122,6 +122,16 @@ Comma-separated list of label file suffixes. The function will look for files wi
 - `sample_001_cp_labels.tif`
 - `sample_001_convpaint_labels.tif`
 
+**IMPORTANT - File Loading**:
+- **Order matters**: The first suffix in the list is the "primary" suffix
+- **Load ONLY the first suffix**: Select files like `*_cp_labels.tif` in the file loader
+- **Avoid loading all suffixes**: If you load both `*_cp_labels.tif` AND `*_convpaint_labels.tif`, they will be skipped as duplicates
+- **Why**: The function automatically finds all ensemble members based on the suffix list
+
+**Output naming**:
+- Input: `sample_001_cp_labels.tif` (and `sample_001_convpaint_labels.tif`)
+- Output: `sample_001_ultrack.tif` ← Label suffix is stripped, only one output per sample
+
 #### Gurobi License (Optional)
 ```
 (leave empty for default solver)

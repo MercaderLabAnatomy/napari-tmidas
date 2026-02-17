@@ -518,7 +518,7 @@ try:
     tracks_df, lineage_graph = to_tracks_layer(config)
 
     # Save tracks to CSV
-    tracks_csv_path = '{output_path}'.replace('_tracked.tif', '_tracks.csv')
+    tracks_csv_path = '{output_path}'.replace('_ultrack.tif', '_ultrack_tracks.csv')
     tracks_df.to_csv(tracks_csv_path, index=False)
     print(f"Saved tracks to: {{{{tracks_csv_path}}}}")
 
@@ -634,7 +634,7 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
 
 @BatchProcessingRegistry.register(
     name="Track Cells with Ultrack (Segmentation Ensemble)",
-    suffix="_ultrack_tracked",
+    suffix="_ultrack",
     description="Track cells using ultrack with segmentation ensemble (sets of label images from different segmentation methods). Important: Use one of the label suffixes when loading files (e.g., load only '*_cp_labels.tif' files) to avoid redundant processing. The function will automatically find other ensemble members based on the provided suffixes.",
     parameters={
         "label_suffixes": {
@@ -826,6 +826,17 @@ def ultrack_ensemble_tracking(
         print("No valid label suffixes provided. Returning unchanged.")
         return image
 
+    # CRITICAL: Only process files that match the FIRST suffix to avoid redundant processing
+    # When ensemble has _cp_labels.tif and _convpaint_labels.tif, only process _cp_labels.tif
+    first_suffix = suffix_list[0]
+    first_suffix_stem = first_suffix.replace(".tif", "").replace(".tiff", "")
+    
+    input_filename = Path(img_path).name
+    if not input_filename.endswith(first_suffix):
+        print(f"Skipping: This file doesn't match the first suffix '{first_suffix}'")
+        print(f"  (Ensemble will be processed when '{first_suffix}' file is encountered)")
+        return image  # Return unchanged - will be processed with the first suffix file
+
     print(f"Looking for {len(suffix_list)} label file(s):")
     for suffix in suffix_list:
         print(f"  - {suffix}")
@@ -861,7 +872,7 @@ def ultrack_ensemble_tracking(
 
     # Set up output path
     output_dir = base_dir
-    output_path = output_dir / f"{base_name}_ultrack_tracked.tif"
+    output_path = output_dir / f"{base_name}_ultrack.tif"
 
     # Create the tracking script
     script_content = create_ultrack_ensemble_script(

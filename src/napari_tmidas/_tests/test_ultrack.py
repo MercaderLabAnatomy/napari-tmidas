@@ -117,7 +117,7 @@ class TestUltrackFunctionRegistration:
         func_info = BatchProcessingRegistry.get_function_info(
             "Track Cells with Ultrack (Segmentation Ensemble)"
         )
-        assert func_info["suffix"] == "_ultrack_tracked"
+        assert func_info["suffix"] == "_ultrack"
 
 
 class TestUltrackTracking:
@@ -148,7 +148,7 @@ class TestUltrackTracking:
                 str(tmpdir_path / "test_cp_labels.tif"),
                 str(tmpdir_path / "test_convpaint_labels.tif"),
             ]
-            output_path = str(tmpdir_path / "test_ultrack_tracked.tif")
+            output_path = str(tmpdir_path / "test_ultrack.tif")
 
             # Generate script
             script = create_ultrack_ensemble_script(
