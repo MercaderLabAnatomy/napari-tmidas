@@ -1337,6 +1337,7 @@ class ParameterWidget(QWidget):
             default_value = param_info.get("default")
             min_value = param_info.get("min")
             max_value = param_info.get("max")
+            step_value = param_info.get("step")
             description = param_info.get("description", "")
             options = param_info.get("options")  # For dropdown parameters
 
@@ -1369,6 +1370,8 @@ class ParameterWidget(QWidget):
                     widget.setMinimum(min_value)
                 if max_value is not None:
                     widget.setMaximum(max_value)
+                if step_value is not None:
+                    widget.setSingleStep(step_value)
                 if default_value is not None:
                     widget.setValue(default_value)
             elif param_type is float:
@@ -1378,6 +1381,10 @@ class ParameterWidget(QWidget):
                 if max_value is not None:
                     widget.setMaximum(max_value)
                 widget.setDecimals(3)
+                if step_value is not None:
+                    widget.setSingleStep(step_value)
+                else:
+                    widget.setSingleStep(0.1)  # Default step for floats
                 if default_value is not None:
                     widget.setValue(default_value)
             elif param_type is bool:
@@ -1395,6 +1402,9 @@ class ParameterWidget(QWidget):
                 widget = QLineEdit(
                     str(default_value) if default_value is not None else ""
                 )
+                # Make wider for certain parameters
+                if param_info.get("wide_input", False) or "suffix" in param_name.lower():
+                    widget.setMinimumWidth(300)
 
             input_layout.addWidget(widget)
             input_layout.addStretch()
@@ -1407,7 +1417,11 @@ class ParameterWidget(QWidget):
                 desc_label.setStyleSheet(
                     "color: gray; font-size: 10px; padding-left: 10px;"
                 )
-                desc_label.setMaximumWidth(400)  # Prevent excessive width
+                # Wider description for wide input parameters
+                if param_info.get("wide_input", False) or "suffix" in param_name.lower():
+                    desc_label.setMaximumWidth(600)  # Wider for wide inputs
+                else:
+                    desc_label.setMaximumWidth(400)  # Prevent excessive width
                 param_layout.addWidget(desc_label)
 
             main_layout.addWidget(param_container)
@@ -2455,15 +2469,22 @@ class FileResultsWidget(QWidget):
             or "cellpose" in description.lower()
             or "careamics" in description.lower()
             or "trackastra" in description.lower()
+            or "ultrack" in function_name.lower()  # Memory-intensive tracking
         )
 
         # Disable threading controls for folder functions
         if is_folder_function:
             self.thread_count.setValue(1)
             self.thread_count.setEnabled(False)
-            self.thread_count.setToolTip(
-                "This function processes entire folders and must run with 1 thread only."
-            )
+            # More specific tooltip for ultrack
+            if "ultrack" in function_name.lower():
+                self.thread_count.setToolTip(
+                    "This function is memory-intensive and must run with 1 thread to avoid crashes."
+                )
+            else:
+                self.thread_count.setToolTip(
+                    "This function processes entire folders and must run with 1 thread only."
+                )
 
             # Add warning to description if not already present
             if (
