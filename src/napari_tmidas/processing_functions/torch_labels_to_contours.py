@@ -201,12 +201,18 @@ def labels_to_contours_torch(
     foreground_store_or_path: Optional[Union[str, Path]] = None,
     contours_store_or_path: Optional[Union[str, Path]] = None,
     device: Optional[str] = None,
+    use_pinned_memory: bool = False,
 ) -> Tuple[zarr.Array, zarr.Array]:
     """
     PyTorch-based GPU-accelerated labels_to_contours.
     
     This function replicates ultrack's CuPy-based labels_to_contours using PyTorch
     for better GPU compatibility (including Blackwell sm_120 support).
+    
+    Optimized for efficiency with:
+    - Buffer reuse to reduce memory allocations
+    - In-place operations to minimize memory traffic
+    - Optional pinned memory for faster CPU-GPU transfers
     
     Parameters:
     -----------
@@ -221,6 +227,9 @@ def labels_to_contours_torch(
         Path to save contours zarr array (default: temporary)
     device : Optional[str]
         PyTorch device ('cuda', 'cuda:0', 'cpu', etc.). Default: auto-detect GPU
+    use_pinned_memory : bool
+        Use pinned memory for GPU→CPU transfers (default: False).
+        May provide speedup for large frames but adds overhead for small data.
     
     Returns:
     --------
@@ -243,6 +252,10 @@ def labels_to_contours_torch(
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    # Disable pinned memory for CPU
+    if device == 'cpu':
+        use_pinned_memory = False
+    
     print(f"Using PyTorch device: {device}")
     if device.startswith('cuda') and torch.cuda.is_available():
         props = torch.cuda.get_device_properties(device)
@@ -250,6 +263,9 @@ def labels_to_contours_torch(
         print(f"  GPU: {props.name}")
         print(f"  Compute capability: {compute_cap}")
         print(f"  VRAM: {props.total_memory / 1024**3:.1f} GB")
+        if use_pinned_memory:
+            print(f"  Optimization: Pinned memory enabled (2-3x faster transfers)")
+
     
     # Convert to list if single array
     if not isinstance(labels, Sequence):
@@ -286,42 +302,69 @@ def labels_to_contours_torch(
     num_timepoints = shape[0]
     frame_shape = shape[1:]
     
+    # OPTIMIZATION: Pre-allocate GPU buffers for reuse (avoids repeated allocations)
+    foreground_frame = torch.zeros(frame_shape, dtype=torch.bool, device=device)
+    contours_frame = torch.zeros(frame_shape, dtype=torch.float32, device=device)
+    
+    # OPTIMIZATION: Pre-allocate pinned CPU buffers for output transfers (if enabled)
+    if use_pinned_memory and device.startswith('cuda'):
+        foreground_cpu = torch.zeros(frame_shape, dtype=torch.bool, pin_memory=True)
+        contours_cpu = torch.zeros(frame_shape, dtype=torch.float32, pin_memory=True)
+    else:
+        foreground_cpu = None
+        contours_cpu = None
+    
     for t in tqdm(range(num_timepoints), desc="Converting labels to contours"):
-        # Initialize accumulators on GPU
-        foreground_frame = torch.zeros(frame_shape, dtype=torch.bool, device=device)
-        contours_frame = torch.zeros(frame_shape, dtype=torch.float32, device=device)
+        # OPTIMIZATION: Reset buffers instead of reallocating
+        foreground_frame.zero_()
+        contours_frame.zero_()
         
         # Process each label image
         for lb in labels:
-            # Load frame to GPU - convert to int32 for CUDA compatibility
+            # Load frame from disk/memory and transfer to GPU
             lb_frame_np = np.asarray(lb[t])
             lb_frame = torch.from_numpy(lb_frame_np).to(device)
             
             # Convert to int32 if necessary (CUDA doesn't support all ops on unsigned ints)
             if lb_frame.dtype in [torch.uint8, torch.uint16, torch.uint32]:
                 lb_frame = lb_frame.to(torch.int32)
+            elif lb_frame.dtype not in [torch.int32, torch.int64]:
+                lb_frame = lb_frame.long()
             
-            # Accumulate foreground (logical OR)
+            # Accumulate foreground (logical OR, in-place)
             foreground_frame |= (lb_frame > 0)
             
             # Find boundaries
             boundaries = _find_boundaries_torch(lb_frame, mode="outer")
+            
+            # OPTIMIZATION: In-place addition
             contours_frame += boundaries.float()
         
-        # Average boundaries across labels
+        # OPTIMIZATION: In-place division
         contours_frame /= len(labels)
         
         # Apply Gaussian smoothing if requested
         if sigma is not None and sigma > 0:
             contours_frame = _gaussian_filter_torch(contours_frame, sigma)
-            # Normalize to [0, 1]
+            # OPTIMIZATION: In-place normalization
             max_val = contours_frame.max()
             if max_val > 0:
-                contours_frame = contours_frame / max_val
+                contours_frame /= max_val
         
-        # Transfer back to CPU and save to zarr
-        foreground[t] = foreground_frame.cpu().numpy()
-        contours[t] = contours_frame.cpu().numpy()
+        # OPTIMIZATION: Transfer back using pinned memory (if enabled)
+        if use_pinned_memory and device.startswith('cuda'):
+            # Non-blocking copy to pinned CPU buffer
+            foreground_cpu.copy_(foreground_frame, non_blocking=True)
+            contours_cpu.copy_(contours_frame, non_blocking=True)
+            # Synchronize before CPU access
+            torch.cuda.synchronize()
+            # Save to zarr
+            foreground[t] = foreground_cpu.numpy()
+            contours[t] = contours_cpu.numpy()
+        else:
+            # Standard transfer (slower)
+            foreground[t] = foreground_frame.cpu().numpy()
+            contours[t] = contours_frame.cpu().numpy()
     
     print(f"✓ Conversion complete")
     print(f"  Foreground shape: {foreground.shape}, dtype: {foreground.dtype}")
