@@ -6,6 +6,7 @@ Test module for Ultrack processing functions.
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -208,11 +209,21 @@ class TestUltrackTracking:
             assert "foreground_path" in script or "foreground.zarr" in script
             assert "edges_path" in script or "edges.zarr" in script
 
-    def test_ultrack_with_2d_synthetic_data(self):
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._ensure_scikit_image_fix')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._verify_and_fix_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.create_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.is_env_created')
+    def test_ultrack_with_2d_synthetic_data(self, mock_is_env, mock_create_env, mock_verify, mock_scikit):
         """Test ultrack tracking with synthetic 2D data."""
         from napari_tmidas.processing_functions.ultrack_tracking import (
             ultrack_ensemble_tracking,
         )
+
+        # Mock environment functions to avoid actual conda environment creation
+        mock_is_env.return_value = True
+        mock_create_env.return_value = True
+        mock_verify.return_value = True
+        mock_scikit.return_value = True
 
         # Create synthetic TYX data (time series of 2D images)
         # Just a simple test to check interface, not actual tracking
@@ -229,11 +240,21 @@ class TestUltrackTracking:
         # Should return array (even if unchanged due to missing files)
         assert isinstance(result, np.ndarray)
 
-    def test_ultrack_parameter_validation(self):
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._ensure_scikit_image_fix')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._verify_and_fix_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.create_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.is_env_created')
+    def test_ultrack_parameter_validation(self, mock_is_env, mock_create_env, mock_verify, mock_scikit):
         """Test parameter validation in ultrack tracking."""
         from napari_tmidas.processing_functions.ultrack_tracking import (
             ultrack_ensemble_tracking,
         )
+
+        # Mock environment functions to avoid actual conda environment creation
+        mock_is_env.return_value = True
+        mock_create_env.return_value = True
+        mock_verify.return_value = True
+        mock_scikit.return_value = True
 
         # Test with empty label suffixes
         image = np.zeros((5, 100, 100), dtype=np.uint16)
@@ -247,11 +268,21 @@ class TestUltrackTracking:
         # Should return unchanged when no valid suffixes
         assert np.array_equal(result, image)
 
-    def test_ultrack_dimension_check(self):
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._ensure_scikit_image_fix')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking._verify_and_fix_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.create_ultrack_env')
+    @patch('napari_tmidas.processing_functions.ultrack_tracking.is_env_created')
+    def test_ultrack_dimension_check(self, mock_is_env, mock_create_env, mock_verify, mock_scikit):
         """Test dimension validation in ultrack tracking."""
         from napari_tmidas.processing_functions.ultrack_tracking import (
             ultrack_ensemble_tracking,
         )
+
+        # Mock environment functions to avoid actual conda environment creation
+        mock_is_env.return_value = True
+        mock_create_env.return_value = True
+        mock_verify.return_value = True
+        mock_scikit.return_value = True
 
         # Test with 2D image (no time dimension)
         image_2d = np.zeros((100, 100), dtype=np.uint16)
