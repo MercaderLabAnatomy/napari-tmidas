@@ -33,14 +33,22 @@ The ultrack environment in napari-tmidas includes several custom patches to ensu
 
 **Location**: `torch_labels_to_contours.py`
 
-### 2. scikit-image 0.26+ Compatibility
+### 2. scikit-image Dev Version (0.26.1+)
 
-**Issue**: scikit-image 0.26.0 deprecated the `min_size` parameter in `morphology.remove_small_objects()`, replacing it with `max_size`.
+**Issue 1**: scikit-image 0.26.0 and earlier have issues with read-only zarr arrays, causing "buffer source array is read-only" errors.
 
-**Solution**: Runtime patch to ultrack's `hierarchy.py`
-- Automatically applied when creating the ultrack environment
-- Changes `min_size=` to `max_size=` parameter
-- Fixes deprecation warning and ensures compatibility
+**Issue 2**: scikit-image 0.26.0 deprecated the `min_size` parameter in `morphology.remove_small_objects()`, replacing it with `max_size`.
+
+**Solution**: Automatic installation of scikit-image dev version
+- Environment manager checks scikit-image version during setup
+- If < 0.26.1: Automatically installs dev version from GitHub with read-only array fix
+- If 0.26.1+ stable is available: Auto-upgrades to stable release
+- Runtime patch to ultrack's `hierarchy.py` for deprecated parameter compatibility
+
+**Installation command** (automatic):
+```bash
+pip install --upgrade git+https://github.com/scikit-image/scikit-image.git@main
+```
 
 **Files patched**: 
 - `/path/to/ultrack/env/lib/python3.11/site-packages/ultrack/core/segmentation/hierarchy.py`

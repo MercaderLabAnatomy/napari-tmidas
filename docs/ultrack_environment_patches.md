@@ -36,12 +36,32 @@ The ultrack conda environment requires several patches to ensure compatibility w
 
 ---
 
-### 2. scikit-image 0.26+ Compatibility
+### 2. scikit-image Read-Only Array Fix + 0.26+ Compatibility
 
-**Problem**:
+**Problem 1: Read-only arrays**
+- scikit-image 0.26.0 and earlier have issues with read-only zarr arrays
+- Causes "buffer source array is read-only" errors during processing
+- Fix merged Feb 8, 2026 (commit 70ab2a6b) and will be in scikit-image 0.26.1+
+
+**Problem 2: Deprecated parameters**
 - scikit-image 0.26.0 deprecated `min_size` parameter in `morphology.remove_small_objects()`
-- Parameter replaced with `max_size`
-- ultrack's `hierarchy.py` uses old `min_size` parameter
+- **Automatic**: Environment manager installs scikit-image dev version from GitHub when needed
+- **Auto-upgrades**: Once scikit-image 0.26.1+ stable is released, automatically upgrades to it
+- **Runtime patch**: ultrack's `hierarchy.py` patched to use `max_size=` instead of `min_size=`
+
+**Installation handled automatically** in `_ensure_scikit_image_fix()`:
+```python
+# Check version
+current_version = get_scikit_image_version(env_name)
+
+if version < 0.26.1:
+    # Install dev version with read-only array fix
+    pip install --upgrade git+https://github.com/scikit-image/scikit-image.git@main
+    
+elif stable 0.26.1+ is available:
+    # Auto-upgrade to stable release
+    pip install --upgrade scikit-image>=0.26.1
+```
 - Causes deprecation warnings and potential future breaks
 
 **Solution**:
@@ -72,6 +92,8 @@ new_code = """        morphology.remove_small_objects(
             out=labels,
         )"""
 
+- ✅ **scikit-image dev version**: Automatically installed by `_ensure_scikit_image_fix()`
+- ⚠️ **ultrack hierarchy.py patch**:
 content = content.replace(old_code, new_code)
 hierarchy_file.write_text(content)
 print(f"✓ Fixed deprecated min_size parameter")
@@ -131,9 +153,10 @@ else:
 ### 4. Read-Only Zarr Array Handling (Bonus)
 
 **Problem**:
-- ultrack's solver fails with read-only zarr arrays during fancy indexing
-- Causes "assignment destination is read-only" errors
-
+- ultrack's soldev version | During env creation | Auto-install from GitHub | ✅ Automatic |
+| scikit-image hierarchy fix | After env creation | Manual script | ⚠️ Manual |
+| NumPy xp assignment | During env creation | Auto-patch | ✅ Automatic |
+| Read-only zarr arrays | Deprecated (fixed in skimage dev) | N/A | ✅ Not needed
 **Solution**:
 - Auto-applied patch to make arrays writable before indexing
 
