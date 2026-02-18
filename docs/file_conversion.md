@@ -249,7 +249,7 @@ Automatically detects file size and chooses optimal strategy.
 **Solutions**:
 - Verify file integrity on microscope/computer it was created on
 - Check file header with external tools (e.g., `file filename.lif`)
-- Reinstall required package: `pip install 'napari-tmidas[deep-learning]'`
+- Reinstall napari-tmidas: `pip install --force-reinstall napari-tmidas`
 
 ### Memory Error During Conversion
 

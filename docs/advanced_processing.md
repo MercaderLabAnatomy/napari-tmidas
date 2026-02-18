@@ -14,13 +14,7 @@ Image denoising using **CAREamics** (Content-Aware Image Restoration). This proc
 
 ## Installation
 
-CAREamics is automatically available when you install napari-tmidas with deep learning support:
-
-```bash
-pip install 'napari-tmidas[deep-learning]'
-```
-
-If you installed the basic version without deep learning, the plugin will automatically create a dedicated `careamics-env` environment when first used.
+CAREamics will automatically install into a dedicated `careamics-env` environment when first used.
 
 ## Parameters
 
@@ -111,13 +105,7 @@ Accurate spot detection for fluorescence microscopy using **Spotiflow**, a deep 
 
 ## Installation
 
-Spotiflow is automatically available when you install napari-tmidas with deep learning support:
-
-```bash
-pip install 'napari-tmidas[deep-learning]'
-```
-
-If you installed the basic version without deep learning, the plugin will automatically create a `spotiflow-env` environment when first used.
+Spotiflow will automatically install into a dedicated `spotiflow-env` environment when first used.
 
 ## Pre-trained Models
 

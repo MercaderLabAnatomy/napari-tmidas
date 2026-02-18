@@ -15,15 +15,11 @@ This plugin enables:
 
 ### Installation
 
-Batch Crop Anything requires the deep learning components. Install with:
-
-```bash
-pip install 'napari-tmidas[deep-learning]'
-```
+Batch Crop Anything will automatically create a dedicated SAM2 environment when first used.
 
 ### SAM2 Setup
 
-SAM2 is automatically downloaded on first use. However, you must manually install ffmpeg:
+SAM2 is automatically downloaded and installed in an isolated environment on first use. However, you must manually install ffmpeg:
 
 ```bash
 # Linux (usually pre-installed)
@@ -189,15 +185,7 @@ If SAM2 initialization fails:
 
 ### "SAM2 not found" warning
 
-**Solution**: Ensure SAM2 is installed or set `SAM2_PATH`:
-
-```bash
-# Install SAM2
-pip install 'napari-tmidas[deep-learning]'
-
-# Or set path manually
-export SAM2_PATH=/path/to/sam2
-```
+**Solution**: SAM2 will auto-install on first use. If this fails, check console for errors.
 
 ### Segmentation not appearing
 

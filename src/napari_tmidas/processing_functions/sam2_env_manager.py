@@ -4,6 +4,7 @@ processing_functions/sam2_env_manager.py
 This module manages a dedicated virtual environment for SAM2.
 """
 
+import os
 import subprocess
 
 from napari_tmidas._env_manager import BaseEnvironmentManager
@@ -14,42 +15,117 @@ class SAM2EnvironmentManager(BaseEnvironmentManager):
 
     def __init__(self):
         super().__init__("sam2-env")
+        self.sam2_repo_dir = os.path.join(self.env_dir, "sam2_repo")
+        self.checkpoints_dir = os.path.join(self.sam2_repo_dir, "checkpoints")
 
     def _install_dependencies(self, env_python: str) -> None:
-        """Install SAM2-specific dependencies."""
+        """Install SAM2-specific dependencies including cloning the repository."""
         # Install numpy and torch first for compatibility
         print("Installing torch and torchvision...")
         subprocess.check_call(
             [env_python, "-m", "pip", "install", "torch", "torchvision"]
         )
 
-        # Install sam2 from GitHub
-        print("Installing SAM2 from GitHub...")
+        # Clone SAM2 repository into the environment directory
+        print(f"Cloning SAM2 repository to {self.sam2_repo_dir}...")
+        if os.path.exists(self.sam2_repo_dir):
+            print("SAM2 repository already exists, pulling latest changes...")
+            subprocess.check_call(
+                ["git", "-C", self.sam2_repo_dir, "pull"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.check_call(
+                [
+                    "git",
+                    "clone",
+                    "https://github.com/facebookresearch/sam2.git",
+                    self.sam2_repo_dir,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        # Install SAM2 from the cloned repository
+        print("Installing SAM2 package from cloned repository...")
         subprocess.check_call(
-            [
-                env_python,
-                "-m",
-                "pip",
-                "install",
-                "git+https://github.com/facebookresearch/sam2.git",
-            ]
+            [env_python, "-m", "pip", "install", "-e", self.sam2_repo_dir]
         )
 
+        # Download model checkpoint
+        self._download_model_checkpoint(env_python)
+
+        # Verify installation
         subprocess.run(
             [
                 env_python,
                 "-c",
-                "import torch; import torchvision; print('PyTorch version:', torch.__version__); print('Torchvision version:', torchvision.__version__); print('CUDA is available:', torch.cuda.is_available())",
+                "import torch; import torchvision; import sam2; "
+                "print('PyTorch version:', torch.__version__); "
+                "print('Torchvision version:', torchvision.__version__); "
+                "print('CUDA available:', torch.cuda.is_available()); "
+                "print('SAM2 version:', sam2.__version__ if hasattr(sam2, '__version__') else 'installed')",
             ]
         )
 
-    def is_package_installed(self) -> bool:
-        """Check if SAM2 is installed in the current environment."""
-        try:
-            import importlib.util
+    def _download_model_checkpoint(self, env_python: str) -> None:
+        """Download SAM2 model checkpoint if not already present."""
+        os.makedirs(self.checkpoints_dir, exist_ok=True)
 
-            return importlib.util.find_spec("sam2") is not None
-        except ImportError:
+        model_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+        model_path = os.path.join(
+            self.checkpoints_dir, "sam2.1_hiera_large.pt"
+        )
+
+        if os.path.exists(model_path):
+            print(f"Model checkpoint already exists at {model_path}")
+            return
+
+        print(
+            f"Downloading SAM2 model checkpoint (~850 MB) to {model_path}..."
+        )
+
+        # Use Python to download with progress
+        download_script = f"""
+import urllib.request
+import sys
+
+def report_progress(block_num, block_size, total_size):
+    downloaded = block_num * block_size
+    percent = min(100, (downloaded / total_size) * 100)
+    sys.stdout.write(f'\\rDownload progress: {{percent:.1f}}%')
+    sys.stdout.flush()
+
+urllib.request.urlretrieve(
+    '{model_url}',
+    '{model_path}',
+    reporthook=report_progress
+)
+print('\\nModel download complete!')
+"""
+
+        try:
+            subprocess.check_call([env_python, "-c", download_script])
+        except subprocess.CalledProcessError:
+            print("Failed to download model. You can manually download from:")
+            print(f"  {model_url}")
+            print(f"  to {model_path}")
+
+    def is_package_installed(self) -> bool:
+        """Check if SAM2 is installed in the environment."""
+        env_python = self.get_env_python_path()
+        if not os.path.exists(env_python):
+            return False
+
+        try:
+            result = subprocess.run(
+                [env_python, "-c", "import sam2"],
+                capture_output=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
 

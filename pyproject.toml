@@ -60,19 +60,8 @@ testing = [
 clustering = [
     "scikit-learn-extra>=0.3.0",
 ]
-deep-learning = [
-    # Heavy dependencies for ML/DL features (SAM2, Spotiflow, Careamics, Trackastra)
-    "torch>=1.12.0",
-    "torchvision>=0.13.0",
-    "timm",
-    "opencv-python",
-    "cmake",
-    "hydra-core",
-    "eva-decord",
-    "iopath",
-]
 all = [
-    "napari-tmidas[testing,clustering,deep-learning]",
+    "napari-tmidas[testing,clustering]",
 ]
 
 [project.entry-points."napari.manifest"]

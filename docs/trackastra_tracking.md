@@ -21,13 +21,7 @@ TrackAstra runs in a dedicated conda environment that is automatically created w
 - scikit-image
 - tifffile
 
-These are automatically available when you install napari-tmidas with deep learning support:
-
-```bash
-pip install 'napari-tmidas[deep-learning]'
-```
-
-If you installed the basic version without deep learning, the plugin will automatically create a dedicated `trackastra` environment when first used.
+These will be automatically installed into a dedicated `trackastra-env` environment when first used.
 
 ## Parameters
 

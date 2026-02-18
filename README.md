@@ -45,7 +45,7 @@ napari
 
 Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](https://www.youtube.com/@macromeer/videos)
 
-> **💡 Tip**: Include AI methods with `pip install 'napari-tmidas[deep-learning]'` - they will auto-install on first use - no manual setup required!
+> **💡 Tip**: AI methods (SAM2, Cellpose, Spotiflow, etc.) auto-install into isolated environments on first use - no manual setup required!
 
 ## 📖 Documentation
 
@@ -92,11 +92,8 @@ python -m pip install "napari[all]"
 
 | Your Needs | Command |
 |----------|---------|
-| **Just process & convert images** | `pip install napari-tmidas` |
-| **Need AI features** (SAM2, Cellpose, Spotiflow, etc.) | `pip install 'napari-tmidas[deep-learning]'` |
+| **Standard installation** | `pip install napari-tmidas` |
 | **Want the latest dev features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
-
-**Recommended for most users:** `pip install 'napari-tmidas[deep-learning]'`
 
 ## 🖼️ Screenshots
 
