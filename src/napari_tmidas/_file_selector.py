@@ -1317,7 +1317,7 @@ class ParameterWidget(QWidget):
     """
     Widget to display and edit processing function parameters
     """
-    
+
     # Signal to notify when use_cpu parameter changes
     use_cpu_changed = Signal(bool)
 
@@ -1395,7 +1395,9 @@ class ParameterWidget(QWidget):
                 # Connect use_cpu parameter to signal
                 if param_name == "use_cpu":
                     widget.stateChanged.connect(
-                        lambda state: self.use_cpu_changed.emit(state == Qt.Checked)
+                        lambda state: self.use_cpu_changed.emit(
+                            state == Qt.Checked
+                        )
                     )
             else:
                 # Default to text input for other types
@@ -1403,7 +1405,10 @@ class ParameterWidget(QWidget):
                     str(default_value) if default_value is not None else ""
                 )
                 # Make wider for certain parameters
-                if param_info.get("wide_input", False) or "suffix" in param_name.lower():
+                if (
+                    param_info.get("wide_input", False)
+                    or "suffix" in param_name.lower()
+                ):
                     widget.setMinimumWidth(300)
 
             input_layout.addWidget(widget)
@@ -1418,7 +1423,10 @@ class ParameterWidget(QWidget):
                     "color: gray; font-size: 10px; padding-left: 10px;"
                 )
                 # Wider description for wide input parameters
-                if param_info.get("wide_input", False) or "suffix" in param_name.lower():
+                if (
+                    param_info.get("wide_input", False)
+                    or "suffix" in param_name.lower()
+                ):
                     desc_label.setMaximumWidth(600)  # Wider for wide inputs
                 else:
                     desc_label.setMaximumWidth(400)  # Prevent excessive width
@@ -1505,7 +1513,7 @@ def file_selector(
 
     # Add the results widget to the Napari viewer
     viewer.window.add_dock_widget(
-        results_widget, name="Matching Files", area="right"
+        results_widget, name="Interactive Table", area="right"
     )
 
     # Update viewer status

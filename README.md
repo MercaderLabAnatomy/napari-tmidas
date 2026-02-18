@@ -12,7 +12,7 @@
 
 **Need fast batch processing for confocal & whole-slide microscopy images of biological cells and tissues?**
 
-This open-source napari plugin integrates state-of-the-art AI + analysis tools in one GUI! Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
+This open-source napari plugin integrates state-of-the-art AI + analysis tools in an interactive GUI with side-by-side result comparison! Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
 
 ## ✨ Key Features
 
