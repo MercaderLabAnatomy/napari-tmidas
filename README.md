@@ -44,7 +44,7 @@ napari
 
 Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](https://www.youtube.com/@macromeer/videos)
 
-> **💡 Tip**: AI methods auto-install their dependencies on first use - no manual setup required!
+> **💡 Tip**: Include AI methods with `pip install 'napari-tmidas[deep-learning]'` - they will auto-install on first use - no manual setup required!
 
 ## 📖 Documentation
 
@@ -57,7 +57,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 | 🎯 **Spotiflow** | Spot/puncta detection | [Guide](docs/spotiflow_detection.md) |
 | 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
 | 🎨 **Convpaint** | Custom semantic/instance segmentation | [Guide](docs/convpaint_prediction.md) |
-| 📈 **Trackastra** | Transformer-based Cell tracking | [Guide](docs/trackastra_tracking.md) |
+| 📈 **Trackastra** | Transformer-based cell tracking | [Guide](docs/trackastra_tracking.md) |
 | 🔗 **Ultrack** | Cell tracking based on segmentation ensemble | [Guide](docs/ultrack_tracking.md) |
 
 ### Core Workflows
