@@ -104,8 +104,182 @@ from napari_tmidas._file_selector import (
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 from napari_tmidas.processing_functions.sam2_mp4 import tif_to_mp4
 
+
+def auto_install_sam2(parent_widget=None):
+    """Automatically install SAM2 by cloning the repository and downloading models.
+    
+    Returns:
+        bool: True if installation succeeded or SAM2 is already installed, False otherwise.
+    """
+    import importlib.util
+    import subprocess
+    
+    # Check if SAM2 is already available
+    try:
+        sam2_spec = importlib.util.find_spec("sam2")
+        if sam2_spec is not None:
+            return True
+    except ImportError:
+        pass
+    
+    # Determine installation location (parent of napari-tmidas folder)
+    try:
+        import napari_tmidas
+        package_dir = Path(napari_tmidas.__file__).parent.parent.parent.parent
+        sam2_install_dir = package_dir / "sam2"
+    except Exception:
+        sam2_install_dir = Path.home() / "sam2"
+    
+    # Ask user if they want to install SAM2
+    if _HAS_QTPY:
+        reply = QMessageBox.question(
+            parent_widget,
+            "Install SAM2?",
+            f"SAM2 is required for Batch Crop Anything but is not installed.\n\n"
+            f"Would you like to automatically install SAM2?\n\n"
+            f"This will:\n"
+            f"1. Clone SAM2 repository to: {sam2_install_dir}\n"
+            f"2. Install SAM2 package\n"
+            f"3. Download the large model checkpoint (~850 MB)\n\n"
+            f"This may take a few minutes.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            return False
+    else:
+        print(f"SAM2 not found. Attempting automatic installation to {sam2_install_dir}")
+    
+    try:
+        # Clone SAM2 repository
+        if sam2_install_dir.exists():
+            print(f"SAM2 directory already exists at {sam2_install_dir}, updating...")
+            subprocess.run(
+                ["git", "-C", str(sam2_install_dir), "pull"],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+        else:
+            print(f"Cloning SAM2 to {sam2_install_dir}...")
+            subprocess.run(
+                ["git", "clone", "https://github.com/facebookresearch/sam2.git", str(sam2_install_dir)],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+        
+        # Install SAM2 package
+        print("Installing SAM2 package...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", str(sam2_install_dir)],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        
+        # Download default model checkpoint (large)
+        checkpoints_dir = sam2_install_dir / "checkpoints"
+        checkpoints_dir.mkdir(exist_ok=True)
+        
+        model_url = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+        model_path = checkpoints_dir / "sam2.1_hiera_large.pt"
+        
+        if not model_path.exists():
+            print("Downloading SAM2 model checkpoint...")
+            if _HAS_REQUESTS:
+                response = requests.get(model_url, stream=True)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                with open(model_path, 'wb') as f:
+                    downloaded = 0
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                progress = (downloaded / total_size) * 100
+                                print(f"\rDownload progress: {progress:.1f}%", end="")
+                print("\nModel download complete!")
+            else:
+                print("requests library not available, skipping model download")
+                print(f"Please manually download model from {model_url} to {model_path}")
+        
+        # Download config file for large model
+        config_dir = sam2_install_dir / "sam2" / "configs" / "sam2.1"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "sam2.1_hiera_l.yaml"
+        
+        if not config_path.exists():
+            config_url = "https://raw.githubusercontent.com/facebookresearch/sam2/main/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+            if _HAS_REQUESTS:
+                response = requests.get(config_url)
+                response.raise_for_status()
+                config_path.write_text(response.text)
+                print(f"Downloaded config to {config_path}")
+        
+        # Add to sys.path
+        if str(sam2_install_dir) not in sys.path:
+            sys.path.insert(0, str(sam2_install_dir))
+        
+        # Verify installation
+        try:
+            importlib.invalidate_caches()
+            sam2_spec = importlib.util.find_spec("sam2")
+            if sam2_spec is not None:
+                if _HAS_QTPY:
+                    QMessageBox.information(
+                        parent_widget,
+                        "Installation Complete",
+                        f"SAM2 has been successfully installed to:\n{sam2_install_dir}\n\n"
+                        "You can now use Batch Crop Anything."
+                    )
+                print("SAM2 installation successful!")
+                return True
+        except ImportError:
+            pass
+        
+        raise RuntimeError("SAM2 installation completed but package cannot be imported")
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Installation failed: {e}\n\nStderr: {e.stderr if hasattr(e, 'stderr') else 'N/A'}"
+        if _HAS_QTPY:
+            QMessageBox.critical(
+                parent_widget,
+                "Installation Failed",
+                f"{error_msg}\n\nPlease install SAM2 manually following instructions at:\n"
+                "https://github.com/facebookresearch/segment-anything-2"
+            )
+        print(error_msg)
+        return False
+    except Exception as e:
+        error_msg = f"Unexpected error during SAM2 installation: {str(e)}"
+        if _HAS_QTPY:
+            QMessageBox.critical(
+                parent_widget,
+                "Installation Failed",
+                f"{error_msg}\n\nPlease install SAM2 manually following instructions at:\n"
+                "https://github.com/facebookresearch/segment-anything-2"
+            )
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# Get the auto-install location for SAM2
+try:
+    import napari_tmidas
+    _napari_tmidas_parent = Path(napari_tmidas.__file__).parent.parent.parent.parent
+    _auto_sam2_path = str(_napari_tmidas_parent / "sam2")
+except Exception:
+    _auto_sam2_path = os.path.expanduser("~/sam2")
+
 sam2_paths = [
     os.environ.get("SAM2_PATH"),
+    _auto_sam2_path,  # Auto-installed location (prioritized)
     "/opt/sam2",
     os.path.expanduser("~/sam2"),
     "./sam2",
@@ -3439,27 +3613,19 @@ def batch_crop_anything(
         )
         return
 
-    # Check if SAM2 is available
+    # Check if SAM2 is available, offer to install if not
     try:
         import importlib.util
 
         sam2_spec = importlib.util.find_spec("sam2")
         if sam2_spec is None:
-            QMessageBox.critical(
-                None,
-                "Missing Dependency",
-                "SAM2 not found. Please follow installation instructions at:\n"
-                "https://github.com/MercaderLabAnatomy/napari-tmidas#installation\n",
-            )
-            return
+            # Attempt automatic installation
+            if not auto_install_sam2():
+                return
     except ImportError:
-        QMessageBox.critical(
-            None,
-            "Missing Dependency",
-            "SAM2 package cannot be imported. Please follow installation instructions at:\n"
-            "https://github.com/MercaderLabAnatomy/napari-tmidas#installation",
-        )
-        return
+        # Attempt automatic installation
+        if not auto_install_sam2():
+            return
 
     # Initialize processor with the selected dimensions mode
     use_3d = "TYX/ZYX" in data_dimensions
