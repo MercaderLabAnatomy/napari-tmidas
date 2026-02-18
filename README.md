@@ -9,9 +9,10 @@
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 
 
-**Automated batch processing for microscopy images**
 
-Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
+**Need fast batch processing for confocal & whole-slide microscopy images of biological cells and tissues?**
+
+This open-source napari plugin integrates state-of-the-art AI + analysis tools in one GUI! Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
 
 ## ✨ Key Features
 
