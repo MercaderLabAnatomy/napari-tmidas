@@ -14,6 +14,9 @@
 
 This open-source napari plugin integrates state-of-the-art AI + analysis tools in an interactive GUI with side-by-side result comparison! Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
 
+![napari-tmidas-interactive-table-example](https://github.com/user-attachments/assets/1330cc6c-18de-46f4-a7ef-e1d7ffc3970e)
+
+
 ## ✨ Key Features
 
 🤖 **AI Methods Built-In**
