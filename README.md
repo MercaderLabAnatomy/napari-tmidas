@@ -27,7 +27,10 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 ⚡ **Batch Processing**
 - Process entire folders with one click • 40+ processing functions • Progress tracking & quality control
 
-📊 **Complete Analysis Pipeline**
+� **Interactive Workflow**
+- Side-by-side table view of original and processed images • Click to instantly compare results • Quickly iterate parameter values • Real-time visual feedback
+
+�📊 **Complete Analysis Pipeline**
 - Segmentation → Tracking → Quantification → Colocalization
 
 ## 🚀 Quick Start

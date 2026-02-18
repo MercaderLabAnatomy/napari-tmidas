@@ -2,6 +2,37 @@
 
 This document describes the basic image processing functions available in napari-tmidas for batch processing.
 
+## Interactive Table Workflow
+
+One of the key features of napari-tmidas is the **interactive table interface** that makes parameter optimization effortless:
+
+### How It Works
+
+1. **Side-by-Side Comparison**: After processing, both original images and processed images appear in a table widget
+2. **Click to Inspect**: Click any row in the table to instantly load that image pair into the napari viewer
+3. **Parameter Iteration**: Quickly test different parameter values and compare results side-by-side
+4. **Visual Feedback**: Immediately see the effect of parameter changes without manually opening files
+
+### Why This Matters
+
+- **Fast Quality Control**: Spot processing issues instantly by clicking through the table
+- **Parameter Optimization**: Find optimal settings by iterating through different values and comparing results
+- **Efficient Review**: Review entire batches without manually navigating file systems
+- **Direct Comparison**: Original and processed images are always paired, making it easy to assess quality
+
+### Example Workflow
+
+```
+1. Load images → Select processing function (e.g., Gaussian blur)
+2. Set initial parameters (e.g., sigma=2.0) → Process batch
+3. Click rows in table to inspect results
+4. Adjust parameters (e.g., sigma=3.0) → Reprocess
+5. Compare results by clicking through both sets in the table
+6. Choose best parameters based on visual inspection
+```
+
+This interactive approach eliminates the traditional trial-and-error cycle of batch processing → save → manually open → evaluate → repeat.
+
 ## Label Image Operations
 
 ### Labels to Binary
