@@ -57,8 +57,8 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 | 🎯 **Spotiflow** | Spot/puncta detection | [Guide](docs/spotiflow_detection.md) |
 | 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
 | 🎨 **Convpaint** | Custom semantic/instance segmentation | [Guide](docs/convpaint_prediction.md) |
-| 📈 **Trackastra** | Cell tracking over time | [Guide](docs/trackastra_tracking.md) |
-| 🔗 **Ultrack** | Ensemble cell tracking with segmentation fusion | [Guide](docs/ultrack_tracking.md) |
+| 📈 **Trackastra** | Transformer-based Cell tracking | [Guide](docs/trackastra_tracking.md) |
+| 🔗 **Ultrack** | Cell tracking based on segmentation ensemble | [Guide](docs/ultrack_tracking.md) |
 
 ### Core Workflows
 
