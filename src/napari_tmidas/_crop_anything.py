@@ -119,6 +119,33 @@ def check_or_create_sam2_env(parent_widget=None):
     if sam2_manager.is_env_created() and sam2_manager.is_package_installed():
         return True
 
+    # Check for legacy SAM2_PATH environment variable
+    sam2_path = os.environ.get("SAM2_PATH")
+    if sam2_path and os.path.exists(sam2_path):
+        # Verify SAM2 is actually installed at this path
+        try:
+            sys.path.insert(0, sam2_path)
+            import importlib.util
+
+            sam2_spec = importlib.util.find_spec("sam2")
+            if sam2_spec is not None:
+                print(
+                    f"Using existing SAM2 installation from SAM2_PATH: {sam2_path}"
+                )
+                if _HAS_QTPY:
+                    QMessageBox.information(
+                        parent_widget,
+                        "SAM2 Found",
+                        f"Using existing SAM2 installation from:\n{sam2_path}\n\n"
+                        "To use the isolated environment instead, unset SAM2_PATH.",
+                    )
+                return True
+        except (ImportError, AttributeError):
+            print(
+                f"Warning: SAM2_PATH is set to {sam2_path} but SAM2 is not importable. "
+                "Creating isolated environment instead."
+            )
+
     # Ask user if they want to create the SAM2 environment
     if _HAS_QTPY:
         reply = QMessageBox.question(

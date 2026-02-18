@@ -32,11 +32,21 @@ brew install ffmpeg
 mamba install -c conda-forge ffmpeg
 ```
 
-Optional: Set the SAM2 path environment variable to specify a custom installation location:
+#### Using an Existing SAM2 Installation (Legacy)
+
+If you already have SAM2 installed (from a previous version), you can use it by setting the `SAM2_PATH` environment variable:
 
 ```bash
-export SAM2_PATH=/path/to/sam2
+export SAM2_PATH=/path/to/your/sam2
 ```
+
+The plugin will automatically detect and use this installation instead of creating a new isolated environment. To switch back to the isolated environment, simply unset the variable:
+
+```bash
+unset SAM2_PATH
+```
+
+## Quick Start
 
 ## Quick Start
 
