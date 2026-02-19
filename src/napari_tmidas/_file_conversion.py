@@ -46,7 +46,12 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from readlif.reader import LifFile
-from tiffslide import TiffSlide
+
+# Optional import - tiffslide conflicts with zarr v3
+try:
+    from tiffslide import TiffSlide
+except ImportError:
+    TiffSlide = None  # Will fall back to tifffile in TIFFSlideLoader
 
 
 # Custom exceptions for better error handling
@@ -1011,9 +1016,12 @@ class TIFFSlideLoader(FormatLoader):
         filepath = os.path.abspath(os.path.expanduser(filepath))
 
         try:
-            with TiffSlide(filepath) as slide:
-                return len(slide.level_dimensions)
-        except (OSError, ImportError, ValueError):
+            if TiffSlide is not None:
+                with TiffSlide(filepath) as slide:
+                    return len(slide.level_dimensions)
+            else:
+                raise ImportError("TiffSlide not available")
+        except (OSError, ImportError, ValueError, TypeError):
             try:
                 with tifffile.TiffFile(filepath) as tif:
                     return len(tif.series)
@@ -1026,17 +1034,20 @@ class TIFFSlideLoader(FormatLoader):
         filepath = os.path.abspath(os.path.expanduser(filepath))
 
         try:
-            with TiffSlide(filepath) as slide:
-                if series_index >= len(slide.level_dimensions):
-                    raise SeriesIndexError(
-                        f"Series index {series_index} out of range"
-                    )
+            if TiffSlide is not None:
+                with TiffSlide(filepath) as slide:
+                    if series_index >= len(slide.level_dimensions):
+                        raise SeriesIndexError(
+                            f"Series index {series_index} out of range"
+                        )
 
-                width, height = slide.level_dimensions[series_index]
-                return np.array(
-                    slide.read_region((0, 0), series_index, (width, height))
-                )
-        except (OSError, ImportError, AttributeError):
+                    width, height = slide.level_dimensions[series_index]
+                    return np.array(
+                        slide.read_region((0, 0), series_index, (width, height))
+                    )
+            else:
+                raise ImportError("TiffSlide not available")
+        except (OSError, ImportError, AttributeError, TypeError):
             try:
                 with tifffile.TiffFile(filepath) as tif:
                     if series_index >= len(tif.series):
@@ -1055,21 +1066,24 @@ class TIFFSlideLoader(FormatLoader):
         filepath = os.path.abspath(os.path.expanduser(filepath))
 
         try:
-            with TiffSlide(filepath) as slide:
-                if series_index >= len(slide.level_dimensions):
-                    return {}
+            if TiffSlide is not None:
+                with TiffSlide(filepath) as slide:
+                    if series_index >= len(slide.level_dimensions):
+                        return {}
 
-                return {
-                    "axes": slide.properties.get(
-                        "tiffslide.series-axes", "YX"
-                    ),
-                    "resolution": (
-                        float(slide.properties.get("tiffslide.mpp-x", 1.0)),
-                        float(slide.properties.get("tiffslide.mpp-y", 1.0)),
-                    ),
-                    "unit": "um",
-                }
-        except (OSError, ImportError, ValueError, KeyError):
+                    return {
+                        "axes": slide.properties.get(
+                            "tiffslide.series-axes", "YX"
+                        ),
+                        "resolution": (
+                            float(slide.properties.get("tiffslide.mpp-x", 1.0)),
+                            float(slide.properties.get("tiffslide.mpp-y", 1.0)),
+                        ),
+                        "unit": "um",
+                    }
+            else:
+                raise ImportError("TiffSlide not available")
+        except (OSError, ImportError, ValueError, KeyError, TypeError):
             return {}
 
 
