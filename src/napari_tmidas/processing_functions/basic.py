@@ -6,6 +6,7 @@ import concurrent.futures
 import inspect
 import os
 import shutil
+import threading
 import traceback
 import warnings
 from pathlib import Path
@@ -1252,26 +1253,27 @@ def split_tzyx_stack(
     chunks = (1,) + image.shape[1:]  # Each timepoint is a chunk
     dask_image = da.from_array(image, chunks=chunks)
 
-    # Store processing parameters for post-processing
-    split_tzyx_stack.dask_image = dask_image
-    split_tzyx_stack.output_name_format = output_name_format
-    split_tzyx_stack.preserve_scale = preserve_scale
-    split_tzyx_stack.use_compression = use_compression
-    split_tzyx_stack.num_workers = min(
+    # Store processing parameters in thread-local storage to avoid race conditions
+    # when multiple files are processed concurrently by ProcessingWorker's ThreadPoolExecutor.
+    if not hasattr(split_tzyx_stack, "_thread_local"):
+        split_tzyx_stack._thread_local = threading.local()
+    tl = split_tzyx_stack._thread_local
+    tl.dask_image = dask_image
+    tl.output_name_format = output_name_format
+    tl.preserve_scale = preserve_scale
+    tl.use_compression = use_compression
+    tl.num_workers = min(
         num_workers, image.shape[0]
     )  # Limit workers to number of timepoints
-
-    # Mark for post-processing with multiple output files
-    split_tzyx_stack.requires_post_processing = True
-    split_tzyx_stack.produces_multiple_files = True
-    # Tell the processing system to skip creating the original output file
-    split_tzyx_stack.skip_original_output = True
+    tl.requires_post_processing = True
+    tl.produces_multiple_files = True
+    tl.skip_original_output = True
 
     # Get dimensions for informational purposes
     t_size, z_size, y_size, x_size = image.shape
     print(f"TZYX stack dimensions: {image.shape}, dtype: {image.dtype}")
     print(f"Will generate {t_size} separate ZYX files")
-    print(f"Parallelization: {split_tzyx_stack.num_workers} workers")
+    print(f"Parallelization: {tl.num_workers} workers")
 
     # The actual file saving will happen in the post-processing step
     return image
@@ -1364,21 +1366,23 @@ try:
         output_path = result["processed_file"]
         processing_func = self.processing_func
 
-        # Check if our function has the required attributes for TZYX splitting
+        # Check if our function has the required attributes for TZYX splitting.
+        # Use per-thread state (_thread_local) to avoid race conditions when
+        # ProcessingWorker processes multiple files concurrently.
+        _tl = getattr(processing_func, "_thread_local", None)
         if (
-            hasattr(processing_func, "requires_post_processing")
-            and processing_func.requires_post_processing
-            and hasattr(processing_func, "dask_image")
-            and hasattr(processing_func, "produces_multiple_files")
-            and processing_func.produces_multiple_files
+            _tl is not None
+            and getattr(_tl, "requires_post_processing", False)
+            and hasattr(_tl, "dask_image")
+            and getattr(_tl, "produces_multiple_files", False)
         ):
             try:
-                # Get the Dask image and processing parameters
-                dask_image = processing_func.dask_image
-                output_name_format = processing_func.output_name_format
-                preserve_scale = processing_func.preserve_scale
-                use_compression = processing_func.use_compression
-                num_workers = processing_func.num_workers
+                # Get the Dask image and processing parameters from thread-local storage
+                dask_image = _tl.dask_image
+                output_name_format = _tl.output_name_format
+                preserve_scale = _tl.preserve_scale
+                use_compression = _tl.use_compression
+                num_workers = _tl.num_workers
 
                 # Extract base filename without extension
                 basename = os.path.splitext(os.path.basename(output_path))[0]
@@ -1467,10 +1471,7 @@ try:
                     result["processed_files"] = processed_files
 
                     # Skip creating the original consolidated output file if requested
-                    if (
-                        hasattr(processing_func, "skip_original_output")
-                        and processing_func.skip_original_output
-                    ):
+                    if getattr(_tl, "skip_original_output", False):
                         # Remove the original file if it was already created
                         if os.path.exists(output_path):
                             try:
