@@ -488,6 +488,20 @@ def save_as_zarr(
                 auto_chunks[i] = 1
             chunks = tuple(auto_chunks)
 
+        # Use zlib (GZip) compression — widely supported.
+        # zarr v3 uses zarr.codecs.GzipCodec + "compressors" (list).
+        # zarr v2 uses numcodecs.GZip + "compressor".
+        _zarr_major = int(zarr.__version__.split(".")[0])
+        try:
+            if _zarr_major >= 3:
+                from zarr.codecs import GzipCodec as _GzipCodec
+                _storage_opts: dict = {"chunks": chunks, "compressors": [_GzipCodec(level=6)]}
+            else:
+                from numcodecs import GZip as _GZip
+                _storage_opts = {"chunks": chunks, "compressor": _GZip(level=6)}
+        except (ImportError, Exception):
+            _storage_opts = {"chunks": chunks}  # no compression if codec unavailable
+
         print(f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}")
 
         # Write as OME-Zarr
@@ -498,7 +512,7 @@ def save_as_zarr(
             coordinate_transformations=(
                 [[scale_transform]] if scale_transform else None
             ),
-            storage_options={"chunks": chunks, "compression": "zstd"},
+            storage_options=_storage_opts,
         )
 
         print(f"Successfully saved OME-Zarr to: {filepath}")
@@ -511,7 +525,16 @@ def save_as_zarr(
         if chunks == "auto":
             chunks = True  # Let zarr decide
 
-        zarr.save(filepath, data, chunks=chunks, compressor=zarr.Blosc())
+        _zarr_major = int(zarr.__version__.split(".")[0])
+        try:
+            if _zarr_major >= 3:
+                from zarr.codecs import GzipCodec as _GzipCodec
+                zarr.save(filepath, data, chunks=chunks, compressors=[_GzipCodec(level=6)])
+            else:
+                from numcodecs import GZip as _GZip
+                zarr.save(filepath, data, chunks=chunks, compressor=_GZip(level=6))
+        except Exception:
+            zarr.save(filepath, data, chunks=chunks)  # no compression fallback
         print(f"Saved basic Zarr to: {filepath}")
     except Exception as e:
         raise ValueError(f"Failed to save Zarr: {e}") from e

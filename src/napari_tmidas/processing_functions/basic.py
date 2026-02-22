@@ -1158,46 +1158,24 @@ def merge_channels(
         os.makedirs(_output_folder, exist_ok=True)
 
         print(
-            f"💾 Merging {axes_str} TIFF "
+            f"💾 Merging {axes_str} TIFF via memmap slab copy "
             f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
         )
 
-        import dask
-        import dask.array as da
-
-        # Load each channel lazily.  tifffile.memmap gives a zero-RAM numpy
-        # memory-map; data is only faulted from disk as slices are accessed.
-        # Compressed / non-contiguous TIFFs fall back to a dask delayed imread.
-        channel_das: dict = {}
-        for ch_num in sorted_channels:
-            ch_path = _source_filepath if ch_num == channel_num else channel_files[ch_num]
-            print(f"   Mapping channel {ch_num}: {os.path.basename(ch_path)}")
-            try:
-                mm = tifffile.memmap(ch_path)
-                chunks = (1,) + mm.shape[1:] if mm.ndim >= 2 else mm.shape
-                channel_das[ch_num] = da.from_array(mm, chunks=chunks)
-            except Exception:
-                channel_das[ch_num] = da.from_delayed(
-                    dask.delayed(tifffile.imread)(ch_path),
-                    shape=image_shape,
-                    dtype=image_dtype,
-                )
-
-        # Stack channels along the C axis and materialise.
-        # With memmap sources the effective cost is one output buffer
-        # (≈ merged_shape bytes); the source data is read through the OS
-        # page cache as dask computes each chunk.
-        arrays = [channel_das[ch] for ch in sorted_channels]
-        c_insert = 1 if ndim_in >= 4 else 0
-        merged_da = da.stack(arrays, axis=c_insert)  # (T,C,Z,Y,X) or (C,Z,Y,X)/(C,Y,X)
-
+        # Strategy: create an output memmap (writes only the TIFF header to
+        # disk, zero-fills lazily via OS), then copy one (Z,Y,X) slab at a
+        # time from each source memmap into the output.
+        #
+        # Peak physical RAM ≈ one (Z,Y,X) slab  — the OS page cache handles
+        # the rest; no full array is ever materialised in process memory.
+        # Output is uncompressed, which is required for memmap; the file size
+        # equals size_gb but the per-slot copy cost is tiny.
         try:
-            tifffile.imwrite(
+            out_mm = tifffile.memmap(
                 output_path,
-                merged_da.compute(),
-                compression="zlib",
+                shape=merged_shape,
+                dtype=image_dtype,
                 metadata={"axes": axes_str},
-                bigtiff=use_bigtiff,
             )
         except Exception:
             if os.path.exists(output_path):
@@ -1206,6 +1184,46 @@ def merge_channels(
                 except OSError:
                     pass
             raise
+
+        try:
+            T_size = image_shape[0] if ndim_in >= 4 else 1
+
+            for ch_idx, ch_num in enumerate(sorted_channels):
+                ch_path = (_source_filepath if ch_num == channel_num
+                           else channel_files[ch_num])
+                print(f"   Copying channel {ch_num}: {os.path.basename(ch_path)}")
+
+                try:
+                    src = tifffile.memmap(ch_path)   # zero-RAM source view
+                except Exception:
+                    src = None                        # compressed → read below
+
+                if ndim_in >= 4:
+                    for t in range(T_size):
+                        slab = (src[t] if src is not None
+                                else tifffile.imread(ch_path)[t])
+                        out_mm[t, ch_idx] = slab
+                        del slab
+                elif ndim_in == 3:
+                    slab = src[:] if src is not None else tifffile.imread(ch_path)
+                    out_mm[ch_idx] = slab
+                    del slab
+                else:
+                    plane = src[:] if src is not None else tifffile.imread(ch_path)
+                    out_mm[ch_idx] = plane
+                    del plane
+
+                del src
+        except Exception:
+            del out_mm
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            del out_mm  # flush OS pages to disk
 
         print(f"✨ Saved {axes_str} merged image → {output_path}")
         return output_path
