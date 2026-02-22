@@ -1158,92 +1158,54 @@ def merge_channels(
         os.makedirs(_output_folder, exist_ok=True)
 
         print(
-            f"💾 Merging {axes_str} TIFF via page-by-page streaming "
+            f"💾 Merging {axes_str} TIFF "
             f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
         )
 
-        # Step 1 — open every channel as a TiffFile (header only)
-        ch_tfs: dict = {}
+        import dask
+        import dask.array as da
+
+        # Load each channel lazily.  tifffile.memmap gives a zero-RAM numpy
+        # memory-map; data is only faulted from disk as slices are accessed.
+        # Compressed / non-contiguous TIFFs fall back to a dask delayed imread.
+        channel_das: dict = {}
         for ch_num in sorted_channels:
             ch_path = _source_filepath if ch_num == channel_num else channel_files[ch_num]
-            print(f"   Opening channel {ch_num}: {os.path.basename(ch_path)}")
-            ch_tfs[ch_num] = tifffile.TiffFile(ch_path)
+            print(f"   Mapping channel {ch_num}: {os.path.basename(ch_path)}")
+            try:
+                mm = tifffile.memmap(ch_path)
+                chunks = (1,) + mm.shape[1:] if mm.ndim >= 2 else mm.shape
+                channel_das[ch_num] = da.from_array(mm, chunks=chunks)
+            except Exception:
+                channel_das[ch_num] = da.from_delayed(
+                    dask.delayed(tifffile.imread)(ch_path),
+                    shape=image_shape,
+                    dtype=image_dtype,
+                )
 
-        T_size = image_shape[0] if ndim_in >= 4 else 1
-        Z_size = (image_shape[1] if ndim_in >= 4 else
-                  image_shape[0] if ndim_in == 3 else 1)
-
-        # Number of IFDs per channel — used to choose the read strategy
-        n_pages = {ch: len(ch_tfs[ch].pages) for ch in sorted_channels}
-
-        def _get_slab(ch: int, t: int) -> np.ndarray:
-            """Return a (Z, Y, X) array for channel ch at timepoint t.
-
-            Handles two common storage layouts:
-              • T pages each storing a full (Z, Y, X) volume  → pages[t]
-              • T*Z pages each storing a (Y, X) plane         → stack pages[t*Z .. t*Z+Z]
-            """
-            n = n_pages[ch]
-            if ndim_in >= 4:
-                if n == T_size:
-                    raw = ch_tfs[ch].pages[t].asarray()   # may be (Z,Y,X) or (Y,X)
-                    return raw if raw.ndim == 3 else raw[np.newaxis]
-                else:
-                    # T*Z individual pages
-                    return np.stack(
-                        [ch_tfs[ch].pages[t * Z_size + z].asarray()
-                         for z in range(Z_size)]
-                    )
-            elif ndim_in == 3:
-                if n == 1:
-                    raw = ch_tfs[ch].pages[0].asarray()
-                    return raw if raw.ndim == 3 else raw[np.newaxis]
-                else:
-                    return np.stack(
-                        [ch_tfs[ch].pages[z].asarray() for z in range(Z_size)]
-                    )
-            else:
-                raw = ch_tfs[ch].pages[0].asarray()  # (Y,X)
-                return raw[np.newaxis]   # (1,Y,X) for uniform treatment
-
-        # Step 2 — slab generator in T→C order.
-        # tifffile.imwrite(shape=merged_shape, data=gen) expects:
-        #   T*C items each shape (Z,Y,X) for TCZYX
-        #   C   items each shape (Z,Y,X) for CZYX
-        #   C   items each shape (Y,X)   for CYX
-        # We hold at most one (Z,Y,X) slab in RAM at a time.
-        def _slab_gen():
-            if ndim_in >= 4:
-                for t in range(T_size):
-                    for ch in sorted_channels:
-                        slab = _get_slab(ch, t)      # (Z,Y,X)
-                        yield slab
-                        del slab
-            elif ndim_in == 3:
-                for ch in sorted_channels:
-                    slab = _get_slab(ch, 0)          # (Z,Y,X)
-                    yield slab
-                    del slab
-            else:
-                for ch in sorted_channels:
-                    yield _get_slab(ch, 0)[0]        # (Y,X)
+        # Stack channels along the C axis and materialise.
+        # With memmap sources the effective cost is one output buffer
+        # (≈ merged_shape bytes); the source data is read through the OS
+        # page cache as dask computes each chunk.
+        arrays = [channel_das[ch] for ch in sorted_channels]
+        c_insert = 1 if ndim_in >= 4 else 0
+        merged_da = da.stack(arrays, axis=c_insert)  # (T,C,Z,Y,X) or (C,Z,Y,X)/(C,Y,X)
 
         try:
             tifffile.imwrite(
                 output_path,
-                _slab_gen(),
-                shape=merged_shape,
-                dtype=image_dtype,
+                merged_da.compute(),
                 compression="zlib",
                 metadata={"axes": axes_str},
                 bigtiff=use_bigtiff,
             )
-        finally:
-            for tf in ch_tfs.values():
+        except Exception:
+            if os.path.exists(output_path):
                 try:
-                    tf.close()
-                except Exception:
+                    os.remove(output_path)
+                except OSError:
                     pass
+            raise
 
         print(f"✨ Saved {axes_str} merged image → {output_path}")
         return output_path
