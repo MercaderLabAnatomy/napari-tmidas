@@ -1628,11 +1628,20 @@ class ProcessingWorker(QThread):
                     )
                     return None
 
-            # Load the image using the unified loader
-            image_data = load_image_file(filepath)
+            # skip_load: function handles all I/O itself (e.g. merge_channels).
+            # Pass image=None so the worker never allocates the full array.
+            if getattr(self.processing_func, "skip_load", False):
+                image_data = None
+            else:
+                # Load the image using the unified loader
+                image_data = load_image_file(filepath)
 
             # Handle multi-layer data from OME-Zarr - extract first layer for processing
-            if isinstance(image_data, list):
+            if image_data is None:
+                # skip_load path: function handles I/O itself
+                image = None
+                image_dtype = np.float32
+            elif isinstance(image_data, list):
                 print(
                     f"Processing first layer of multi-layer file: {filepath}"
                 )
@@ -1662,17 +1671,23 @@ class ProcessingWorker(QThread):
                         raise ValueError(
                             f"No image data found in multi-layer file: {filepath}"
                         )
+                # Store original dtype for saving
+                if hasattr(image, "dtype"):
+                    image_dtype = image.dtype
+                else:
+                    image_dtype = np.float32
             else:
                 image = image_data
-
-            # Store original dtype for saving
-            if hasattr(image, "dtype"):
-                image_dtype = image.dtype
-            else:
-                image_dtype = np.float32
+                # Store original dtype for saving
+                if hasattr(image, "dtype"):
+                    image_dtype = image.dtype
+                else:
+                    image_dtype = np.float32
 
             # Get shape information for different array types
-            if hasattr(image, "shape"):
+            if image is None:
+                shape_info = "(deferred — skip_load function)"
+            elif hasattr(image, "shape"):
                 shape_info = f"{image.shape}"
             elif hasattr(image, "__array__"):
                 # For array-like objects
