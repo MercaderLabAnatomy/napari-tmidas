@@ -1113,17 +1113,29 @@ def merge_channels(
     axes_str  = _axes_map.get(ndim_in, "TCZYX")
 
     # ------------------------------------------------------------------
-    # 5a. Single-pass streaming merge directly to TiffWriter
+    # 5a. Zarr-buffered streaming merge
     #     (used when worker provides output paths)
     #
-    # Each sibling channel is opened as a memmap (OS-paged, zero read until
-    # accessed).  Frames are assembled one at a time:
-    #   TZYX → one (C, Z, Y, X) frame per T   peak RAM ≈ C·Z·Y·X·dtype
-    #   ZYX  → one (C, Y, X) plane per Z       peak RAM ≈ C·Y·X·dtype
-    #   YX   → single (C, Y, X) write
-    # No intermediate zarr store; data is written in a single pass.
+    # Pipeline:
+    #   1. Open every channel (including primary) as a lazy dask array
+    #      backed by a tifffile ZarrStore → zero data read at this step.
+    #   2. Stack lazily along c_axis with dask.
+    #   3. Write the merged dask array to a temp on-disk zarr store chunk
+    #      by chunk — peak RAM = one (Z,Y,X) slab during this step.
+    #   4. Stream the temp zarr slab-by-slab into the output TIFF — peak
+    #      RAM = one (Z,Y,X) slab during this step.
+    #   5. Delete the temp zarr store.
+    #
+    # Peak RAM ≈ 2 × Z × Y × X × dtype  (one slab written + one read).
+    # The in-memory `image` argument is NOT used for the merge; the file
+    # on disk is read lazily, avoiding the double-copy that would occur if
+    # we held image + sibling memmaps simultaneously.
     # ------------------------------------------------------------------
     if _output_folder and _output_suffix:
+        import dask.array as da
+        import zarr
+        import shutil
+
         size_bytes  = int(np.prod(merged_shape)) * np.dtype(image.dtype).itemsize
         size_gb     = size_bytes / 1024 ** 3
         use_bigtiff = size_gb > 3.8
@@ -1131,62 +1143,74 @@ def merge_channels(
         name_no_ext, _ = os.path.splitext(base_name)
         output_filename = name_no_ext + _output_suffix + ".tif"
         output_path = os.path.join(_output_folder, output_filename)
+        tmp_zarr_path = output_path + ".tmp.zarr"
         os.makedirs(_output_folder, exist_ok=True)
 
         print(
-            f"💾 Writing {axes_str} merged TIFF "
+            f"💾 Merging {axes_str} TIFF via zarr buffer "
             f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
         )
 
-        # Pre-open sibling channels as memmaps (or full load as fallback).
-        # Memmaps are kept open until all writes are done, then released.
-        ch_sources: dict = {}
+        # Step 1 — open every channel as a lazy dask array (no data read yet)
+        zarr_stores: list = []   # keep tifffile ZarrStore objects alive
+        channel_das: list = []
         for ch_num in sorted_channels:
             if ch_num == channel_num:
-                ch_sources[ch_num] = image  # already in RAM — no copy
+                ch_path = _source_filepath   # read the primary from disk too
             else:
                 ch_path = channel_files[ch_num]
-                print(f"   Opening channel {ch_num}: {os.path.basename(ch_path)}")
-                try:
-                    ch_data = tifffile.memmap(ch_path)
-                    if ch_data.shape != image_shape:
-                        raise ValueError(
-                            f"Channel {ch_num} has different shape: "
-                            f"{ch_data.shape} vs {image_shape}"
-                        )
-                    ch_sources[ch_num] = ch_data
-                except Exception:
-                    from skimage.io import imread as _imread
-                    ch_data = _imread(ch_path)
-                    if ch_data.shape != image_shape:
-                        raise ValueError(
-                            f"Channel {ch_num} has different shape: "
-                            f"{ch_data.shape} vs {image_shape}"
-                        )
-                    ch_sources[ch_num] = ch_data
+            print(f"   Lazy-opening channel {ch_num}: {os.path.basename(ch_path)}")
+            try:
+                store = tifffile.imread(ch_path, aszarr=True)
+                zarr_stores.append(store)
+                da_ch = da.from_zarr(store)
+            except Exception:
+                # Fallback: load into RAM (rare edge case: non-memmap-able TIF)
+                da_ch = da.from_array(tifffile.imread(ch_path))
+            if da_ch.shape != image_shape:
+                raise ValueError(
+                    f"Channel {ch_num} shape {da_ch.shape} != {image_shape}"
+                )
+            channel_das.append(da_ch)
 
-        # Build a generator that yields one (Z,Y,X) slab per iteration (or
-        # (Y,X) for 2-D inputs).  tifffile.imwrite() receives the complete
-        # merged shape + dtype upfront so it writes the correct shaped-series
-        # metadata before touching any data.
-        # Item count must equal the product of all dims EXCEPT the last two
-        # (Y,X), i.e. T*C for TCZYX, C for CZYX/CYX.
-        def _slab_gen():
-            if ndim_in >= 4:
-                # TCZYX: T*C slabs of shape (Z, Y, X)
-                for t in range(image_shape[0]):
-                    for ch in sorted_channels:
-                        yield ch_sources[ch][t]   # (Z, Y, X) — memmap view
-            elif ndim_in == 3:
-                # CZYX: C slabs of shape (Z, Y, X)
-                for ch in sorted_channels:
-                    yield ch_sources[ch]          # (Z, Y, X)
-            else:
-                # CYX: C items of shape (Y, X)
-                for ch in sorted_channels:
-                    yield ch_sources[ch]          # (Y, X)
+        # Step 2 — stack lazily along the channel axis
+        merged_da = da.stack(channel_das, axis=c_axis)
+
+        # Chunk: one (Z,Y,X) slab per dask task so each zarr write ≤ 1 slab
+        # c_axis is 0 (YX/ZYX) or 1 (TZYX), so spatial dims start at c_axis+1
+        slab_chunk = (1,) * (c_axis + 1) + merged_shape[c_axis + 1 :]
+        merged_da = merged_da.rechunk(slab_chunk)
 
         try:
+            # Step 3 — materialise to temp zarr (peak RAM = one slab)
+            print(f"   Writing zarr buffer → {os.path.basename(tmp_zarr_path)} …")
+            merged_da.to_zarr(tmp_zarr_path, overwrite=True)
+
+            # Close tifffile ZarrStores now that dask has finished reading
+            for s in zarr_stores:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            zarr_stores.clear()
+
+            # Step 4 — stream zarr → TIFF slab by slab
+            merged_zarr = zarr.open(tmp_zarr_path, mode="r")
+            C_size = merged_shape[c_axis]
+
+            def _slab_gen():
+                if ndim_in >= 4:
+                    for t in range(merged_shape[0]):
+                        for c in range(C_size):
+                            yield np.asarray(merged_zarr[t, c])   # (Z,Y,X)
+                elif ndim_in == 3:
+                    for c in range(C_size):
+                        yield np.asarray(merged_zarr[c])           # (Z,Y,X)
+                else:
+                    for c in range(C_size):
+                        yield np.asarray(merged_zarr[c])           # (Y,X)
+
+            print(f"   Streaming zarr → TIFF …")
             tifffile.imwrite(
                 output_path,
                 _slab_gen(),
@@ -1196,11 +1220,17 @@ def merge_channels(
                 metadata={"axes": axes_str},
                 bigtiff=use_bigtiff,
             )
+
         finally:
-            # Release sibling channel memmaps
-            for ch_num in list(ch_sources):
-                if ch_num != channel_num:
-                    del ch_sources[ch_num]
+            # Close any still-open tifffile stores
+            for s in zarr_stores:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            # Delete temp zarr unconditionally
+            if os.path.exists(tmp_zarr_path):
+                shutil.rmtree(tmp_zarr_path)
 
         print(f"✨ Saved {axes_str} merged image → {output_path}")
         return output_path
