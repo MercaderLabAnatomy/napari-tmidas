@@ -1132,23 +1132,20 @@ def merge_channels(
     axes_str  = _axes_map.get(ndim_in, "TCZYX")
 
     # ------------------------------------------------------------------
-    # 5a. Memmap + slab-generator streaming merge
+    # 5a. TiffFile page-by-page streaming merge
     #     (used when worker provides output paths)
     #
     # Pipeline:
-    #   1. Open every channel as a tifffile.memmap (OS-paged, no data
-    #      read until a page is touched).
-    #   2. A generator yields one (Z,Y,X) slab — one channel at a time —
-    #      in TCZYX / CZYX / CYX page order.
-    #   3. tifffile.imwrite() receives merged_shape + dtype upfront and
-    #      pulls slabs from the generator one at a time, writing each
-    #      slab directly to disk.  The OS can evict mmapped pages as soon
-    #      as they have been consumed by tifffile.
+    #   1. Open every channel as a TiffFile (header + IFD index only).
+    #   2. A (Y,X)-page generator feeds tifffile.imwrite(shape=merged_shape).
+    #      tifffile.imwrite expects exactly T*C*Z pages (Y,X) in the order
+    #      T↦C↦Z (slowest→fastest).
+    #   3. Source TIFFs are read one slab at a time:
+    #        • T-page TIFFs (pages[t] = (Z,Y,X)): read once per (ch,t), cache
+    #          the slab so all Z planes can be yielded without a second read.
+    #        • T*Z-page TIFFs (pages[t*Z+z] = (Y,X)): read one page at a time.
     #
-    # Peak physical RAM ≈ 1 × (Z × Y × X × dtype_bytes) = one slab.
-    # The worker must NOT pre-load the image (merge_channels.skip_load is
-    # True); shape and dtype are read from the TIFF header above (zero
-    # pixel data transferred).
+    # Peak physical RAM ≈ 1 × (Z × Y × X × dtype_bytes) per slab held.
     # ------------------------------------------------------------------
     if _output_folder and _output_suffix:
         size_bytes  = int(np.prod(merged_shape)) * np.dtype(image_dtype).itemsize
@@ -1161,40 +1158,75 @@ def merge_channels(
         os.makedirs(_output_folder, exist_ok=True)
 
         print(
-            f"💾 Merging {axes_str} TIFF via memmap slabs "
+            f"💾 Merging {axes_str} TIFF via page-by-page streaming "
             f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
         )
 
-        # Step 1 — open every channel as an OS-paged memmap
-        ch_mms: dict = {}
+        # Step 1 — open every channel as a TiffFile (header only)
+        ch_tfs: dict = {}
         for ch_num in sorted_channels:
             ch_path = _source_filepath if ch_num == channel_num else channel_files[ch_num]
-            print(f"   Mapping channel {ch_num}: {os.path.basename(ch_path)}")
-            try:
-                mm = tifffile.memmap(ch_path)
-                if mm.shape != image_shape:
-                    raise ValueError(
-                        f"Channel {ch_num} shape {mm.shape} != {image_shape}"
-                    )
-                ch_mms[ch_num] = mm
-            except Exception:
-                from skimage.io import imread as _sk_imread
-                ch_mms[ch_num] = _sk_imread(ch_path)
+            print(f"   Opening channel {ch_num}: {os.path.basename(ch_path)}")
+            ch_tfs[ch_num] = tifffile.TiffFile(ch_path)
 
-        # Step 2 — generator: one (Z,Y,X) slab per iteration (or (Y,X) for 2-D).
-        # tifffile.imwrite with shape= expects T*C slabs for TCZYX,
-        # C slabs for CZYX/CYX.  Peak RAM = 1 slab at any time.
+        T_size = image_shape[0] if ndim_in >= 4 else 1
+        Z_size = (image_shape[1] if ndim_in >= 4 else
+                  image_shape[0] if ndim_in == 3 else 1)
+
+        # Number of IFDs per channel — used to choose the read strategy
+        n_pages = {ch: len(ch_tfs[ch].pages) for ch in sorted_channels}
+
+        def _get_slab(ch: int, t: int) -> np.ndarray:
+            """Return a (Z, Y, X) array for channel ch at timepoint t.
+
+            Handles two common storage layouts:
+              • T pages each storing a full (Z, Y, X) volume  → pages[t]
+              • T*Z pages each storing a (Y, X) plane         → stack pages[t*Z .. t*Z+Z]
+            """
+            n = n_pages[ch]
+            if ndim_in >= 4:
+                if n == T_size:
+                    raw = ch_tfs[ch].pages[t].asarray()   # may be (Z,Y,X) or (Y,X)
+                    return raw if raw.ndim == 3 else raw[np.newaxis]
+                else:
+                    # T*Z individual pages
+                    return np.stack(
+                        [ch_tfs[ch].pages[t * Z_size + z].asarray()
+                         for z in range(Z_size)]
+                    )
+            elif ndim_in == 3:
+                if n == 1:
+                    raw = ch_tfs[ch].pages[0].asarray()
+                    return raw if raw.ndim == 3 else raw[np.newaxis]
+                else:
+                    return np.stack(
+                        [ch_tfs[ch].pages[z].asarray() for z in range(Z_size)]
+                    )
+            else:
+                raw = ch_tfs[ch].pages[0].asarray()  # (Y,X)
+                return raw[np.newaxis]   # (1,Y,X) for uniform treatment
+
+        # Step 2 — slab generator in T→C order.
+        # tifffile.imwrite(shape=merged_shape, data=gen) expects:
+        #   T*C items each shape (Z,Y,X) for TCZYX
+        #   C   items each shape (Z,Y,X) for CZYX
+        #   C   items each shape (Y,X)   for CYX
+        # We hold at most one (Z,Y,X) slab in RAM at a time.
         def _slab_gen():
             if ndim_in >= 4:
-                for t in range(image_shape[0]):
+                for t in range(T_size):
                     for ch in sorted_channels:
-                        yield ch_mms[ch][t]      # (Z, Y, X) — memmap view
+                        slab = _get_slab(ch, t)      # (Z,Y,X)
+                        yield slab
+                        del slab
             elif ndim_in == 3:
                 for ch in sorted_channels:
-                    yield ch_mms[ch]             # (Z, Y, X)
+                    slab = _get_slab(ch, 0)          # (Z,Y,X)
+                    yield slab
+                    del slab
             else:
                 for ch in sorted_channels:
-                    yield ch_mms[ch]             # (Y, X)
+                    yield _get_slab(ch, 0)[0]        # (Y,X)
 
         try:
             tifffile.imwrite(
@@ -1207,7 +1239,11 @@ def merge_channels(
                 bigtiff=use_bigtiff,
             )
         finally:
-            ch_mms.clear()
+            for tf in ch_tfs.values():
+                try:
+                    tf.close()
+                except Exception:
+                    pass
 
         print(f"✨ Saved {axes_str} merged image → {output_path}")
         return output_path
