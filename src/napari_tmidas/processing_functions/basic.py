@@ -1104,137 +1104,110 @@ def merge_channels(
     #   ZYX  input  (ndim=3) → CZYX  output  (C inserted at axis 0)
     #   YX   input  (ndim=2) → CYX   output  (C inserted at axis 0)
     # ------------------------------------------------------------------
-    ndim_in   = image.ndim
-    c_axis    = 1 if ndim_in >= 4 else 0   # where C lands in the output
-    image_shape  = image.shape
-    merged_shape = image_shape[:c_axis] + (num_channels,) + image_shape[c_axis:]
-
-    _axes_map = {2: "CYX", 3: "CZYX", 4: "TCZYX"}
-    axes_str  = _axes_map.get(ndim_in, "TCZYX")
-
-    def _write_channel(dst, ch_index, src, c_ax):
-        """Assign src (same shape as image) into dst at channel index ch_index."""
-        if c_ax == 1:
-            # TCZYX: iterate over T to stay memory-efficient
-            for t in range(src.shape[0]):
-                dst[t, ch_index] = src[t]
-        else:
-            # CZYX / CYX: assign whole spatial volume in one shot
-            dst[ch_index] = src
-
-    # ------------------------------------------------------------------
-    # Channel-axis placement:
-    #   TZYX input  (ndim=4) → TCZYX output  (C inserted at axis 1)
-    #   ZYX  input  (ndim=3) → CZYX  output  (C inserted at axis 0)
-    #   YX   input  (ndim=2) → CYX   output  (C inserted at axis 0)
-    # ------------------------------------------------------------------
     ndim_in      = image.ndim
-    c_axis       = 1 if ndim_in >= 4 else 0   # where C lands in the output
+    c_axis       = 1 if ndim_in >= 4 else 0
     image_shape  = image.shape
     merged_shape = image_shape[:c_axis] + (num_channels,) + image_shape[c_axis:]
 
     _axes_map = {2: "CYX", 3: "CZYX", 4: "TCZYX"}
     axes_str  = _axes_map.get(ndim_in, "TCZYX")
 
-    def _write_channel(dst, ch_index, src, c_ax):
-        """Write src (shape == image_shape) into dst at channel index ch_index."""
-        if c_ax == 1:
-            # TCZYX: iterate over T to stay memory-efficient
-            for t in range(src.shape[0]):
-                dst[t, ch_index] = src[t]
-        else:
-            # CZYX / CYX: assign whole spatial volume at once
-            dst[ch_index] = src
-
     # ------------------------------------------------------------------
-    # 5a. Zarr-based chunked merge (when worker provides output paths)
-    #     → the full merged array is never held in RAM
+    # 5a. Single-pass streaming merge directly to TiffWriter
+    #     (used when worker provides output paths)
+    #
+    # Each sibling channel is opened as a memmap (OS-paged, zero read until
+    # accessed).  Frames are assembled one at a time:
+    #   TZYX → one (C, Z, Y, X) frame per T   peak RAM ≈ C·Z·Y·X·dtype
+    #   ZYX  → one (C, Y, X) plane per Z       peak RAM ≈ C·Y·X·dtype
+    #   YX   → single (C, Y, X) write
+    # No intermediate zarr store; data is written in a single pass.
     # ------------------------------------------------------------------
     if _output_folder and _output_suffix:
-        import zarr
-
-        # Chunk: one T-frame for 4-D inputs, one Z-plane for 3-D, full for 2-D
-        if ndim_in >= 4:
-            merged_chunk = (1, num_channels) + image_shape[1:]  # (1,C,Z,Y,X)
-        elif ndim_in == 3:
-            merged_chunk = (num_channels, 1) + image_shape[1:]  # (C,1,Y,X)
-        else:
-            merged_chunk = merged_shape                          # (C,Y,X)
-
         size_bytes  = int(np.prod(merged_shape)) * np.dtype(image.dtype).itemsize
         size_gb     = size_bytes / 1024 ** 3
         use_bigtiff = size_gb > 3.8
 
-        tmp_dir = tempfile.mkdtemp(prefix="tmidas_merge_")
-        try:
-            zarr_path = os.path.join(tmp_dir, "merged.zarr")
-            z_out = zarr.open_array(
-                zarr_path,
-                mode="w",
-                shape=merged_shape,
-                chunks=merged_chunk,
-                dtype=image.dtype,
-            )
+        name_no_ext, _ = os.path.splitext(base_name)
+        output_filename = name_no_ext + _output_suffix + ".tif"
+        output_path = os.path.join(_output_folder, output_filename)
+        os.makedirs(_output_folder, exist_ok=True)
 
-            # ---- fill the zarr store channel by channel ----
-            for i, ch_num in enumerate(sorted_channels):
+        print(
+            f"💾 Writing {axes_str} merged TIFF "
+            f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
+        )
+
+        # Pre-open sibling channels as memmaps (or full load as fallback).
+        # Memmaps are kept open until all writes are done, then released.
+        ch_sources: dict = {}
+        for ch_num in sorted_channels:
+            if ch_num == channel_num:
+                ch_sources[ch_num] = image  # already in RAM — no copy
+            else:
                 ch_path = channel_files[ch_num]
-                print(f"   Channel {ch_num}: {os.path.basename(ch_path)}")
+                print(f"   Opening channel {ch_num}: {os.path.basename(ch_path)}")
+                try:
+                    ch_data = tifffile.memmap(ch_path)
+                    if ch_data.shape != image_shape:
+                        raise ValueError(
+                            f"Channel {ch_num} has different shape: "
+                            f"{ch_data.shape} vs {image_shape}"
+                        )
+                    ch_sources[ch_num] = ch_data
+                except Exception:
+                    from skimage.io import imread as _imread
+                    ch_data = _imread(ch_path)
+                    if ch_data.shape != image_shape:
+                        raise ValueError(
+                            f"Channel {ch_num} has different shape: "
+                            f"{ch_data.shape} vs {image_shape}"
+                        )
+                    ch_sources[ch_num] = ch_data
 
-                if ch_num == channel_num:
-                    _write_channel(z_out, i, image, c_axis)
-                else:
-                    try:
-                        ch_data = tifffile.memmap(ch_path)
-                        if ch_data.shape != image_shape:
-                            raise ValueError(
-                                f"Channel {ch_num} has different shape: "
-                                f"{ch_data.shape} vs {image_shape}"
-                            )
-                        _write_channel(z_out, i, ch_data, c_axis)
-                        del ch_data
-                    except Exception:
-                        from skimage.io import imread as _imread
-                        ch_data = _imread(ch_path)
-                        if ch_data.shape != image_shape:
-                            raise ValueError(
-                                f"Channel {ch_num} has different shape: "
-                                f"{ch_data.shape} vs {image_shape}"
-                            )
-                        _write_channel(z_out, i, ch_data, c_axis)
-                        del ch_data
+        # Build a generator that yields one (Z,Y,X) slab per iteration (or
+        # (Y,X) for 2-D inputs).  tifffile.imwrite() receives the complete
+        # merged shape + dtype upfront so it writes the correct shaped-series
+        # metadata before touching any data.
+        # Item count must equal the product of all dims EXCEPT the last two
+        # (Y,X), i.e. T*C for TCZYX, C for CZYX/CYX.
+        def _slab_gen():
+            if ndim_in >= 4:
+                # TCZYX: T*C slabs of shape (Z, Y, X)
+                for t in range(image_shape[0]):
+                    for ch in sorted_channels:
+                        yield ch_sources[ch][t]   # (Z, Y, X) — memmap view
+            elif ndim_in == 3:
+                # CZYX: C slabs of shape (Z, Y, X)
+                for ch in sorted_channels:
+                    yield ch_sources[ch]          # (Z, Y, X)
+            else:
+                # CYX: C items of shape (Y, X)
+                for ch in sorted_channels:
+                    yield ch_sources[ch]          # (Y, X)
 
-            # ---- stream zarr → output TIFF via dask (chunk-by-chunk) ----
-            # Open the zarr store as a dask array so tifffile.imwrite iterates
-            # over chunks without ever materialising the full merged volume.
-            name_no_ext, _ = os.path.splitext(base_name)
-            output_filename = name_no_ext + _output_suffix + ".tif"
-            output_path = os.path.join(_output_folder, output_filename)
-            os.makedirs(_output_folder, exist_ok=True)
-
-            print(
-                f"💾 Writing {axes_str} merged TIFF "
-                f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
-            )
-            dask_out = da.from_zarr(zarr_path)
-            # Use tifffile shaped-series format (metadata JSON in first page).
-            # This supports TCZYX natively; imagej=True would require TZCYX.
+        try:
             tifffile.imwrite(
                 output_path,
-                dask_out,
+                _slab_gen(),
+                shape=merged_shape,
+                dtype=image.dtype,
                 compression="zlib",
-                bigtiff=use_bigtiff,
                 metadata={"axes": axes_str},
+                bigtiff=use_bigtiff,
             )
-
-            print(f"✨ Saved {axes_str} merged image → {output_path}")
-            return output_path
-
         finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            # Release sibling channel memmaps
+            for ch_num in list(ch_sources):
+                if ch_num != channel_num:
+                    del ch_sources[ch_num]
+
+        print(f"✨ Saved {axes_str} merged image → {output_path}")
+        return output_path
 
     # ------------------------------------------------------------------
     # 5b. Legacy / test path: return merged ndarray (no _output_folder)
+    #     Peak RAM = full merged_shape (acceptable for tests/callers).
     # ------------------------------------------------------------------
     merged = np.empty(merged_shape, dtype=image.dtype)
 
@@ -1243,7 +1216,11 @@ def merge_channels(
         print(f"   Channel {ch_num}: {os.path.basename(ch_path)}")
 
         if ch_num == channel_num:
-            _write_channel(merged, i, image, c_axis)
+            if c_axis == 1:
+                for t in range(image_shape[0]):
+                    merged[t, i] = image[t]
+            else:
+                merged[i] = image
         else:
             try:
                 ch_data = tifffile.memmap(ch_path)
@@ -1252,7 +1229,11 @@ def merge_channels(
                         f"Channel {ch_num} has different shape: "
                         f"{ch_data.shape} vs {image_shape}"
                     )
-                _write_channel(merged, i, ch_data, c_axis)
+                if c_axis == 1:
+                    for t in range(image_shape[0]):
+                        merged[t, i] = ch_data[t]
+                else:
+                    merged[i] = ch_data
                 del ch_data
             except Exception:
                 from skimage.io import imread as _imread
@@ -1262,7 +1243,11 @@ def merge_channels(
                         f"Channel {ch_num} has different shape: "
                         f"{ch_data.shape} vs {image_shape}"
                     )
-                _write_channel(merged, i, ch_data, c_axis)
+                if c_axis == 1:
+                    for t in range(image_shape[0]):
+                        merged[t, i] = ch_data[t]
+                else:
+                    merged[i] = ch_data
                 del ch_data
 
     print(f"✨ Merged shape: {merged.shape} ({axes_str})")
