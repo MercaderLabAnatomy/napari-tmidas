@@ -1614,6 +1614,20 @@ class ProcessingWorker(QThread):
     def process_file(self, filepath):
         """Process a single file with support for large TIFF and Zarr files"""
         try:
+            # Pre-load filter: functions can attach a file_pre_filter(filepath, params)
+            # callable to opt out of loading files they don't need.  For merge_channels
+            # this prevents the ThreadPoolExecutor from loading every channel file
+            # concurrently — only the primary channel file is ever read.
+            if hasattr(self.processing_func, "file_pre_filter"):
+                if not self.processing_func.file_pre_filter(
+                    filepath, self.param_values
+                ):
+                    print(
+                        f"⏭  Skipping {os.path.basename(filepath)} "
+                        "(pre-load filter: not needed for merge)"
+                    )
+                    return None
+
             # Load the image using the unified loader
             image_data = load_image_file(filepath)
 
@@ -1717,15 +1731,16 @@ class ProcessingWorker(QThread):
                 )
 
             # Apply processing with parameters
-            # For zarr files, pass the original filepath to enable optimized processing
-            if filepath.lower().endswith(".zarr"):
-                # Add filepath for zarr-aware processing functions
-                processing_params = {
-                    **self.param_values,
-                    "_source_filepath": filepath,
-                }
-            else:
-                processing_params = self.param_values
+            # Always pass source path, output folder and suffix so functions
+            # like merge_channels can write their own output and by-pass the
+            # in-memory return path entirely.
+            # The signature filter below strips keys the function doesn't accept.
+            processing_params = {
+                **self.param_values,
+                "_source_filepath": filepath,
+                "_output_folder": self.output_folder,
+                "_output_suffix": self.output_suffix,
+            }
 
             # Filter parameters based on function signature
             # Check if function accepts **kwargs or has specific parameters
@@ -1781,6 +1796,15 @@ class ProcessingWorker(QThread):
                 except MemoryError as e:
                     print(f"Memory error during Dask computation: {e}")
                     raise
+
+            # A function may write its own output (e.g. zarr-based merge) and
+            # return the saved file path as a string — treat it as already saved.
+            if isinstance(processed_result, str) and os.path.isfile(processed_result):
+                print(f"✅ Function wrote its own output: {processed_result}")
+                return {
+                    "original_file": filepath,
+                    "processed_file": processed_result,
+                }
 
             if processed_result is None:
                 # Allow processing functions to signal that this file should be skipped

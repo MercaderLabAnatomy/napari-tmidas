@@ -988,123 +988,305 @@ def split_channels(
 def merge_channels(
     image: np.ndarray,
     channel_substring: str = "_channel_",
-) -> np.ndarray:
+    _source_filepath: str = None,
+    _output_folder: str = None,
+    _output_suffix: str = None,
+) -> "str | np.ndarray":
     """
     Merge multiple single-channel images from a folder into one multi-channel image.
 
     Identifies channel files by finding a substring followed by a 1-2 digit number.
     Adds channels as the last dimension regardless of input dimensionality.
 
-    Args:
-        image: Current image being processed
-        channel_substring: Substring that appears before channel number in filenames
+    Memory-efficient implementation
+    --------------------------------
+    When *both* ``_output_folder`` and ``_output_suffix`` are provided (injected
+    by the processing worker), this function **writes its own output** using a
+    temporary on-disk Zarr store as an intermediate buffer and never holds the
+    fully-merged array in RAM.  The write path is:
 
-    Returns:
-        Multi-channel image with channels as last dimension
+        primary channel (already in RAM)
+            ↓  written slice-by-slice → temp Zarr store  (on disk)
+        each sibling channel (read via tifffile.memmap, OS-paged)
+            ↓  written slice-by-slice → same Zarr store
+        Zarr store
+            ↓  read slice-by-slice → tifffile.TiffWriter  (output TIFF)
+
+    Peak RAM ≈ 1 slice of the merged volume (Y × X × C × dtype_bytes),
+    regardless of Z/T depth or channel count.
+
+    The saved file path is returned as a string so the worker knows it has
+    already been saved and emits the correct UI update without a second write.
+
+    If ``_output_folder`` / ``_output_suffix`` are not provided the merged array
+    is returned as a numpy ndarray (legacy / test path).
     """
-    # Get file context from batch processing
-    import inspect
     import re
+    import shutil
+    import tempfile
 
-    from skimage.io import imread
-
-    current_file = None
-
-    for frame_info in inspect.stack():
-        frame_locals = frame_info.frame.f_locals
-        if "filepath" in frame_locals:
-            current_file = frame_locals["filepath"]
-            break
+    # ------------------------------------------------------------------
+    # 1. Resolve the current file path
+    # ------------------------------------------------------------------
+    current_file = _source_filepath
 
     if current_file is None:
-        raise ValueError("Could not determine current file path")
+        import inspect as _inspect
+        for frame_info in _inspect.stack():
+            frame_locals = frame_info.frame.f_locals
+            if "filepath" in frame_locals:
+                current_file = frame_locals["filepath"]
+                break
+
+    if current_file is None:
+        raise ValueError(
+            "Could not determine current file path. "
+            "Pass _source_filepath or call from a context with 'filepath'."
+        )
 
     folder_path = os.path.dirname(current_file)
-    filename = os.path.basename(current_file)
+    filename    = os.path.basename(current_file)
 
-    # Create regex pattern to find channel substring followed by 1-2 digits
+    # ------------------------------------------------------------------
+    # 2. Parse the channel number from this filename
+    # ------------------------------------------------------------------
     pattern = re.compile(rf"({re.escape(channel_substring)})(\d{{1,2}})")
     match = pattern.search(filename)
 
     if not match:
-        print(
-            f"⚠️  No channel pattern '{channel_substring}[number]' found in filename"
-        )
+        print(f"⚠️  No channel pattern '{channel_substring}[number]' found in filename")
         return image
 
-    # Extract base name and channel number
     channel_num = int(match.group(2))
-    base_name = filename[: match.start()] + filename[match.end() :]
+    base_name   = filename[: match.start()] + filename[match.end() :]
 
     print(f"\n📐 Current image shape: {image.shape}")
     print(f"✅ Found channel {channel_num} in file: {filename}")
 
-    # Find all related channel files
-    all_files = os.listdir(folder_path)
-    channel_files = {}
+    # ------------------------------------------------------------------
+    # 3. Discover all sibling channel files
+    # ------------------------------------------------------------------
+    all_files: list = os.listdir(folder_path)
+    channel_files: dict = {}
 
     for file in all_files:
         file_match = pattern.search(file)
         if file_match:
-            # Check if base name matches (excluding channel part)
             file_base = file[: file_match.start()] + file[file_match.end() :]
             if file_base == base_name:
                 ch_num = int(file_match.group(2))
                 channel_files[ch_num] = os.path.join(folder_path, file)
 
-    # Sort by channel number
     sorted_channels = sorted(channel_files.keys())
-    num_channels = len(sorted_channels)
+    num_channels    = len(sorted_channels)
 
     if num_channels < 2:
-        print(
-            f"⚠️  Only found {num_channels} channel(s). Need at least 2 for merging."
-        )
+        print(f"⚠️  Only found {num_channels} channel(s). Need at least 2 for merging.")
         return image
 
-    # Determine which channel acts as the primary trigger for merging
+    # ------------------------------------------------------------------
+    # 4. Only the lowest-numbered channel triggers the merge
+    # ------------------------------------------------------------------
     primary_channel = sorted_channels[0]
 
     if channel_num != primary_channel:
         print(
-            f"ℹ️  Channel {channel_num} is not the primary channel ({primary_channel}); skipping merge for this file."
+            f"ℹ️  Channel {channel_num} is not the primary channel "
+            f"({primary_channel}); skipping merge for this file."
         )
         return image
 
     print(f"📊 Found {num_channels} channels: {sorted_channels}")
 
-    # Load all channels in order
-    # First channel is the current image
-    channels = []
-    for ch_num in sorted_channels:
-        if ch_num == channel_num:
-            # Use the already loaded image for current channel
-            channels.append(image)
+    # ------------------------------------------------------------------
+    # 5a. Zarr-based chunked merge (when worker provides output paths)
+    #     → never holds the full merged array in RAM
+    # ------------------------------------------------------------------
+    if _output_folder and _output_suffix:
+        import zarr
+
+        image_shape = image.shape
+        merged_shape = image_shape + (num_channels,)
+
+        # Chunk along the first spatial axis (Z or T), one slice at a time.
+        # For 2-D images keep it as a single chunk.
+        if len(image_shape) >= 3:
+            spatial_chunk  = (1,) + image_shape[1:]
+            merged_chunk   = (1,) + image_shape[1:] + (num_channels,)
         else:
-            # Load other channel files
-            channel_path = channel_files[ch_num]
-            channel_data = imread(channel_path)
+            spatial_chunk  = image_shape
+            merged_chunk   = merged_shape
 
-            if channel_data.shape != image.shape:
-                raise ValueError(
-                    f"Channel {ch_num} has different shape: {channel_data.shape} vs {image.shape}"
-                )
+        size_bytes = int(np.prod(merged_shape)) * np.dtype(image.dtype).itemsize
+        size_gb    = size_bytes / 1024 ** 3
+        use_bigtiff = size_gb > 3.8
 
-            channels.append(channel_data)
+        tmp_dir  = tempfile.mkdtemp(prefix="tmidas_merge_")
+        try:
+            zarr_path = os.path.join(tmp_dir, "merged.zarr")
+            z_out = zarr.open_array(
+                zarr_path,
+                mode="w",
+                shape=merged_shape,
+                chunks=merged_chunk,
+                dtype=image.dtype,
+            )
 
-        print(
-            f"   Channel {ch_num}: {os.path.basename(channel_files[ch_num])}"
-        )
+            # ---- write each channel into the zarr store ----
+            for i, ch_num in enumerate(sorted_channels):
+                ch_path = channel_files[ch_num]
+                print(f"   Channel {ch_num}: {os.path.basename(ch_path)}")
 
-    # Stack channels as last dimension
-    merged = np.stack(channels, axis=-1)
+                if ch_num == channel_num:
+                    # primary channel is already in memory — copy slice by slice
+                    if len(image_shape) >= 3:
+                        for s in range(image_shape[0]):
+                            z_out[s, ..., i] = image[s]
+                    else:
+                        z_out[..., i] = image
+                    # (image is still referenced by the worker; we can't free it
+                    #  here, but we avoid duplicating it for the merge output)
+                else:
+                    try:
+                        ch_data = tifffile.memmap(ch_path)
+                        if ch_data.shape != image_shape:
+                            raise ValueError(
+                                f"Channel {ch_num} has different shape: "
+                                f"{ch_data.shape} vs {image_shape}"
+                            )
+                        # Copy slice by slice so the OS pages each slice in and
+                        # out without pinning the whole channel in RAM.
+                        if len(image_shape) >= 3:
+                            for s in range(image_shape[0]):
+                                z_out[s, ..., i] = ch_data[s]
+                        else:
+                            z_out[..., i] = ch_data
+                        del ch_data
+                    except Exception:
+                        # Fallback for compressed TIFFs (can't be memmapped)
+                        from skimage.io import imread as _imread
+                        ch_data = _imread(ch_path)
+                        if ch_data.shape != image_shape:
+                            raise ValueError(
+                                f"Channel {ch_num} has different shape: "
+                                f"{ch_data.shape} vs {image_shape}"
+                            )
+                        if len(image_shape) >= 3:
+                            for s in range(image_shape[0]):
+                                z_out[s, ..., i] = ch_data[s]
+                        else:
+                            z_out[..., i] = ch_data
+                        del ch_data
 
-    print(
-        f"✨ Merged shape: {merged.shape} (channels added as last dimension)"
-    )
+            # ---- stream zarr → output TIFF one slice at a time ----
+            name_no_ext, _ = os.path.splitext(base_name)
+            output_filename = name_no_ext + _output_suffix + ".tif"
+            output_path = os.path.join(_output_folder, output_filename)
 
-    # Return merged array so downstream steps receive the combined channels
+            os.makedirs(_output_folder, exist_ok=True)
+
+            print(
+                f"💾 Writing merged TIFF slice-by-slice "
+                f"(shape {merged_shape}, {size_gb:.2f} GB, bigtiff={use_bigtiff}) …"
+            )
+            with tifffile.TiffWriter(output_path, bigtiff=use_bigtiff) as tif:
+                if len(merged_shape) > 3:
+                    # (Z/T, ..., C) — write one Z/T plane at a time
+                    for s in range(merged_shape[0]):
+                        tif.write(np.array(z_out[s]), compression="zlib")
+                else:
+                    # (Y, X, C) or (X, C) — single write
+                    tif.write(np.array(z_out), compression="zlib")
+
+            print(f"✨ Saved merged image → {output_path}")
+            return output_path  # signal to worker: file already written
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # 5b. Legacy / test path: return merged array without zarr
+    #     (used when _output_folder is not provided)
+    # ------------------------------------------------------------------
+    merged = np.empty((*image.shape, num_channels), dtype=image.dtype)
+
+    for i, ch_num in enumerate(sorted_channels):
+        ch_path = channel_files[ch_num]
+        print(f"   Channel {ch_num}: {os.path.basename(ch_path)}")
+
+        if ch_num == channel_num:
+            merged[..., i] = image
+        else:
+            try:
+                ch_data = tifffile.memmap(ch_path)
+                if ch_data.shape != image.shape:
+                    raise ValueError(
+                        f"Channel {ch_num} has different shape: "
+                        f"{ch_data.shape} vs {image.shape}"
+                    )
+                merged[..., i] = ch_data
+                del ch_data
+            except Exception:
+                from skimage.io import imread as _imread
+                ch_data = _imread(ch_path)
+                if ch_data.shape != image.shape:
+                    raise ValueError(
+                        f"Channel {ch_num} has different shape: "
+                        f"{ch_data.shape} vs {image.shape}"
+                    )
+                merged[..., i] = ch_data
+                del ch_data
+
+    print(f"✨ Merged shape: {merged.shape} (channels added as last dimension)")
     return merged
+
+def _merge_channels_file_pre_filter(filepath: str, params: dict) -> bool:
+    """
+    Pre-load filter for merge_channels, called by the processing worker
+    *before* load_image_file.  Returns True only for the primary
+    (lowest-numbered) channel file of each group.
+
+    This is the real fix for the memory explosion: without this filter the
+    ThreadPoolExecutor loads every channel file concurrently, so all N images
+    sit in RAM simultaneously even though N-1 of them are immediately discarded
+    by the merge_channels early-return.  By rejecting non-primary files here we
+    ensure only one image per group is ever read.
+    """
+    import re as _re
+
+    channel_substring = params.get("channel_substring", "_channel_")
+    pattern = _re.compile(rf"({_re.escape(channel_substring)})(\d{{1,2}})")
+    filename = os.path.basename(filepath)
+    folder_path = os.path.dirname(filepath)
+
+    match = pattern.search(filename)
+    if not match:
+        return False  # filename does not contain a channel marker — skip it
+
+    channel_num = int(match.group(2))
+    base_name = filename[: match.start()] + filename[match.end() :]
+
+    try:
+        all_files = os.listdir(folder_path)
+    except OSError:
+        return True  # cannot inspect folder — let it through
+
+    channel_nums = []
+    for f in all_files:
+        m = pattern.search(f)
+        if m:
+            f_base = f[: m.start()] + f[m.end() :]
+            if f_base == base_name:
+                channel_nums.append(int(m.group(2)))
+
+    if not channel_nums:
+        return True  # cannot determine primary — let it through
+
+    return channel_num == min(channel_nums)
+
+
+merge_channels.file_pre_filter = _merge_channels_file_pre_filter
+
 
 
 @BatchProcessingRegistry.register(
