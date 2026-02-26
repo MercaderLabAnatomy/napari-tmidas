@@ -274,26 +274,34 @@ def extract_regionprops_recursive(
                 if "area" in properties:
                     props["size"] = int(region.area)
 
+                # Derive spatial dimensionality from the region centroid — more
+                # robust than using `ndim` (image.ndim) which can diverge from
+                # the reported region dimensions across scikit-image versions
+                # (e.g. 0.26 on Ubuntu/Python 3.11).
+                _centroid = region.centroid
+                _region_ndim = len(_centroid)
+
                 # Add centroid coordinates if requested
                 if "centroid" in properties:
-                    centroid = region.centroid
-                    if ndim == 2:
-                        props["centroid_y"] = float(centroid[0])
-                        props["centroid_x"] = float(centroid[1])
-                    elif ndim == 3:
-                        props["centroid_z"] = float(centroid[0])
-                        props["centroid_y"] = float(centroid[1])
-                        props["centroid_x"] = float(centroid[2])
+                    if _region_ndim == 2:
+                        props["centroid_y"] = float(_centroid[0])
+                        props["centroid_x"] = float(_centroid[1])
+                    elif _region_ndim == 3:
+                        props["centroid_z"] = float(_centroid[0])
+                        props["centroid_y"] = float(_centroid[1])
+                        props["centroid_x"] = float(_centroid[2])
 
                 # Add bounding box if requested
+                # bbox length is 2*N for an N-dimensional region.
                 if "bbox" in properties:
                     bbox = region.bbox
-                    if ndim == 2:
+                    n_bbox = len(bbox)
+                    if n_bbox == 4:
                         props["bbox_min_y"] = int(bbox[0])
                         props["bbox_min_x"] = int(bbox[1])
                         props["bbox_max_y"] = int(bbox[2])
                         props["bbox_max_x"] = int(bbox[3])
-                    elif ndim == 3:
+                    elif n_bbox == 6:
                         props["bbox_min_z"] = int(bbox[0])
                         props["bbox_min_y"] = int(bbox[1])
                         props["bbox_min_x"] = int(bbox[2])
@@ -302,7 +310,7 @@ def extract_regionprops_recursive(
                         props["bbox_max_x"] = int(bbox[5])
 
                 # Add other properties if requested (only for 2D, as some aren't available for 3D)
-                if ndim == 2:
+                if _region_ndim == 2:
                     if "perimeter" in properties:
                         try:  # noqa: SIM105
                             props["perimeter"] = float(region.perimeter)

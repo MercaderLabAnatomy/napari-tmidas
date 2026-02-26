@@ -1778,6 +1778,7 @@ class ProcessingWorker(QThread):
                 "_source_filepath": filepath,
                 "_output_folder": self.output_folder,
                 "_output_suffix": self.output_suffix,
+                "_output_format": self.output_format,
             }
 
             # Filter parameters based on function signature
@@ -1944,7 +1945,8 @@ class ProcessingWorker(QThread):
                         img = np.squeeze(img)
 
                         # Generate output filename with layer name
-                        output_filename = f"{base_name}{layer_name}.tif"
+                        _out_ext = ".zarr" if self.output_format == "zarr" else ".tif"
+                        output_filename = f"{base_name}{layer_name}{_out_ext}"
                         output_path = os.path.join(
                             self.output_folder, output_filename
                         )
@@ -1976,9 +1978,9 @@ class ProcessingWorker(QThread):
                         )
                         if self.output_format == "zarr":
                             save_as_zarr(
-                                output_path,
                                 img.astype(save_dtype),
-                                is_label=True,
+                                output_path,
+                                axes="TCZYX"[: img.ndim],
                             )
                         else:
                             tifffile.imwrite(
@@ -2035,9 +2037,9 @@ class ProcessingWorker(QThread):
                             )
                             if self.output_format == "zarr":
                                 save_as_zarr(
-                                    output_path,
                                     img.astype(save_dtype),
-                                    is_label=True,
+                                    output_path,
+                                    axes="TCZYX"[: img.ndim],
                                 )
                             else:
                                 tifffile.imwrite(
@@ -2052,9 +2054,9 @@ class ProcessingWorker(QThread):
                             )
                             if self.output_format == "zarr":
                                 save_as_zarr(
-                                    output_path,
                                     img.astype(image_dtype),
-                                    is_label=False,
+                                    output_path,
+                                    axes="TCZYX"[: img.ndim],
                                 )
                             else:
                                 tifffile.imwrite(

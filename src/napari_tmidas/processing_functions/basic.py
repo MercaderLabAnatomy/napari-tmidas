@@ -991,6 +991,7 @@ def merge_channels(
     _source_filepath: str = None,
     _output_folder: str = None,
     _output_suffix: str = None,
+    _output_format: str = "tiff",
 ) -> "str | np.ndarray":
     """
     Merge multiple single-channel images from a folder into one multi-channel image.
