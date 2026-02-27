@@ -1438,7 +1438,7 @@ def split_tzyx_stack(
     output_name_format: str = "{basename}_t{timepoint:03d}",
     preserve_scale: bool = True,
     use_compression: bool = True,
-    num_workers: int = 4,
+    num_workers: int = max(1, (os.cpu_count() or 4) // 4),
 ) -> np.ndarray:
     """
     Split a 4D TZYX stack into separate 3D ZYX TIF files using parallel processing.

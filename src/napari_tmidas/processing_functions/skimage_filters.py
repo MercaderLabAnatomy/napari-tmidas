@@ -3,6 +3,7 @@
 Processing functions that depend on scikit-image.
 """
 import concurrent.futures
+import os
 
 import numpy as np
 
@@ -207,7 +208,7 @@ if SKIMAGE_AVAILABLE:
         image: np.ndarray,
         clip_limit: float = 0.01,
         kernel_size: int = 0,
-        max_workers: int = 4,
+        max_workers: int = max(1, (os.cpu_count() or 4) // 4),
         _source_filepath: str = None,
     ) -> np.ndarray:
         """

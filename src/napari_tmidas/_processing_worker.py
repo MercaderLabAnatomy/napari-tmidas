@@ -64,7 +64,7 @@ class ProcessingWorker(QThread):
         self.input_suffix = input_suffix
         self.output_suffix = output_suffix
         self.stop_requested = False
-        self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
+        self.thread_count = max(1, (os.cpu_count() or 4) // 4)  # Default value
 
     def stop(self):
         """Request the worker to stop processing"""

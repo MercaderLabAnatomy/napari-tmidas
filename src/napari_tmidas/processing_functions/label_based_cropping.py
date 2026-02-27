@@ -394,7 +394,7 @@ def batch_label_based_cropping(
     expand_z: bool = True,
     expand_time: bool = False,
     output_format: str = "same",
-    num_workers: int = 4,
+    num_workers: int = max(1, (os.cpu_count() or 4) // 4),
     verbose: bool = True,
 ) -> Dict[str, List[str]]:
     """

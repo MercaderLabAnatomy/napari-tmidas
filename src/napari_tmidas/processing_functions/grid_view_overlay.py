@@ -544,8 +544,8 @@ def create_grid_overlay(
             return None, f"⚠️  Error processing {filename}: {e}"
 
     # Process in parallel with ThreadPoolExecutor
-    # Use max 4 workers for better memory management with large datasets
-    max_workers = min(4, os.cpu_count() or 4)
+    # Use a quarter of available CPUs for better memory management with large datasets
+    max_workers = max(1, (os.cpu_count() or 4) // 4)
 
     # Process in batches to manage memory
     batch_size = 100  # Process 100 images at a time
