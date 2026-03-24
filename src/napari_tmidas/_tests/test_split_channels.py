@@ -217,6 +217,17 @@ class TestSplitChannels:
         with pytest.raises(ValueError, match="at least 3 dimensions"):
             split_channels(image_2d, num_channels=3, time_steps=0)
 
+    def test_split_channels_python_returns_view_when_possible(self):
+        """Test split returns a view for python format to reduce peak memory."""
+        tcyx_image = np.random.rand(2, 3, 8, 8)
+
+        result = split_channels(
+            tcyx_image, num_channels=3, time_steps=2, output_format="python"
+        )
+
+        assert result.shape == (3, 2, 8, 8)
+        assert np.shares_memory(result, tcyx_image)
+
 
 class TestTimepointSorting:
     """Test the timepoint sorting functionality"""

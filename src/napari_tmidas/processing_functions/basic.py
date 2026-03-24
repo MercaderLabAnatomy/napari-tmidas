@@ -909,68 +909,50 @@ def split_channels(
         )
         num_channels = actual_channels
 
-    # Split channels
-    channels = np.split(image, num_channels, axis=channel_axis)
+    # Move channel axis to the front. This is a view and avoids allocating
+    # another full-sized output buffer for typical numpy inputs.
+    result = np.moveaxis(image, channel_axis, 0)
 
-    # Process output format
-    result_channels = []
-    for i, channel_img in enumerate(channels):
-        # Remove the channel dimension (which now has size 1 after split)
-        channel_img = np.squeeze(channel_img, axis=channel_axis)
-
-        # Get original axes without channel
+    # For fiji format, reorganize remaining dimensions to TZYX order when
+    # we can do so unambiguously without dropping dimensions.
+    if output_format.lower() == "fiji":
         axes_without_channel = axes.copy()
         del axes_without_channel[channel_axis]
         axes_without_channel_str = "".join(axes_without_channel)
 
-        # For fiji format, reorganize dimensions to TZYX order
-        if output_format.lower() == "fiji":
-            # Map dimensions to positions
-            dim_indices = {
-                dim: i for i, dim in enumerate(axes_without_channel_str)
-            }
+        dim_indices = {
+            dim: i for i, dim in enumerate(axes_without_channel_str)
+        }
 
-            # Build target order and transpose indices
-            target_order = ""
-            transpose_indices = []
+        target_order = ""
+        target_indices = []
 
-            # Add T if exists
-            if "T" in dim_indices:
-                target_order += "T"
-                transpose_indices.append(dim_indices["T"])
+        if "T" in dim_indices:
+            target_order += "T"
+            target_indices.append(dim_indices["T"])
 
-            # Add Z if exists
-            if "Z" in dim_indices:
-                target_order += "Z"
-                transpose_indices.append(dim_indices["Z"])
+        if "Z" in dim_indices:
+            target_order += "Z"
+            target_indices.append(dim_indices["Z"])
 
-            # Add Y and X (should always exist)
-            if "Y" in dim_indices and "X" in dim_indices:
-                target_order += "YX"
-                transpose_indices.append(dim_indices["Y"])
-                transpose_indices.append(dim_indices["X"])
+        if "Y" in dim_indices and "X" in dim_indices:
+            target_order += "YX"
+            target_indices.append(dim_indices["Y"])
+            target_indices.append(dim_indices["X"])
 
-            # Only transpose if order is different and we have enough dimensions
-            if (
-                axes_without_channel_str != target_order
-                and len(transpose_indices) > 1
-                and len(transpose_indices) == len(axes_without_channel)
-            ):
-                print(
-                    f"Channel {i}: Transposing from {axes_without_channel_str} to {target_order}"
-                )
-                result_channels.append(
-                    np.transpose(channel_img, transpose_indices)
-                )
-            else:
-                # Keep as is
-                result_channels.append(channel_img)
-        else:
-            # For python format, keep as is
-            result_channels.append(channel_img)
+        if (
+            axes_without_channel_str != target_order
+            and len(target_indices) > 1
+            and len(target_indices) == len(axes_without_channel)
+        ):
+            print(
+                f"Transposing channels from {axes_without_channel_str} to {target_order}"
+            )
+            # Keep channel axis first and reorder only non-channel axes.
+            transpose_indices = [0] + [idx + 1 for idx in target_indices]
+            result = np.transpose(result, transpose_indices)
 
-    # Stack channels along a new first dimension
-    return np.stack(result_channels, axis=0)
+    return result
 
 
 @BatchProcessingRegistry.register(
@@ -1438,7 +1420,7 @@ def split_tzyx_stack(
     output_name_format: str = "{basename}_t{timepoint:03d}",
     preserve_scale: bool = True,
     use_compression: bool = True,
-    num_workers: int = max(1, (os.cpu_count() or 4) // 4),
+    num_workers: int = 4,
 ) -> np.ndarray:
     """
     Split a 4D TZYX stack into separate 3D ZYX TIF files using parallel processing.
