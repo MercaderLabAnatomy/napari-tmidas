@@ -67,9 +67,9 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             "Installing Cellpose 4 (Cellpose-SAM) in the dedicated environment..."
         )
 
-        # First, install PyTorch with CUDA 12.x support for sm_120 compatibility
-        # RTX PRO 4000 Blackwell has CUDA capability sm_120, which requires newer PyTorch
-        print("Installing PyTorch with CUDA 12.x support (for sm_120 compatibility)...")
+        # Prefer stable PyTorch first. If it does not include sm_120 kernels,
+        # fall back to nightly for Blackwell compatibility.
+        print("Installing stable PyTorch with CUDA 12.8...")
         try:
             subprocess.check_call(
                 [
@@ -77,17 +77,70 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
                     "-m",
                     "pip",
                     "install",
+                    "--upgrade",
                     "torch",
                     "torchvision",
                     "torchaudio",
                     "--index-url",
-                    "https://download.pytorch.org/whl/cu124",
+                    "https://download.pytorch.org/whl/cu128",
                 ]
             )
-            print("✓ PyTorch with CUDA 12.4 installed successfully")
+            print("✓ Stable PyTorch CUDA 12.8 installed successfully")
         except subprocess.CalledProcessError as e:
-            print(f"✗ Failed to install PyTorch: {e}")
+            print(f"✗ Failed to install stable PyTorch: {e}")
             raise
+
+        sm120_supported = self._torch_supports_sm120(env_python)
+        if sm120_supported:
+            print("✓ Installed PyTorch build supports sm_120")
+        else:
+            print(
+                "Stable PyTorch build does not include sm_120; "
+                "installing nightly CUDA 12.8 build..."
+            )
+            try:
+                subprocess.check_call(
+                    [
+                        env_python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "--pre",
+                        "torch",
+                        "torchvision",
+                        "torchaudio",
+                        "--index-url",
+                        "https://download.pytorch.org/whl/nightly/cu128",
+                    ]
+                )
+                print("✓ Nightly PyTorch CUDA 12.8 installed successfully")
+            except subprocess.CalledProcessError as e:
+                print(f"✗ Failed to install nightly PyTorch: {e}")
+                raise
+
+            if not self._torch_supports_sm120(env_python):
+                raise RuntimeError(
+                    "Installed PyTorch does not report sm_120 support. "
+                    "Please verify the selected wheel channel and GPU driver compatibility."
+                )
+
+    def _torch_supports_sm120(self, env_python: str) -> bool:
+        """Return True when torch in the env reports Blackwell (sm_120) support."""
+        probe = (
+            "import torch; "
+            "print('sm_120' in (torch.cuda.get_arch_list() if torch.cuda.is_available() else []))"
+        )
+        try:
+            result = subprocess.run(
+                [env_python, "-c", probe],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.stdout.strip().endswith("True")
+        except Exception:
+            return False
 
         # Install packages one by one with error checking
         packages = ["cellpose", "zarr", "tifffile"]
@@ -253,6 +306,8 @@ def run_cellpose_in_env(func_name, args_dict):
     if not manager.are_all_packages_installed():
         print("Missing packages detected. Reinstalling...")
         manager.reinstall_packages()
+
+    args_dict = dict(args_dict)
 
     # Check for zarr optimization
     use_zarr_direct = "zarr_path" in args_dict
