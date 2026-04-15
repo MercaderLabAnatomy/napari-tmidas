@@ -120,6 +120,12 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
             [env_python, "-m", "pip", "install", "napari-convpaint"]
         )
 
+        # Install Qt bindings required by napari-convpaint
+        print("Installing Qt bindings (PyQt5) for napari-convpaint...")
+        subprocess.check_call(
+            [env_python, "-m", "pip", "install", "PyQt5"]
+        )
+
         # Install tifffile and other dependencies for image handling
         subprocess.check_call(
             [
@@ -141,7 +147,7 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
         check_script = """
 import sys
 try:
-    from napari_convpaint.conv_paint_model import ConvpaintModel
+    from napari_convpaint import ConvpaintModel
     print("ConvpaintModel imported successfully")
     import torch
     print(f"PyTorch version: {torch.__version__}")
@@ -288,7 +294,7 @@ def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
     script = f"""
 import numpy as np
 import tifffile
-from napari_convpaint.conv_paint_model import ConvpaintModel
+from napari_convpaint import ConvpaintModel
 import gc
 import torch
 import os

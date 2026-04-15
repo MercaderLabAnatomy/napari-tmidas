@@ -24,7 +24,7 @@ from napari_tmidas.processing_functions.convpaint_env_manager import (
 
 # Check if napari-convpaint is directly available in current environment
 try:
-    from napari_convpaint.conv_paint_model import ConvpaintModel
+    from napari_convpaint import ConvpaintModel
 
     CONVPAINT_AVAILABLE = True
     USE_DEDICATED_ENV = False
