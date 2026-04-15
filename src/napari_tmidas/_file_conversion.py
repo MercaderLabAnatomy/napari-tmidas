@@ -1978,6 +1978,14 @@ class ConversionWorker(QThread):
             scale_transform = self._build_scale_transform(
                 metadata, axes, image_data.shape
             )
+            pyramid_factors = (2, 4, 8, 16)
+            coordinate_transformations = (
+                self._build_pyramid_coordinate_transformations(
+                    scale_transform,
+                    axes or "zyx",
+                    pyramid_factors,
+                )
+            )
 
             # Save with OME-ZARR including physical metadata
             with ProgressBar():
@@ -1992,9 +2000,8 @@ class ConversionWorker(QThread):
                     image_data,
                     group=root,
                     axes=axes or "zyx",
-                    coordinate_transformations=(
-                        [[scale_transform]] if scale_transform else None
-                    ),
+                    coordinate_transformations=coordinate_transformations,
+                    scale_factors=pyramid_factors,
                     scaler=None,
                     storage_options={"compression": "zstd"},
                 )
@@ -2055,6 +2062,45 @@ class ConversionWorker(QThread):
 
         print(f"Built scale transformation: {scales} (unit: {unit})")
         return scale_transform
+
+    def _build_pyramid_coordinate_transformations(
+        self,
+        scale_transform: Optional[dict],
+        axes: str,
+        pyramid_factors: Tuple[int, ...],
+    ) -> Optional[List[List[dict]]]:
+        """Build one coordinate transform entry per pyramid level for OME-Zarr."""
+        if not scale_transform:
+            return None
+
+        base_scales = scale_transform.get("scale")
+        if not isinstance(base_scales, list):
+            return None
+
+        if len(base_scales) != len(axes):
+            # If metadata is inconsistent, let ome-zarr generate defaults.
+            print(
+                "Warning: scale metadata length does not match axes; "
+                "using ome-zarr default coordinate transformations"
+            )
+            return None
+
+        transformations = []
+        level_factors = (1, *pyramid_factors)
+
+        for factor in level_factors:
+            level_scales = []
+            for axis, base_scale in zip(axes, base_scales):
+                if axis in {"x", "y"}:
+                    level_scales.append(float(base_scale) * factor)
+                else:
+                    level_scales.append(float(base_scale))
+
+            transformations.append(
+                [{"type": "scale", "scale": level_scales}]
+            )
+
+        return transformations
 
 
 class MicroscopyImageConverterWidget(QWidget):
@@ -2177,13 +2223,52 @@ class MicroscopyImageConverterWidget(QWidget):
 
     def browse_folder(self):
         """Browse for input folder"""
-        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        start_dir = self.folder_edit.text().strip() or str(Path.home())
+        start_dir = os.path.abspath(os.path.expanduser(start_dir))
+        options = QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+
+        try:
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Input Folder",
+                start_dir,
+                options,
+            )
+        except (RuntimeError, TypeError) as e:
+            # Native dialogs can hang/fail on some Linux setups; retry non-native.
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Input Folder",
+                start_dir,
+                options | QFileDialog.DontUseNativeDialog,
+            )
+            self.status_label.setText(f"Browse fallback used: {e}")
+
         if folder:
             self.folder_edit.setText(folder)
 
     def browse_output(self):
         """Browse for output folder"""
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        start_dir = self.output_edit.text().strip() or self.folder_edit.text().strip() or str(Path.home())
+        start_dir = os.path.abspath(os.path.expanduser(start_dir))
+        options = QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+
+        try:
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Output Folder",
+                start_dir,
+                options,
+            )
+        except (RuntimeError, TypeError) as e:
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Output Folder",
+                start_dir,
+                options | QFileDialog.DontUseNativeDialog,
+            )
+            self.status_label.setText(f"Browse fallback used: {e}")
+
         if folder:
             self.output_edit.setText(folder)
 

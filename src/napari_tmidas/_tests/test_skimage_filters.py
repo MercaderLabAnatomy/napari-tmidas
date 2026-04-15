@@ -1,11 +1,13 @@
 # src/napari_tmidas/_tests/test_skimage_filters.py
 import numpy as np
+import pytest
 
 from napari_tmidas.processing_functions.skimage_filters import (
     adaptive_threshold_bright,
     equalize_histogram,
     invert_image,
     percentile_threshold,
+    resize_image_fixed_yx,
     rolling_ball_background,
     simple_thresholding,
 )
@@ -276,3 +278,40 @@ class TestCLAHE:
         # Results should be nearly identical (some floating point differences are OK)
         np.testing.assert_allclose(result_1, result_4, rtol=1e-5)
         np.testing.assert_allclose(result_1, result_8, rtol=1e-5)
+
+
+class TestResizeImageFixedYX:
+    """Test suite for fixed YX resizing."""
+
+    def test_resize_2d(self):
+        image = np.random.randint(0, 65535, (300, 500), dtype=np.uint16)
+        result = resize_image_fixed_yx(image, target_y=1024, target_x=1024)
+        assert result.shape == (1024, 1024)
+        assert result.dtype == image.dtype
+
+    def test_resize_zyx(self):
+        image = np.random.rand(7, 256, 384).astype(np.float32)
+        result = resize_image_fixed_yx(
+            image, target_y=1024, target_x=1024, dim_order="ZYX"
+        )
+        assert result.shape == (7, 1024, 1024)
+        assert result.dtype == image.dtype
+
+    def test_resize_tyx(self):
+        image = np.random.rand(5, 420, 360).astype(np.float32)
+        result = resize_image_fixed_yx(
+            image, target_y=1024, target_x=1024, dim_order="TYX"
+        )
+        assert result.shape == (5, 1024, 1024)
+        assert result.dtype == image.dtype
+
+    def test_resize_tzyx(self):
+        image = np.random.randint(0, 255, (3, 4, 128, 256), dtype=np.uint8)
+        result = resize_image_fixed_yx(image, target_y=1024, target_x=1024)
+        assert result.shape == (3, 4, 1024, 1024)
+        assert result.dtype == image.dtype
+
+    def test_invalid_dim_order(self):
+        image = np.random.rand(100, 120).astype(np.float32)
+        with pytest.raises(ValueError, match="Unsupported dim_order"):
+            resize_image_fixed_yx(image, dim_order="CZYX")

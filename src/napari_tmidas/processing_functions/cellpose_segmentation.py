@@ -137,8 +137,8 @@ def transpose_dimensions(img, dim_order):
             "type": float,
             "default": 1.0,
             "min": 0.1,
-            "max": 10.0,
-            "description": "Optional rescaling factor (3D; Z step[um] / X pixel res [um])",
+            "max": 100.0,
+            "description": "Optional rescaling factor (3D; Z step[um] / X pixel res [um]). Highly anisotropic datasets may require values >10.",
         },
         "flow3D_smooth": {
             "type": int,

@@ -779,6 +779,107 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
     return skimage.img_as_ubyte(img_rescaled)
 
 
+@BatchProcessingRegistry.register(
+    name="Resize Image to Fixed YX (skimage)",
+    suffix="_yx_resized",
+    description="Resize intensity images to a fixed YX size for faster downstream processing while preserving T/Z axes",
+    parameters={
+        "target_y": {
+            "type": int,
+            "default": 1024,
+            "min": 1,
+            "max": 32768,
+            "description": "Target size for Y dimension.",
+        },
+        "target_x": {
+            "type": int,
+            "default": 1024,
+            "min": 1,
+            "max": 32768,
+            "description": "Target size for X dimension.",
+        },
+        "dim_order": {
+            "type": str,
+            "default": "auto",
+            "options": ["auto", "YX", "ZYX", "TYX", "TZYX"],
+            "description": "Input dimension order. 'auto' maps ndim 2->YX, 3->ZYX, 4->TZYX.",
+        },
+    },
+)
+def resize_image_fixed_yx(
+    image: np.ndarray,
+    target_y: int = 1024,
+    target_x: int = 1024,
+    dim_order: str = "auto",
+) -> np.ndarray:
+    """
+    Resize image YX plane(s) to fixed dimensions using skimage.
+
+    Supports YX (2D), ZYX (3D), TYX (3D+time), and TZYX (4D+time+depth).
+    T/Z dimensions are preserved; only YX is resized.
+    """
+    from skimage.transform import resize
+
+    target_y = int(target_y)
+    target_x = int(target_x)
+    if target_y < 1 or target_x < 1:
+        raise ValueError(
+            f"target_y and target_x must be >= 1, got {target_y}, {target_x}"
+        )
+
+    if dim_order == "auto":
+        auto_map = {2: "YX", 3: "ZYX", 4: "TZYX"}
+        dim_order = auto_map.get(image.ndim)
+        if dim_order is None:
+            raise ValueError(
+                f"Unsupported ndim for auto dim_order: {image.ndim}. "
+                "Use explicit dim_order (YX, ZYX, TYX, or TZYX)."
+            )
+
+    dim_order = str(dim_order).upper()
+    valid_orders = {"YX", "ZYX", "TYX", "TZYX"}
+    if dim_order not in valid_orders:
+        raise ValueError(
+            f"Unsupported dim_order '{dim_order}'. "
+            "Use one of: YX, ZYX, TYX, TZYX, auto"
+        )
+
+    if (dim_order == "YX" and image.ndim != 2) or (
+        dim_order in {"ZYX", "TYX"} and image.ndim != 3
+    ) or (dim_order == "TZYX" and image.ndim != 4):
+        raise ValueError(
+            f"dim_order '{dim_order}' is incompatible with image.ndim={image.ndim}"
+        )
+
+    def _resize_2d(slice_2d: np.ndarray) -> np.ndarray:
+        anti_aliasing = (
+            target_y < slice_2d.shape[0] or target_x < slice_2d.shape[1]
+        )
+        resized = resize(
+            slice_2d,
+            (target_y, target_x),
+            order=1,
+            mode="reflect",
+            preserve_range=True,
+            anti_aliasing=anti_aliasing,
+            clip=True,
+        )
+        return resized.astype(slice_2d.dtype, copy=False)
+
+    if dim_order == "YX":
+        return _resize_2d(image)
+
+    lead_shape = image.shape[:-2]
+    yx_shape = image.shape[-2:]
+    reshaped = image.reshape(-1, yx_shape[0], yx_shape[1])
+
+    output = np.empty((reshaped.shape[0], target_y, target_x), dtype=image.dtype)
+    for i in range(reshaped.shape[0]):
+        output[i] = _resize_2d(reshaped[i])
+
+    return output.reshape(*lead_shape, target_y, target_x)
+
+
 # ============================================================================
 # Bright Region Extraction Functions
 # ============================================================================
