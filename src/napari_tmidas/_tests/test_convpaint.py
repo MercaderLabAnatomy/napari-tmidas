@@ -218,6 +218,90 @@ class TestConvpaintEnvManager:
         result = is_convpaint_installed()
         assert isinstance(result, bool)
 
+    def test_convpaint_import_statement_uses_backend_module_first(self):
+        """Test the dedicated env import avoids the Qt-bound package __init__."""
+        from napari_tmidas.processing_functions.convpaint_env_manager import (
+            _get_convpaint_import_statement,
+        )
+
+        import_statement = _get_convpaint_import_statement()
+
+        assert "napari_convpaint.convpaint_model" in import_statement
+        assert "from napari_convpaint import ConvpaintModel" in import_statement
+
+    def test_ensure_env_ready_repairs_invalid_environment(self, monkeypatch):
+        """Test an existing but broken env is repaired before use."""
+        from types import SimpleNamespace
+
+        from napari_tmidas.processing_functions.convpaint_env_manager import (
+            ConvpaintEnvironmentManager,
+        )
+
+        manager = ConvpaintEnvironmentManager()
+        repair_calls = []
+
+        monkeypatch.setattr(manager, "is_env_created", lambda: True)
+        monkeypatch.setattr(manager, "get_env_python_path", lambda: "/tmp/convpaint-python")
+        monkeypatch.setattr(
+            manager,
+            "_run_verification",
+            lambda env_python: repair_calls.append(("verify", env_python)) or (
+                SimpleNamespace(returncode=1, stdout="", stderr="missing Qt")
+                if len(repair_calls) == 1
+                else SimpleNamespace(returncode=0, stdout="ok", stderr="")
+            ),
+        )
+        monkeypatch.setattr(
+            manager,
+            "_repair_environment",
+            lambda env_python: repair_calls.append(("repair", env_python)),
+        )
+
+        env_python = manager.ensure_env_ready()
+
+        assert env_python == "/tmp/convpaint-python"
+        assert repair_calls == [
+            ("verify", "/tmp/convpaint-python"),
+            ("repair", "/tmp/convpaint-python"),
+            ("verify", "/tmp/convpaint-python"),
+        ]
+
+    def test_load_convpaint_model_class_prefers_backend_module(self, monkeypatch):
+        """Test ConvpaintModel loading prefers the headless backend module."""
+        from types import SimpleNamespace
+
+        from napari_tmidas.processing_functions import convpaint_prediction
+
+        backend_model = object()
+
+        def fake_import_module(module_name):
+            if module_name == "napari_convpaint.convpaint_model":
+                return SimpleNamespace(ConvpaintModel=backend_model)
+            raise AssertionError(f"Unexpected import attempt: {module_name}")
+
+        monkeypatch.setattr(convpaint_prediction, "import_module", fake_import_module)
+
+        assert convpaint_prediction._load_convpaint_model_class() is backend_model
+
+    def test_load_convpaint_model_class_falls_back_to_package(self, monkeypatch):
+        """Test ConvpaintModel loading falls back when backend module import is unavailable."""
+        from types import SimpleNamespace
+
+        from napari_tmidas.processing_functions import convpaint_prediction
+
+        fallback_model = object()
+
+        def fake_import_module(module_name):
+            if module_name == "napari_convpaint.convpaint_model":
+                raise ImportError("backend module unavailable")
+            if module_name == "napari_convpaint":
+                return SimpleNamespace(ConvpaintModel=fallback_model)
+            raise AssertionError(f"Unexpected import attempt: {module_name}")
+
+        monkeypatch.setattr(convpaint_prediction, "import_module", fake_import_module)
+
+        assert convpaint_prediction._load_convpaint_model_class() is fallback_model
+
 
 class TestConvpaintBatching:
     """Test convpaint Z-stack batching functionality for memory management."""

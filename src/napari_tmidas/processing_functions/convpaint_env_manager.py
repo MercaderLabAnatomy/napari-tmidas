@@ -4,12 +4,47 @@ This module manages a dedicated virtual environment for napari-convpaint.
 """
 
 import os
+import textwrap
 import subprocess
 import tempfile
 
 import tifffile
 
 from napari_tmidas._env_manager import BaseEnvironmentManager
+
+
+def _get_convpaint_import_statement() -> str:
+    """Return a backend-only ConvpaintModel import for headless execution."""
+    return textwrap.dedent(
+        """
+        try:
+            from napari_convpaint.convpaint_model import ConvpaintModel
+        except ImportError:
+            from napari_convpaint import ConvpaintModel
+        """
+    ).strip()
+
+
+def _build_convpaint_check_script() -> str:
+    """Return a smoke-test script for validating the convpaint environment."""
+    return f"""
+import sys
+{_get_convpaint_import_statement()}
+try:
+    print("ConvpaintModel imported successfully")
+    import torch
+    print(f"PyTorch version: {{torch.__version__}}")
+    print(f"CUDA available: {{torch.cuda.is_available()}}")
+    if torch.cuda.is_available():
+        print(f"CUDA version: {{torch.version.cuda}}")
+        print(f"GPU: {{torch.cuda.get_device_name(0)}}")
+    print("SUCCESS: napari-convpaint environment is working correctly")
+except Exception as e:
+    print(f"ERROR: {{str(e)}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"""
 
 
 class ConvpaintEnvironmentManager(BaseEnvironmentManager):
@@ -144,24 +179,7 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
 
     def _verify_installation(self, env_python: str) -> None:
         """Verify napari-convpaint installation."""
-        check_script = """
-import sys
-try:
-    from napari_convpaint import ConvpaintModel
-    print("ConvpaintModel imported successfully")
-    import torch
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA version: {torch.version.cuda}")
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print("SUCCESS: napari-convpaint environment is working correctly")
-except Exception as e:
-    print(f"ERROR: {str(e)}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-"""
+        check_script = _build_convpaint_check_script()
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
         ) as temp:
@@ -186,6 +204,54 @@ except Exception as e:
                 )
         finally:
             os.unlink(temp_path)
+
+    def _run_verification(self, env_python: str) -> subprocess.CompletedProcess:
+        """Run the convpaint environment smoke test and return the result."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as temp:
+            temp.write(_build_convpaint_check_script())
+            temp_path = temp.name
+
+        try:
+            return subprocess.run(
+                [env_python, temp_path],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            os.unlink(temp_path)
+
+    def _repair_environment(self, env_python: str) -> None:
+        """Install runtime dependencies required for the convpaint environment."""
+        print("Repairing napari-convpaint environment dependencies...")
+        subprocess.check_call([env_python, "-m", "pip", "install", "PyQt5"])
+
+    def ensure_env_ready(self) -> str:
+        """Ensure the dedicated convpaint environment exists and passes a smoke test."""
+        if not self.is_env_created():
+            print("Creating dedicated napari-convpaint environment...")
+            return self.create_env()
+
+        env_python = self.get_env_python_path()
+        verification = self._run_verification(env_python)
+        if verification.returncode == 0:
+            return env_python
+
+        print("Dedicated napari-convpaint environment failed verification.")
+        if verification.stdout:
+            print(verification.stdout)
+        if verification.stderr:
+            print(verification.stderr)
+
+        self._repair_environment(env_python)
+        verification = self._run_verification(env_python)
+        if verification.returncode == 0:
+            print("Dedicated napari-convpaint environment repaired successfully.")
+            return env_python
+
+        print("Repair attempt failed, recreating dedicated napari-convpaint environment...")
+        return self.create_env()
 
     def is_package_installed(self) -> bool:
         """Check if napari-convpaint is installed in the current environment."""
@@ -214,6 +280,11 @@ def is_env_created():
 def get_env_python_path():
     """Get the path to the Python executable in the environment."""
     return manager.get_env_python_path()
+
+
+def ensure_convpaint_env_ready():
+    """Ensure the dedicated convpaint environment exists and is usable."""
+    return manager.ensure_env_ready()
 
 
 def create_convpaint_env(cuda_version: str = "auto"):
@@ -275,11 +346,7 @@ def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
     numpy.ndarray
         Segmentation labels
     """
-    if not is_env_created():
-        print("Creating dedicated napari-convpaint environment...")
-        create_convpaint_env()
-
-    env_python = get_env_python_path()
+    env_python = ensure_convpaint_env_ready()
 
     # Create temporary files for input/output
     with tempfile.NamedTemporaryFile(
@@ -294,7 +361,7 @@ def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
     script = f"""
 import numpy as np
 import tifffile
-from napari_convpaint import ConvpaintModel
+{_get_convpaint_import_statement()}
 import gc
 import torch
 import os

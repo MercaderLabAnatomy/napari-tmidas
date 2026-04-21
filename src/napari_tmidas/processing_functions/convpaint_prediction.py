@@ -12,6 +12,7 @@ The functions will automatically create and manage a dedicated environment for n
 if it's not already installed in the main environment.
 """
 import os
+from importlib import import_module
 
 import numpy as np
 
@@ -22,9 +23,17 @@ from napari_tmidas.processing_functions.convpaint_env_manager import (
     run_convpaint_in_env,
 )
 
+
+def _load_convpaint_model_class():
+    """Import the backend Convpaint model without requiring the Qt widget layer."""
+    try:
+        return import_module("napari_convpaint.convpaint_model").ConvpaintModel
+    except ImportError:
+        return import_module("napari_convpaint").ConvpaintModel
+
 # Check if napari-convpaint is directly available in current environment
 try:
-    from napari_convpaint import ConvpaintModel
+    ConvpaintModel = _load_convpaint_model_class()
 
     CONVPAINT_AVAILABLE = True
     USE_DEDICATED_ENV = False
