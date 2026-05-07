@@ -200,7 +200,7 @@ def transpose_dimensions(img, dim_order):
         "use_distributed_segmentation": {
             "type": bool,
             "default": False,
-            "description": "Use distributed blockwise segmentation (cellpose.contrib.distributed_segmentation) for large 3D ZYX zarr volumes. Reduces peak memory use during inference. Only applies to 3D ZYX zarr input.",
+            "description": "Use distributed blockwise segmentation (cellpose.contrib.distributed_segmentation) for large 3D ZYX volumes. Reduces peak memory use during inference. Non-zarr inputs are auto-converted to temporary zarr when possible.",
         },
         "distributed_blocksize": {
             "type": int,
@@ -343,6 +343,74 @@ def cellpose_segmentation(
             and os.path.exists(os.path.join(_source_filepath, ".zattrs"))
         )
     )
+
+    # Distributed Cellpose relies on zarr-backed slabs. If the user requested
+    # distributed mode on a non-zarr source, automatically convert using the
+    # existing microscopy conversion helper and continue in zarr-direct mode.
+    if (
+        use_distributed_segmentation
+        and not use_zarr_direct
+        and bool(_source_filepath)
+    ):
+        try:
+            from napari_tmidas._file_selector import save_as_zarr
+
+            source_abs = os.path.abspath(_source_filepath)
+            source_parent = os.path.dirname(source_abs)
+            tmp_root = os.path.join(source_parent, "tmp")
+            os.makedirs(tmp_root, exist_ok=True)
+
+            auto_root = os.path.join(tmp_root, "cellpose_auto_zarr")
+            os.makedirs(auto_root, exist_ok=True)
+
+            cache_payload = {
+                "source": source_abs,
+                "source_mtime": os.path.getmtime(source_abs),
+                "shape": tuple(int(s) for s in image.shape),
+                "dtype": str(getattr(image, "dtype", "unknown")),
+                "dim_order": str(dim_order),
+                "channel": str(channel),
+            }
+            cache_key = hashlib.sha1(
+                json.dumps(cache_payload, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:12]
+
+            source_base = os.path.splitext(os.path.basename(source_abs))[0]
+            auto_zarr_path = os.path.join(
+                auto_root, f"{source_base}_cellpose_{cache_key}.zarr"
+            )
+
+            if not os.path.exists(auto_zarr_path):
+                axes = str(dim_order).upper() if dim_order else ""
+                if len(axes) != image.ndim:
+                    axes = "TCZYX"
+
+                print(
+                    "Distributed segmentation requested on non-zarr input; "
+                    "auto-converting source to zarr..."
+                )
+                save_as_zarr(
+                    data=np.asarray(image),
+                    filepath=auto_zarr_path,
+                    axes=axes,
+                )
+            else:
+                print(
+                    "Distributed segmentation: reusing cached auto-converted "
+                    f"zarr: {auto_zarr_path}"
+                )
+
+            _source_filepath = auto_zarr_path
+            use_zarr_direct = True
+            print(
+                "Distributed segmentation: using auto-converted zarr source: "
+                f"{_source_filepath}"
+            )
+        except Exception as exc:
+            print(
+                "Warning: auto zarr conversion for distributed segmentation "
+                f"failed ({exc}). Falling back to standard Cellpose evaluation."
+            )
 
     def _resolve_timepoint_indices(total_timepoints: int):
         """Resolve selected timepoints from start/end/step controls."""
@@ -1369,7 +1437,7 @@ def cellpose_segmentation(
     else:
         if use_distributed_segmentation:
             print(
-                "Distributed segmentation was requested, but input is not a .zarr path. "
+                "Distributed segmentation was requested but no zarr source is available. "
                 "Falling back to standard Cellpose evaluation."
             )
         # Prepare arguments for the Cellpose function (legacy numpy array mode)
