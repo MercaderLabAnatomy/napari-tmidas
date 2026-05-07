@@ -1,3 +1,4 @@
+
 # Cellpose-SAM Segmentation
 
 ## Overview
@@ -12,6 +13,8 @@ Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** with improve
 - **Automatic Environment Management**: Creates a dedicated conda environment if Cellpose is not installed
 - **Flexible Dimension Orders**: Supports various dimension arrangements (YX, ZYX, TZYX)
 - **GPU Acceleration**: Automatically uses GPU if available
+- **Distributed Segmentation for Large Volumes**: Optional blockwise Cellpose processing for large 3D datasets
+- **Automatic Non-Zarr Conversion**: When distributed mode is enabled, non-zarr microscopy inputs are auto-converted to temporary zarr and processed in distributed mode
 
 ## Installation
 
@@ -81,6 +84,17 @@ Block size for tile-based normalization (Cellpose 4 feature).
 Number of images/slices processed simultaneously.
 - Increase for faster processing (requires more memory)
 - Decrease if you encounter out-of-memory errors
+
+### `use_distributed_segmentation` (bool, default: False)
+Enable Cellpose distributed blockwise segmentation for large 3D volumes.
+- Recommended for large ZYX/TCZYX datasets to reduce peak RAM usage
+- If the input is already zarr, the zarr is processed directly
+- If the input is not zarr (for example TIFF), napari-tmidas automatically creates a temporary zarr and runs distributed mode on that zarr
+
+### `distributed_blocksize` (int, default: 256)
+Block edge length (voxels) used by distributed Cellpose.
+- Larger blocks can be faster but use more memory
+- Smaller blocks are safer on RAM-constrained machines
 
 ## Usage
 
@@ -155,6 +169,8 @@ The function produces label images where:
 
 ### 4. **Memory Management**
    - Large 3D or 4D datasets may require reducing `batch_size`
+   - For very large 3D data, enable `use_distributed_segmentation`
+   - Distributed mode now auto-converts non-zarr input to temporary zarr
    - Monitor memory usage during processing
    - Consider splitting very large time-lapse data
 
@@ -222,3 +238,4 @@ Cellpose is developed by the Stringer and Pachitariu labs:
 - [Basic Processing Functions](basic_processing.md) - Label manipulation tools
 - [Intensity-Based Label Filtering](intensity_label_filter.md) - Filter segmentation results by intensity
 - [Regionprops Analysis](regionprops_analysis.md) - Extract properties from segmented objects
+

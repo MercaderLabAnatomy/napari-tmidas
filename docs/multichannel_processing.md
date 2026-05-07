@@ -1,3 +1,4 @@
+
 # Multichannel Processing with Channel Selection
 
 ## Overview
@@ -121,6 +122,11 @@ The system detects channels when:
 - First dimension is 2-10 in size (CYX, CZYX patterns)
 - Second dimension is 2-10 in size (TCYX, TCZYX patterns)
 - Dimension is clearly smaller than spatial dimensions (Y, X)
+- For time-series layouts like TCYX/TCZYX, axis 1 is preferred as channel axis (axis 0 is treated as time)
+
+### Recent Behavior Update
+- TCYX and TCZYX channel detection now consistently treats axis 1 as channels when axis 0 represents time
+- This avoids incorrect interpretation of timepoints as channels in multichannel time-series data
 
 ## Benefits
 
@@ -141,3 +147,4 @@ Potential improvements:
 - Channel merging after processing
 - Preview of channel selection before batch processing
 - Custom channel naming/labeling
+
