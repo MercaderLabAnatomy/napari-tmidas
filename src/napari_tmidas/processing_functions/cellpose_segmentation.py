@@ -699,12 +699,19 @@ def cellpose_segmentation(
                 f"shape={convpaint_mask.shape}, foreground_fraction={foreground_fraction:.4f}"
             )
 
-    # Handle TZYX data by processing each timepoint separately
-    if "T" in dim_order and image.ndim == 4 and not use_zarr_direct:
-        print(
-            f"Detected TZYX data with shape {image.shape}. Processing each timepoint separately..."
-        )
+    # Handle any time-series data by processing each timepoint separately.
+    # This includes TYX (2D time-lapse) and TZYX (3D time-lapse).
+    if "T" in dim_order and not use_zarr_direct:
         t_axis = dim_order.index("T")
+        if t_axis >= image.ndim:
+            raise ValueError(
+                "dim_order contains 'T' but image does not have a matching T axis "
+                f"(dim_order={dim_order}, shape={image.shape})."
+            )
+
+        print(
+            f"Detected time-series data with shape {image.shape}. Processing each timepoint separately..."
+        )
         num_timepoints = image.shape[t_axis]
         selected_timepoints = _resolve_timepoint_indices(int(num_timepoints))
 
@@ -1369,7 +1376,7 @@ def cellpose_segmentation(
         timepoint_cache_root = None
         use_timepoint_cache = False
 
-        if "T" in dim_order and image.ndim == 4:
+        if "T" in dim_order:
             t_axis = dim_order.index("T")
             if t_axis >= image.ndim:
                 t_axis = 0
