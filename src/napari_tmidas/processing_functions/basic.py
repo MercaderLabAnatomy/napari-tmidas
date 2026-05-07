@@ -3,6 +3,7 @@
 Basic image processing functions
 """
 import concurrent.futures
+import json
 import inspect
 import os
 import shutil
@@ -53,6 +54,71 @@ def get_timepoint_count(image_path):
     int or None
         Number of timepoints, or None if unable to determine
     """
+    image_path = str(image_path)
+
+    # Handle OME-Zarr (directory stores) without requiring tifffile.
+    if image_path.lower().endswith(".zarr") or (
+        os.path.isdir(image_path)
+        and os.path.exists(os.path.join(image_path, ".zattrs"))
+    ):
+        try:
+            import zarr
+
+            root = zarr.open(image_path, mode="r")
+            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
+
+            zattrs_path = os.path.join(image_path, ".zattrs")
+            if os.path.exists(zattrs_path):
+                with open(zattrs_path) as f:
+                    attrs = json.load(f)
+
+            multiscales = attrs.get("multiscales", [])
+            if multiscales:
+                ms = multiscales[0]
+                axes = ms.get("axes", [])
+                datasets = ms.get("datasets", [])
+
+                t_axis = None
+                for i, axis in enumerate(axes):
+                    if isinstance(axis, dict):
+                        axis_name = axis.get("name", "").lower()
+                        axis_type = axis.get("type", "").lower()
+                    else:
+                        axis_name = str(axis).lower()
+                        axis_type = ""
+
+                    if axis_name in {"t", "time"} or axis_type == "time":
+                        t_axis = i
+                        break
+
+                path = datasets[0].get("path", "0") if datasets else "0"
+                arr = root[path]
+
+                if t_axis is not None and t_axis < len(arr.shape):
+                    return int(arr.shape[t_axis])
+
+                # OME metadata present but no time axis declared.
+                return 1
+
+            # Non-OME zarr fallback: inspect top-level array shape.
+            arr = None
+            if hasattr(root, "shape"):
+                arr = root
+            elif hasattr(root, "arrays"):
+                arrays_list = list(root.arrays())
+                if arrays_list:
+                    arr = arrays_list[0][1]
+
+            if arr is not None and len(arr.shape) >= 1:
+                # Conservative fallback for unknown axis semantics.
+                return int(arr.shape[0]) if arr.shape[0] > 1 else 1
+
+            return 1
+
+        except (ValueError, TypeError, OSError, KeyError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not read zarr metadata for {image_path}: {e}")
+            return None
+
     if not _HAS_TIFFFILE:
         print("Warning: tifffile not available, cannot determine timepoints")
         return 1
@@ -136,11 +202,16 @@ def sort_files_by_timepoints(
         timepoint_folder = output_folder / f"T{num_timepoints}"
         timepoint_folder.mkdir(parents=True, exist_ok=True)
 
-        # Copy the file
+        # Copy the file/folder
         dest_path = timepoint_folder / Path(img_path).name
 
         try:
-            shutil.copy2(img_path, dest_path)
+            if os.path.isdir(img_path):
+                if dest_path.exists():
+                    shutil.rmtree(dest_path)
+                shutil.copytree(img_path, dest_path)
+            else:
+                shutil.copy2(img_path, dest_path)
             print(f"COPIED to T{num_timepoints}/")
 
             # Add to map
@@ -578,7 +649,7 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Gamma Correction",
     suffix="_gamma",
-    description="Apply gamma correction to the image (>1: enhance bright regions, <1: enhance dark regions)",
+    description="Apply gamma correction to the image (>1: enhance bright regions, <1: enhance dark regions). For multichannel images, select which channel(s) to process.",
     parameters={
         "gamma": {
             "type": float,
@@ -587,9 +658,15 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
             "max": 10.0,
             "description": "Gamma correction factor",
         },
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
     },
 )
-def gamma_correction(image: np.ndarray, gamma: float = 1.0) -> np.ndarray:
+def gamma_correction(image: np.ndarray, gamma: float = 1.0, channel: str = "all") -> np.ndarray:
     """
     Apply gamma correction to the image
     """
@@ -613,10 +690,17 @@ def gamma_correction(image: np.ndarray, gamma: float = 1.0) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Max Z Projection",
     suffix="_max_z",
-    description="Maximum intensity projection along the z-axis",
-    parameters={},
+    description="Maximum intensity projection along the z-axis. For multichannel images, select which channel(s) to process.",
+    parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
+    },
 )
-def max_z_projection(image: np.ndarray) -> np.ndarray:
+def max_z_projection(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Maximum intensity projection along the z-axis
     """
@@ -640,10 +724,17 @@ def max_z_projection(image: np.ndarray) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Max Z Projection (TZYX)",
     suffix="_maxZ_tzyx",
-    description="Maximum intensity projection along the Z-axis for TZYX data",
-    parameters={},  # No parameters needed - fully automatic
+    description="Maximum intensity projection along the Z-axis for TZYX data. For multichannel images, select which channel(s) to process.",
+    parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
+    },
 )
-def max_z_projection_tzyx(image: np.ndarray) -> np.ndarray:
+def max_z_projection_tzyx(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Memory-efficient maximum intensity projection along the Z-axis for TZYX data.
 
@@ -1421,6 +1512,7 @@ def split_tzyx_stack(
     preserve_scale: bool = True,
     use_compression: bool = True,
     num_workers: int = 4,
+    _source_filepath: Optional[str] = None,
 ) -> np.ndarray:
     """
     Split a 4D TZYX stack into separate 3D ZYX TIF files using parallel processing.
@@ -1448,16 +1540,89 @@ def split_tzyx_stack(
     numpy.ndarray
         The original image (unchanged)
     """
-    # Validate input dimensions
-    if image.ndim != 4:
+    # Normalize common time-series layouts (e.g. TZYX, TCZYX) so the
+    # time axis is always first. This enables zarr inputs with channel axes
+    # to still split into one output per timepoint.
+    if image.ndim < 4:
         print(
-            f"Warning: Expected 4D TZYX input, got {image.ndim}D. Returning original image."
+            f"Warning: Expected at least 4D input with time axis, got {image.ndim}D. Returning original image."
         )
         return image
 
+    normalized_image = image
+    is_dask_input = _HAS_DASK and isinstance(image, da.Array)
+    t_axis = None
+
+    # Prefer OME-Zarr metadata when available.
+    if _source_filepath and (
+        _source_filepath.lower().endswith(".zarr")
+        or (
+            os.path.isdir(_source_filepath)
+            and os.path.exists(os.path.join(_source_filepath, ".zattrs"))
+        )
+    ):
+        try:
+            zattrs_path = os.path.join(_source_filepath, ".zattrs")
+            attrs = {}
+
+            if os.path.exists(zattrs_path):
+                with open(zattrs_path) as f:
+                    attrs = json.load(f)
+            else:
+                import zarr
+
+                root = zarr.open(_source_filepath, mode="r")
+                attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
+
+            multiscales = attrs.get("multiscales", [])
+            if multiscales:
+                axes = multiscales[0].get("axes", [])
+                for i, axis in enumerate(axes):
+                    if isinstance(axis, dict):
+                        axis_name = axis.get("name", "").lower()
+                        axis_type = axis.get("type", "").lower()
+                    else:
+                        axis_name = str(axis).lower()
+                        axis_type = ""
+
+                    if axis_name in {"t", "time"} or axis_type == "time":
+                        t_axis = i
+                        break
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not parse zarr axes metadata: {e}")
+
+    # Fallback heuristics for non-zarr or missing metadata.
+    if t_axis is None:
+        if image.ndim == 4:
+            t_axis = 0
+        elif image.ndim >= 5:
+            # Most supported stacks are T-first (e.g., TCZYX / TZYXC).
+            t_axis = 0
+
+    if t_axis is None or t_axis >= image.ndim:
+        print("Warning: Could not identify time axis. Returning original image.")
+        return image
+
+    if t_axis != 0:
+        if is_dask_input:
+            normalized_image = da.moveaxis(image, t_axis, 0)
+        else:
+            normalized_image = np.moveaxis(image, t_axis, 0)
+
+    # If a singleton channel axis remains (common TCZYX), squeeze it so
+    # each written timepoint is a ZYX volume rather than 1xZYX.
+    if normalized_image.ndim == 5 and normalized_image.shape[1] == 1:
+        if is_dask_input:
+            normalized_image = da.squeeze(normalized_image, axis=1)
+        else:
+            normalized_image = np.squeeze(normalized_image, axis=1)
+
     # Use dask array to optimize memory usage when processing slices
-    chunks = (1,) + image.shape[1:]  # Each timepoint is a chunk
-    dask_image = da.from_array(image, chunks=chunks)
+    chunks = (1,) + normalized_image.shape[1:]  # Each timepoint is a chunk
+    if is_dask_input:
+        dask_image = normalized_image.rechunk(chunks)
+    else:
+        dask_image = da.from_array(normalized_image, chunks=chunks)
 
     # Store processing parameters in thread-local storage to avoid race conditions
     # when multiple files are processed concurrently by ProcessingWorker's ThreadPoolExecutor.
@@ -1469,20 +1634,28 @@ def split_tzyx_stack(
     tl.preserve_scale = preserve_scale
     tl.use_compression = use_compression
     tl.num_workers = min(
-        num_workers, image.shape[0]
+        num_workers, normalized_image.shape[0]
     )  # Limit workers to number of timepoints
     tl.requires_post_processing = True
     tl.produces_multiple_files = True
     tl.skip_original_output = True
 
     # Get dimensions for informational purposes
-    t_size, z_size, y_size, x_size = image.shape
-    print(f"TZYX stack dimensions: {image.shape}, dtype: {image.dtype}")
+    t_size = int(normalized_image.shape[0])
+    print(
+        f"Normalized time-series dimensions: {normalized_image.shape}, dtype: {normalized_image.dtype}"
+    )
     print(f"Will generate {t_size} separate ZYX files")
     print(f"Parallelization: {tl.num_workers} workers")
 
     # The actual file saving will happen in the post-processing step
     return image
+
+
+# This function manages its own internal worker pool during post-processing.
+# Running multiple files in parallel at the outer batch level can cause
+# nested oversubscription and memory spikes.
+split_tzyx_stack.thread_safe = False
 
 
 # Monkey patch ProcessingWorker.process_file to handle parallel TZYX splitting
@@ -1501,7 +1674,7 @@ try:
     # Define function to save a single timepoint
     def save_timepoint(
         t: int,
-        data: np.ndarray,
+        dask_image,
         output_filepath: str,
         resolution=None,
         use_compression=True,
@@ -1513,8 +1686,8 @@ try:
         -----------
         t : int
             Timepoint index for logging
-        data : np.ndarray
-            3D ZYX data to save
+        dask_image : array-like
+            4D TZYX lazy array; one 3D ZYX slab will be computed for this timepoint
         output_filepath : str
             Path to save the file
         resolution : tuple, optional
@@ -1530,6 +1703,9 @@ try:
         try:
             # Create output directory if it doesn't exist
             os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+
+            # Compute exactly one timepoint in this worker thread.
+            data = dask_image[t].compute()
 
             # Determine the appropriate compression parameter
             # Note: tifffile uses 'compression', not 'compress'
@@ -1636,14 +1812,12 @@ try:
                     # Submit tasks for each timepoint
                     future_to_timepoint = {}
                     for t in range(t_size):
-                        # Extract this timepoint's data using Dask
-                        timepoint_array = dask_image[t].compute()
-
-                        # Submit the task to save this timepoint
+                        # Submit one lazy timepoint task; each worker computes
+                        # only its own slab before writing.
                         future = executor.submit(
                             save_timepoint,
                             t,
-                            timepoint_array,
+                            dask_image,
                             output_filepaths[t],
                             resolution,
                             use_compression,

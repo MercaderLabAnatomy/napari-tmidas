@@ -3,8 +3,10 @@ import tempfile
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
+import tifffile
 
-from napari_tmidas._processing_worker import ProcessingWorker
+from napari_tmidas._processing_worker import ProcessingWorker, save_image_file
 
 
 class TestProcessingWorker:
@@ -140,3 +142,18 @@ class TestProcessingWorker:
 
         assert result is not None
         assert result["processed_file"] is None
+
+    def test_save_image_file_dask_streaming(self):
+        """Test that Dask arrays can be saved to TIFF without eager full-array conversion."""
+        da = pytest.importorskip("dask.array")
+
+        arr = da.random.random((4, 32, 32), chunks=(1, 32, 32)).astype(
+            np.float32
+        )
+        out_path = f"{self.temp_dir}/dask_stream.tif"
+
+        save_image_file(arr, out_path, np.float32)
+
+        saved = tifffile.imread(out_path)
+        assert saved.shape == (4, 32, 32)
+        assert saved.dtype == np.float32

@@ -336,6 +336,78 @@ class TestTimepointSorting:
         assert result_no_sort.shape == result_with_sort.shape
         assert result_no_sort.shape == (3, 100, 100)
 
+    def test_get_timepoint_count_ome_zarr(self):
+        """Test timepoint count detection from OME-Zarr metadata."""
+        pytest.importorskip("zarr")
+        import zarr
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "timelapse.zarr"
+            root = zarr.open_group(str(zarr_path), mode="w")
+            root.create_dataset(
+                "0",
+                shape=(7, 3, 16, 16),
+                chunks=(1, 3, 16, 16),
+                dtype="float32",
+            )
+            root.attrs["multiscales"] = [
+                {
+                    "version": "0.4",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [{"path": "0"}],
+                }
+            ]
+
+            detected_t = get_timepoint_count(str(zarr_path))
+            assert detected_t == 7
+
+    def test_sort_files_by_timepoints_with_zarr(self):
+        """Test sorting zarr stores into timepoint subfolders."""
+        pytest.importorskip("zarr")
+        import zarr
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            zarr_path = input_dir / "img_t5.zarr"
+            root = zarr.open_group(str(zarr_path), mode="w")
+            root.create_dataset(
+                "0",
+                shape=(5, 2, 8, 8),
+                chunks=(1, 2, 8, 8),
+                dtype="uint16",
+            )
+            root.attrs["multiscales"] = [
+                {
+                    "version": "0.4",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [{"path": "0"}],
+                }
+            ]
+
+            timepoint_map = sort_files_by_timepoints(
+                [str(zarr_path)], str(output_dir)
+            )
+
+            assert 5 in timepoint_map
+            assert len(timepoint_map[5]) == 1
+            copied_store = output_dir / "T5" / "img_t5.zarr"
+            assert copied_store.exists()
+            assert copied_store.is_dir()
+
 
 if __name__ == "__main__":
     # Run tests with pytest

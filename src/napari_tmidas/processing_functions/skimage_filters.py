@@ -185,7 +185,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="CLAHE (Adaptive Histogram Equalization)",
         suffix="_clahe",
-        description="Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to enhance local contrast, especially useful for dark images with weak bright features",
+        description="Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to enhance local contrast, especially useful for dark images with weak bright features. For multichannel images, select which channel(s) to process.",
         parameters={
             "clip_limit": {
                 "type": float,
@@ -202,6 +202,12 @@ if SKIMAGE_AVAILABLE:
                 "default": 4,
                 "description": "Maximum number of parallel workers (default: 4). Lower values use less memory but are slower. Range: 1-16",
             },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def equalize_histogram(
@@ -210,6 +216,7 @@ if SKIMAGE_AVAILABLE:
         kernel_size: int = 0,
         max_workers: int = max(1, (os.cpu_count() or 4) // 4),
         _source_filepath: str = None,
+        channel: str = "all",
     ) -> np.ndarray:
         """
         Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to enhance local contrast.
@@ -369,10 +376,18 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (semantic)",
         suffix="_otsu_semantic",
-        description="Threshold image using Otsu's method to obtain a binary image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice.",
+        description="Threshold image using Otsu's method to obtain a binary image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice. For multichannel images, select which channel(s) to process.",
+        parameters={
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
+        },
     )
     def otsu_thresholding(
-        image: np.ndarray, dimension_order: str = "Auto"
+        image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
         """
         Threshold image using Otsu's method.
@@ -527,7 +542,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Manual Thresholding (8-bit)",
         suffix="_thresh",
-        description="Threshold image using a fixed threshold to obtain a binary image",
+        description="Threshold image using a fixed threshold to obtain a binary image. For multichannel images, select which channel(s) to process.",
         parameters={
             "threshold": {
                 "type": int,
@@ -536,10 +551,16 @@ if SKIMAGE_AVAILABLE:
                 "max": 255,
                 "description": "Threshold value",
             },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def simple_thresholding(
-        image: np.ndarray, threshold: int = 128
+        image: np.ndarray, threshold: int = 128, channel: str = "all"
     ) -> np.ndarray:
         """
         Threshold image using a fixed threshold
@@ -618,9 +639,17 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Invert Image",
         suffix="_inverted",
-        description="Invert pixel values in the image using scikit-image's invert function",
+        description="Invert pixel values in the image using scikit-image's invert function. For multichannel images, select which channel(s) to process.",
+        parameters={
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
+        },
     )
-    def invert_image(image: np.ndarray) -> np.ndarray:
+    def invert_image(image: np.ndarray, channel: str = "all") -> np.ndarray:
         """
         Invert the image pixel values.
 
@@ -752,9 +781,17 @@ def binary_to_labels(image: np.ndarray) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Convert to 8-bit (uint8)",
     suffix="_uint8",
-    description="Convert image data to 8-bit (uint8) format with proper scaling",
+    description="Convert image data to 8-bit (uint8) format with proper scaling. For multichannel images, select which channel(s) to process.",
+    parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
+    },
 )
-def convert_to_uint8(image: np.ndarray) -> np.ndarray:
+def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Convert image data to 8-bit (uint8) format with proper scaling.
 
@@ -782,7 +819,7 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
 @BatchProcessingRegistry.register(
     name="Resize Image to Fixed YX (skimage)",
     suffix="_yx_resized",
-    description="Resize intensity images to a fixed YX size for faster downstream processing while preserving T/Z axes",
+    description="Resize intensity images to a fixed YX size for faster downstream processing while preserving T/Z axes. For multichannel images, select which channel(s) to process.",
     parameters={
         "target_y": {
             "type": int,
@@ -804,6 +841,12 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
             "options": ["auto", "YX", "ZYX", "TYX", "TZYX"],
             "description": "Input dimension order. 'auto' maps ndim 2->YX, 3->ZYX, 4->TZYX.",
         },
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
     },
 )
 def resize_image_fixed_yx(
@@ -811,6 +854,7 @@ def resize_image_fixed_yx(
     target_y: int = 1024,
     target_x: int = 1024,
     dim_order: str = "auto",
+    channel: str = "all",
 ) -> np.ndarray:
     """
     Resize image YX plane(s) to fixed dimensions using skimage.
@@ -828,25 +872,27 @@ def resize_image_fixed_yx(
         )
 
     if dim_order == "auto":
-        auto_map = {2: "YX", 3: "ZYX", 4: "TZYX"}
+        auto_map = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
         dim_order = auto_map.get(image.ndim)
         if dim_order is None:
             raise ValueError(
                 f"Unsupported ndim for auto dim_order: {image.ndim}. "
-                "Use explicit dim_order (YX, ZYX, TYX, or TZYX)."
+                "Use explicit dim_order (YX, ZYX, TYX, TZYX, or TCZYX)."
             )
 
     dim_order = str(dim_order).upper()
-    valid_orders = {"YX", "ZYX", "TYX", "TZYX"}
+    valid_orders = {"YX", "ZYX", "TYX", "TZYX", "TCZYX"}
     if dim_order not in valid_orders:
         raise ValueError(
             f"Unsupported dim_order '{dim_order}'. "
-            "Use one of: YX, ZYX, TYX, TZYX, auto"
+            "Use one of: YX, ZYX, TYX, TZYX, TCZYX, auto"
         )
 
     if (dim_order == "YX" and image.ndim != 2) or (
         dim_order in {"ZYX", "TYX"} and image.ndim != 3
-    ) or (dim_order == "TZYX" and image.ndim != 4):
+    ) or (dim_order == "TZYX" and image.ndim != 4) or (
+        dim_order == "TCZYX" and image.ndim != 5
+    ):
         raise ValueError(
             f"dim_order '{dim_order}' is incompatible with image.ndim={image.ndim}"
         )
@@ -866,18 +912,487 @@ def resize_image_fixed_yx(
         )
         return resized.astype(slice_2d.dtype, copy=False)
 
+    def _resize_block(block):
+        """Resize a numpy block — last 2 dims are Y, X."""
+        if block.ndim == 2:
+            return _resize_2d(block)
+        lead = block.shape[:-2]
+        flat = block.reshape(-1, block.shape[-2], block.shape[-1])
+        out = np.empty((flat.shape[0], target_y, target_x), dtype=block.dtype)
+        for i in range(flat.shape[0]):
+            out[i] = _resize_2d(flat[i])
+        return out.reshape(*lead, target_y, target_x)
+
+    # --- Dask-native path: process lazily, one chunk at a time ---
+    try:
+        import dask.array as da
+        if isinstance(image, da.Array):
+            # Rechunk so Y and X axes are always whole planes inside each block.
+            # Leading dims (T, C, Z, …) keep their original chunk sizes so
+            # we never materialize more than one full-resolution YX plane per worker.
+            img_rc = image.rechunk(
+                image.chunks[:-2] + (image.shape[-2], image.shape[-1])
+            )
+            new_chunks = img_rc.chunks[:-2] + ((target_y,), (target_x,))
+            print(
+                f"Resize (dask): {image.shape} → "
+                f"{image.shape[:-2] + (target_y, target_x)}, "
+                f"processing {img_rc.npartitions} blocks lazily"
+            )
+            return da.map_blocks(
+                _resize_block,
+                img_rc,
+                chunks=new_chunks,
+                dtype=image.dtype,
+            )
+    except ImportError:
+        pass
+
+    # --- NumPy fallback path ---
     if dim_order == "YX":
         return _resize_2d(image)
 
-    lead_shape = image.shape[:-2]
-    yx_shape = image.shape[-2:]
-    reshaped = image.reshape(-1, yx_shape[0], yx_shape[1])
+    return _resize_block(image)
 
-    output = np.empty((reshaped.shape[0], target_y, target_x), dtype=image.dtype)
-    for i in range(reshaped.shape[0]):
-        output[i] = _resize_2d(reshaped[i])
 
-    return output.reshape(*lead_shape, target_y, target_x)
+# ============================================================================
+# OME-Zarr native resize (writes output zarr directly)
+# ============================================================================
+
+if SKIMAGE_AVAILABLE:
+
+    @BatchProcessingRegistry.register(
+        name="Resize Zarr to Fixed YX (OME-Zarr native)",
+        suffix="_yx_resized",
+        description=(
+            "Resize a zarr file to fixed YX dimensions using OME-Zarr native I/O. "
+            "Reads the source zarr lazily via dask, resizes each YX plane with "
+            "skimage (chunk-by-chunk), and writes a new OME-Zarr with preserved "
+            "axes metadata and a 4-level multiscale pyramid. "
+            "Falls back to the skimage path for TIFF inputs."
+        ),
+        parameters={
+            "target_y": {
+                "type": int,
+                "default": 1024,
+                "min": 1,
+                "max": 32768,
+                "description": "Target size for Y dimension.",
+            },
+            "target_x": {
+                "type": int,
+                "default": 1024,
+                "min": 1,
+                "max": 32768,
+                "description": "Target size for X dimension.",
+            },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process.",
+            },
+        },
+    )
+    def resize_zarr_native(
+        image: np.ndarray,
+        target_y: int = 1024,
+        target_x: int = 1024,
+        channel: str = "all",
+        _source_filepath: str = None,
+        _output_folder: str = None,
+        _output_suffix: str = "_yx_resized",
+        _output_format: str = "zarr",
+    ):
+        """
+        Resize a zarr (or TIFF) to fixed YX dimensions using OME-Zarr native I/O.
+
+        For zarr inputs the full pipeline is:
+          1. open source zarr via ``zarr`` + ``dask.array`` — no data loaded yet
+          2. build a lazy resize graph with ``ome_zarr.dask_utils.resize``
+          3. write the result with ``ome_zarr.writer.write_image``, which computes
+             the dask graph in chunks and writes a proper OME-Zarr file with axes
+             metadata and a 4-level multiscale pyramid
+        For TIFF inputs the function falls back to the skimage resize path and
+        returns a numpy array (the normal saving pipeline handles writing).
+        """
+        source = _source_filepath or ""
+        is_zarr = source.lower().endswith(".zarr") or (
+            os.path.isdir(source)
+            and os.path.exists(os.path.join(source, ".zattrs"))
+        )
+
+        # ── ZARR PATH ────────────────────────────────────────────────────────
+        if is_zarr:
+            try:
+                import zarr as zarr_lib
+                import dask.array as da
+                from ome_zarr.dask_utils import resize as dask_resize
+                from ome_zarr.writer import write_image
+                from ome_zarr.scale import Scaler
+                import json
+
+                # ── Read source metadata ──────────────────────────────────
+                zroot = zarr_lib.open(source, mode="r")
+                attrs = {}
+                zattrs_path = os.path.join(source, ".zattrs")
+                if os.path.exists(zattrs_path):
+                    with open(zattrs_path) as f:
+                        attrs = json.load(f)
+
+                multiscales = attrs.get("multiscales", [])
+                ms = multiscales[0] if multiscales else {}
+                axes = ms.get("axes", None)
+
+                # Infer axes list from metadata or fallback by ndim
+                def _axes_for_ndim(n):
+                    defaults = {2: "yx", 3: "zyx", 4: "tzyx", 5: "tczyx"}
+                    return list(defaults.get(n, "tczyx"[-n:]))
+
+                # ── Open full-resolution array ────────────────────────────
+                zarr_arrays = list(zroot.array_keys())
+                if not zarr_arrays:
+                    # Group with multiscale datasets
+                    datasets = ms.get("datasets", [{"path": "0"}])
+                    arr_path = datasets[0].get("path", "0")
+                else:
+                    arr_path = zarr_arrays[0]
+
+                src_arr = zroot[arr_path]
+                src_da = da.from_zarr(src_arr)
+                # Save original shape and source level-0 scale for
+                # computing correct coordinate transforms after resize.
+                src_shape_full = src_da.shape
+                src_scale_l0 = None
+                src_datasets = ms.get("datasets", [])
+                if src_datasets:
+                    src_ctf = src_datasets[0].get(
+                        "coordinateTransformations", [{}]
+                    )
+                    if src_ctf and src_ctf[0].get("type") == "scale":
+                        src_scale_l0 = src_ctf[0]["scale"]
+
+                # ── Apply channel selection ───────────────────────────────
+                # Determine channel axis from OME axes metadata
+                ch_axis = None
+                if axes:
+                    for i, ax in enumerate(axes):
+                        name = (ax.get("name", "") if isinstance(ax, dict)
+                                else str(ax)).lower()
+                        atype = (ax.get("type", "") if isinstance(ax, dict)
+                                 else "").lower()
+                        if name in ("c", "channel", "ch") or atype == "channel":
+                            ch_axis = i
+                            break
+
+                if (
+                    channel != "all"
+                    and ch_axis is not None
+                ):
+                    ch_idx = int(channel)
+                    print(
+                        f"Extracting channel {ch_idx} (axis {ch_axis}) "
+                        f"from shape {src_da.shape}"
+                    )
+                    src_da = src_da[
+                        tuple(
+                            ch_idx if i == ch_axis else slice(None)
+                            for i in range(src_da.ndim)
+                        )
+                    ]
+                    # Remove channel from axes list
+                    if axes and ch_axis < len(axes):
+                        axes = [a for i, a in enumerate(axes) if i != ch_axis]
+
+                # ── Build target shape ────────────────────────────────────
+                out_shape = src_da.shape[:-2] + (target_y, target_x)
+                print(
+                    f"Resize (OME-Zarr native): {src_da.shape} → {out_shape}, "
+                    f"dtype={src_da.dtype}"
+                )
+
+                resized_da = dask_resize(
+                    src_da.astype(float),
+                    out_shape,
+                    order=1,
+                    mode="reflect",
+                    anti_aliasing=(
+                        target_y < src_da.shape[-2]
+                        or target_x < src_da.shape[-1]
+                    ),
+                ).astype(src_da.dtype)
+
+                # ── Build output path ─────────────────────────────────────
+                basename = os.path.basename(source)
+                name_no_ext = os.path.splitext(basename)[0]
+                # Strip trailing .zarr from name if present
+                if name_no_ext.endswith(".zarr"):
+                    name_no_ext = name_no_ext[:-5]
+                suffix = _output_suffix or "_yx_resized"
+                out_dir = _output_folder or os.path.dirname(source)
+                out_path = os.path.join(out_dir, f"{name_no_ext}{suffix}.zarr")
+
+                print(f"Writing OME-Zarr → {out_path}")
+
+                # ── Write OME-Zarr ────────────────────────────────────────
+                # Use FSStore with '/' key separator so napari-ome-zarr can
+                # read chunk files using its default FSStore path convention.
+                from zarr.storage import FSStore as _FSStore
+                out_store = _FSStore(
+                    out_path,
+                    key_separator="/",
+                    mode="w",
+                    auto_mkdir=True,
+                )
+                out_group = zarr_lib.open_group(out_store, mode="w")
+
+                axes_for_writer = axes if axes else _axes_for_ndim(resized_da.ndim)
+
+                # Preserve the source pyramid depth: if the source has N
+                # levels, write N levels; if it has only 1, write 1.
+                src_n_levels = max(len(src_datasets), 1)
+                write_image(
+                    image=resized_da,
+                    group=out_group,
+                    scaler=Scaler(
+                        max_layer=src_n_levels - 1,
+                        method="nearest",
+                        downscale=2,
+                    ),
+                    axes=axes_for_writer,
+                    compute=True,
+                )
+
+                # ── Fix coordinate transforms in output .zattrs ──────────
+                try:
+                    out_zattrs_path = os.path.join(out_path, ".zattrs")
+                    out_attrs_cur = json.load(open(out_zattrs_path))
+                    out_ms = out_attrs_cur.get("multiscales", [{}])[0]
+                    out_datasets = out_ms.get("datasets", [])
+
+                    if src_scale_l0 and out_datasets:
+                        # Find Y and X axis indices in the SOURCE axes.
+                        orig_axes = attrs.get("multiscales", [{}])[0].get(
+                            "axes", None
+                        )
+                        ndim_src = len(src_scale_l0)
+                        y_idx = ndim_src - 2
+                        x_idx = ndim_src - 1
+                        if orig_axes:
+                            for _i, _ax in enumerate(orig_axes):
+                                _n = (
+                                    _ax.get("name", "")
+                                    if isinstance(_ax, dict)
+                                    else str(_ax)
+                                ).lower()
+                                if _n == "y":
+                                    y_idx = _i
+                                elif _n == "x":
+                                    x_idx = _i
+
+                        # Source pixel size in Y and X.
+                        src_y_scale = src_scale_l0[y_idx]
+                        src_x_scale = src_scale_l0[x_idx]
+                        # Physical pixel size in resized image.
+                        new_y_scale = src_y_scale * (
+                            src_shape_full[y_idx] / target_y
+                        )
+                        new_x_scale = src_x_scale * (
+                            src_shape_full[x_idx] / target_x
+                        )
+
+                        # Build level-0 scale based on source, swapping
+                        # Y and X.  Also remove C entry if channel was
+                        # extracted.
+                        lvl0_scale = list(src_scale_l0)
+                        lvl0_scale[y_idx] = new_y_scale
+                        lvl0_scale[x_idx] = new_x_scale
+                        if channel != "all" and ch_axis is not None:
+                            lvl0_scale = [
+                                v
+                                for i, v in enumerate(lvl0_scale)
+                                if i != ch_axis
+                            ]
+                            # Re-resolve Y/X indices after C removal.
+                            y_idx_out = y_idx - (1 if ch_axis < y_idx else 0)
+                            x_idx_out = x_idx - (1 if ch_axis < x_idx else 0)
+                        else:
+                            y_idx_out = y_idx
+                            x_idx_out = x_idx
+
+                        for n, ds in enumerate(out_datasets):
+                            level_scale = list(lvl0_scale)
+                            level_scale[y_idx_out] = lvl0_scale[y_idx_out] * (
+                                2 ** n
+                            )
+                            level_scale[x_idx_out] = lvl0_scale[x_idx_out] * (
+                                2 ** n
+                            )
+                            ds["coordinateTransformations"] = [
+                                {"type": "scale", "scale": level_scale}
+                            ]
+
+                        json.dump(
+                            out_attrs_cur,
+                            open(out_zattrs_path, "w"),
+                            indent=2,
+                        )
+                        print(
+                            f"Updated coordinate transforms: "
+                            f"level 0 Y/X scale = {new_y_scale:.4f}"
+                        )
+                except Exception as _e:
+                    print(f"Warning: coord transform update failed: {_e}")
+
+                # ── Copy / build omero metadata for channel contrast ─────
+                try:
+                    # Sample level-0 output to get channel contrast limits.
+                    # Read a sparse set of (T, Z) planes so this stays fast.
+                    import zarr as _zarr_mod
+                    lv0_arr = _zarr_mod.open_array(
+                        os.path.join(out_path, "0"), mode="r"
+                    )
+                    out_ndim = lv0_arr.ndim  # 4 or 5
+                    n_channels = (
+                        lv0_arr.shape[ch_axis if ch_axis is not None else 1]
+                        if out_ndim == 5
+                        else 1
+                    )
+                    # Sparse T and Z indices for sampling
+                    T_out = lv0_arr.shape[0]
+                    Z_out = lv0_arr.shape[-3] if out_ndim == 5 else 1
+                    t_idxs = sorted(
+                        set(
+                            int(i)
+                            for i in np.linspace(0, T_out - 1, min(5, T_out))
+                        )
+                    )
+                    z_idxs = sorted(
+                        set(
+                            int(i)
+                            for i in np.linspace(0, Z_out - 1, min(15, Z_out))
+                        )
+                    )
+
+                    omero_channels = []
+                    # Determine channel axis in the OUTPUT array.
+                    out_ch_axis = ch_axis
+                    if channel != "all" and ch_axis is not None:
+                        out_ch_axis = None  # C dimension was removed
+
+                    src_omero = attrs.get("omero", {})
+                    src_ch_list = src_omero.get("channels", [])
+
+                    n_out_channels = (
+                        1
+                        if out_ch_axis is None
+                        else lv0_arr.shape[out_ch_axis]
+                    )
+                    for oc in range(n_out_channels):
+                        # Build slice for this channel
+                        samples = []
+                        for t in t_idxs:
+                            for z in z_idxs:
+                                if out_ch_axis is not None and out_ndim == 5:
+                                    sl = tuple(
+                                        t if i == 0
+                                        else oc if i == out_ch_axis
+                                        else z if i == out_ndim - 3
+                                        else slice(None)
+                                        for i in range(out_ndim)
+                                    )
+                                elif out_ndim == 5:
+                                    sl = (t, slice(None), z,
+                                          slice(None), slice(None))
+                                else:
+                                    sl = (t, z, slice(None), slice(None))
+                                samples.append(lv0_arr[sl].ravel())
+                        flat = np.concatenate(samples)
+                        lo = int(np.percentile(flat, 0.5))
+                        # Use the actual max from the sampled planes so that
+                        # sparse bright structures (fluorescence peaks) are not
+                        # clipped.  p99.5 is kept as the background-removal
+                        # lower bound only.
+                        mx = int(flat.max())
+                        mn = int(flat.min())
+                        hi = mx  # display max = actual sample max
+                        # Guard: if data has extreme outlier hot-pixels
+                        # (single pixels many times brighter than p99),
+                        # cap at 10× p99 to avoid a pitch-dark display.
+                        p99 = int(np.percentile(flat, 99.0))
+                        if hi > 10 * p99 and p99 > 0:
+                            hi = 10 * p99
+
+                        # Inherit colour/label from source omero if present
+                        # (adjusting channel index for single-channel extract)
+                        src_idx = (
+                            int(channel) if channel != "all" else oc
+                        )
+                        base_ch = (
+                            src_ch_list[src_idx]
+                            if src_idx < len(src_ch_list)
+                            else {}
+                        )
+                        ch_entry = dict(base_ch)
+                        ch_entry["window"] = {
+                            "min": mn,
+                            "max": mx,
+                            "start": lo,
+                            "end": hi,
+                        }
+                        ch_entry.setdefault(
+                            "label", f"Channel {src_idx}"
+                        )
+                        ch_entry["active"] = True
+                        # napari-ome-zarr needs a hex color to build a
+                        # colormap; provide defaults if the source has none.
+                        _default_colors = [
+                            "FFFFFF", "00FF00", "FF00FF", "00FFFF",
+                            "FF0000", "0000FF", "FFFF00",
+                        ]
+                        ch_entry.setdefault(
+                            "color",
+                            _default_colors[oc % len(_default_colors)],
+                        )
+                        omero_channels.append(ch_entry)
+
+                    omero_out = dict(src_omero)
+                    omero_out["channels"] = omero_channels
+                    omero_out.setdefault("version", "0.3")
+                    out_group.attrs["omero"] = omero_out
+                    print(
+                        f"Wrote omero window metadata for "
+                        f"{n_out_channels} channel(s)"
+                    )
+                except Exception as _oe:
+                    print(
+                        f"Warning: omero metadata generation failed: {_oe}"
+                    )
+
+                print(f"✅ OME-Zarr written: {out_path}")
+                # Return the path string — _file_selector.py treats this as
+                # "already saved" and skips the normal write step.
+                return out_path
+
+            except Exception as e:
+                print(
+                    f"OME-Zarr native resize failed ({e}), "
+                    "falling back to skimage path"
+                )
+                import traceback
+                traceback.print_exc()
+
+        # ── TIFF / FALLBACK PATH ─────────────────────────────────────────────
+        return resize_image_fixed_yx(
+            image,
+            target_y=target_y,
+            target_x=target_x,
+            dim_order="auto",
+            channel=channel,
+        )
+
+    # Mark as zarr-aware so _file_selector keeps the dask array
+    resize_zarr_native._source_filepath = True
 
 
 # ============================================================================
@@ -889,7 +1404,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Percentile Threshold (Keep Brightest)",
         suffix="_percentile",
-        description="Keep only pixels above a brightness percentile, zero out the rest",
+        description="Keep only pixels above a brightness percentile, zero out the rest. For multichannel images, select which channel(s) to process.",
         parameters={
             "percentile": {
                 "type": float,
@@ -904,12 +1419,19 @@ if SKIMAGE_AVAILABLE:
                 "options": ["original", "binary"],
                 "description": "Output original values or binary mask",
             },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def percentile_threshold(
         image: np.ndarray,
         percentile: float = 90.0,
         output_type: str = "original",
+        channel: str = "all",
     ) -> np.ndarray:
         """
         Keep only pixels above a certain brightness percentile.
@@ -948,7 +1470,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Rolling Ball Background Subtraction",
         suffix="_rollingball",
-        description="Remove uneven background using rolling ball algorithm (like ImageJ)",
+        description="Remove uneven background using rolling ball algorithm (like ImageJ). For multichannel images, select which channel(s) to process.",
         parameters={
             "radius": {
                 "type": int,
@@ -956,11 +1478,17 @@ if SKIMAGE_AVAILABLE:
                 "min": 5,
                 "max": 200,
                 "description": "Radius of rolling ball (larger = remove broader background)",
-            }
+            },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def rolling_ball_background(
-        image: np.ndarray, radius: int = 50
+        image: np.ndarray, radius: int = 50, channel: str = "all"
     ) -> np.ndarray:
         """
         Remove background using rolling ball algorithm.
@@ -1003,7 +1531,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Adaptive Threshold (Bright Bias)",
         suffix="_adaptive_bright",
-        description="Adaptive thresholding biased to keep bright regions",
+        description="Adaptive thresholding biased to keep bright regions. For multichannel images, select which channel(s) to process.",
         parameters={
             "block_size": {
                 "type": int,
@@ -1019,10 +1547,16 @@ if SKIMAGE_AVAILABLE:
                 "max": 128.0,
                 "description": "Constant subtracted from mean (negative = keep more bright pixels)",
             },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def adaptive_threshold_bright(
-        image: np.ndarray, block_size: int = 35, offset: float = -10.0
+        image: np.ndarray, block_size: int = 35, offset: float = -10.0, channel: str = "all"
     ) -> np.ndarray:
         """
         Apply adaptive thresholding with bias toward bright regions.

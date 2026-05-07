@@ -90,8 +90,14 @@ def transpose_dimensions(img, dim_order):
 @BatchProcessingRegistry.register(
     name="VisCy Virtual Staining",
     suffix="_virtual_stain",
-    description="Virtual staining of phase/DIC images using VSCyto3D deep learning model. Predicts nuclei and membrane channels.",
+    description="Virtual staining of phase/DIC images using VSCyto3D deep learning model. Predicts nuclei and membrane channels. For multichannel input images, select which channel contains phase/DIC data.",
     parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel contains phase/DIC data (automatically detected from multichannel images)",
+        },
         "dim_order": {
             "type": str,
             "default": "ZYX",
@@ -114,6 +120,7 @@ def transpose_dimensions(img, dim_order):
 )
 def viscy_virtual_staining(
     image: np.ndarray,
+    channel: str = "all",
     dim_order: str = "ZYX",
     z_batch_size: int = 15,
     output_channel: str = "both",

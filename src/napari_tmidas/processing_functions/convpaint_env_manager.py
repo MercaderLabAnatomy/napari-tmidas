@@ -326,7 +326,13 @@ def recreate_convpaint_env(cuda_version: str = "auto"):
         return manager.create_env()
 
 
-def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
+def run_convpaint_in_env(
+    image,
+    model_path,
+    image_downsample=2,
+    use_cpu=False,
+    tmp_dir=None,
+):
     """
     Run convpaint prediction in the dedicated environment.
 
@@ -340,6 +346,8 @@ def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
         Downsampling factor for processing (default: 2)
     use_cpu : bool
         Force CPU execution even if GPU is available (default: False)
+    tmp_dir : str, optional
+        Directory for temporary input/output/script files. If None, system temp is used.
 
     Returns:
     --------
@@ -348,9 +356,12 @@ def run_convpaint_in_env(image, model_path, image_downsample=2, use_cpu=False):
     """
     env_python = ensure_convpaint_env_ready()
 
+    if tmp_dir:
+        os.makedirs(tmp_dir, exist_ok=True)
+
     # Create temporary files for input/output
     with tempfile.NamedTemporaryFile(
-        suffix=".tif", delete=False
+        suffix=".tif", delete=False, dir=tmp_dir
     ) as input_file:
         input_path = input_file.name
         tifffile.imwrite(input_path, image)
@@ -463,7 +474,7 @@ print("Segmentation complete")
 
     # Write script to temporary file
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False
+        mode="w", suffix=".py", delete=False, dir=tmp_dir
     ) as script_file:
         script_path = script_file.name
         script_file.write(script)

@@ -9,10 +9,44 @@ from napari_tmidas.processing_functions.basic import (
     keep_slice_range_by_area,
     labels_to_binary,
     mirror_labels,
+    split_tzyx_stack,
 )
 
 
 class TestBasicProcessing:
+    def test_split_tzyx_stack_is_not_thread_safe(self):
+        """Split TZYX has inner workers; outer batch worker must be single-threaded."""
+        assert hasattr(split_tzyx_stack, "thread_safe")
+        assert split_tzyx_stack.thread_safe is False
+
+    def test_split_tzyx_stack_accepts_tczyx_shape(self):
+        """5D TCZYX input should still register all timepoints for splitting."""
+        image = np.random.rand(10, 1, 4, 8, 8).astype(np.float32)
+
+        result = split_tzyx_stack(image, num_workers=4)
+
+        # Function returns original image by design; internal dask image drives splitting.
+        assert result is image
+        tl = split_tzyx_stack._thread_local
+        assert tl.dask_image.shape[0] == 10
+        assert tl.num_workers == 4
+        assert tl.produces_multiple_files is True
+
+    def test_split_tzyx_stack_accepts_dask_input(self):
+        """Dask TCZYX input should rechunk without calling da.from_array again."""
+        da = pytest.importorskip("dask.array")
+        image = da.random.random((10, 1, 4, 8, 8), chunks=(1, 1, 1, 8, 8)).astype(
+            np.float32
+        )
+
+        result = split_tzyx_stack(image, num_workers=3)
+
+        assert result is image
+        tl = split_tzyx_stack._thread_local
+        assert tl.dask_image.shape[0] == 10
+        assert tl.num_workers == 3
+        assert tl.produces_multiple_files is True
+
     def test_labels_to_binary(self):
         """Test converting labels to binary mask"""
         # Create test label image

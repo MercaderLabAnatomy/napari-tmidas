@@ -39,8 +39,14 @@ except ImportError:
 @BatchProcessingRegistry.register(
     name="CAREamics Denoise (N2V/CARE)",
     suffix="_denoised",
-    description="Denoise images using CAREamics (Noise2Void or CARE model). Supports YX (2D), ZYX (3D), TYX (2D+time), and TZYX (3D+time).",
+    description="Denoise images using CAREamics (Noise2Void or CARE model). Supports YX (2D), ZYX (3D), TYX (2D+time), and TZYX (3D+time). For multichannel images, select which channel to denoise.",
     parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to denoise (automatically detected from multichannel images)",
+        },
         "checkpoint_path": {
             "type": str,
             "default": "",
@@ -77,6 +83,7 @@ except ImportError:
 )
 def careamics_denoise(
     image: np.ndarray,
+    channel: str = "all",
     checkpoint_path: str = "",
     tile_size: str = "128,128,32",
     tile_overlap: str = "48,48,8",

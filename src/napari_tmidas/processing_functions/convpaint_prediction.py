@@ -49,8 +49,14 @@ except ImportError:
 @BatchProcessingRegistry.register(
     name="Convpaint Prediction",
     suffix="_convpaint_labels",
-    description="Semantic segmentation using pretrained convpaint model. Supports YX (2D), ZYX (3D), TYX (2D+time), and TZYX (3D+time).",
+    description="Semantic segmentation using pretrained convpaint model. Supports YX (2D), ZYX (3D), TYX (2D+time), and TZYX (3D+time). For multichannel images, select which channel to segment.",
     parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to segment (automatically detected from multichannel images)",
+        },
         "model_path": {
             "type": str,
             "default": "",
@@ -97,6 +103,7 @@ except ImportError:
 )
 def convpaint_predict(
     image: np.ndarray,
+    channel: str = "all",
     model_path: str = "",
     image_downsample: int = 2,
     output_type: str = "semantic",
@@ -104,6 +111,7 @@ def convpaint_predict(
     use_cpu: bool = False,
     force_dedicated_env: bool = False,
     z_batch_size: int = 0,
+    tmp_dir: str = None,
 ) -> np.ndarray:
     """
     Semantic segmentation using pretrained convpaint models.
@@ -271,7 +279,13 @@ The output is automatically upsampled to match the input dimensions.
         # 2D image (YX)
         print("Processing 2D image (YX)...")
         if use_dedicated:
-            result = run_convpaint_in_env(image, model_path, image_downsample, use_cpu)
+            result = run_convpaint_in_env(
+                image,
+                model_path,
+                image_downsample,
+                use_cpu,
+                tmp_dir=tmp_dir,
+            )
         else:
             result = _segment_with_convpaint(image, model_path, image_downsample, use_cpu)
 
@@ -284,11 +298,21 @@ The output is automatically upsampled to match the input dimensions.
             if z_batch_size > 0 and image.shape[0] > z_batch_size:
                 print(f"Z-batching: Processing in batches of {z_batch_size} planes...")
                 result = _process_zyx_in_batches(
-                    image, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+                    image,
+                    model_path,
+                    image_downsample,
+                    use_dedicated,
+                    use_cpu,
+                    z_batch_size,
+                    tmp_dir=tmp_dir,
                 )
             elif use_dedicated:
                 result = run_convpaint_in_env(
-                    image, model_path, image_downsample, use_cpu
+                    image,
+                    model_path,
+                    image_downsample,
+                    use_cpu,
+                    tmp_dir=tmp_dir,
                 )
             else:
                 result = _segment_with_convpaint(
@@ -300,7 +324,14 @@ The output is automatically upsampled to match the input dimensions.
                 f"Processing 2D time series (TYX) with {image.shape[0]} timepoints..."
             )
             result = _process_time_series(
-                image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False, z_batch_size=z_batch_size
+                image,
+                model_path,
+                image_downsample,
+                use_dedicated,
+                use_cpu,
+                is_3d=False,
+                z_batch_size=z_batch_size,
+                tmp_dir=tmp_dir,
             )
 
     elif ndim == 4:
@@ -309,7 +340,14 @@ The output is automatically upsampled to match the input dimensions.
             f"Processing 3D time series (TZYX) with {image.shape[0]} timepoints and {image.shape[1]} Z-planes..."
         )
         result = _process_time_series(
-            image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=True, z_batch_size=z_batch_size
+            image,
+            model_path,
+            image_downsample,
+            use_dedicated,
+            use_cpu,
+            is_3d=True,
+            z_batch_size=z_batch_size,
+            tmp_dir=tmp_dir,
         )
 
     else:
@@ -423,7 +461,14 @@ def _segment_with_convpaint(image, model_path, image_downsample, use_cpu=False):
 
 
 def _process_time_series(
-    image, model_path, image_downsample, use_dedicated, use_cpu, is_3d=False, z_batch_size=0
+    image,
+    model_path,
+    image_downsample,
+    use_dedicated,
+    use_cpu,
+    is_3d=False,
+    z_batch_size=0,
+    tmp_dir=None,
 ):
     """
     Process time series data by iterating through timepoints.
@@ -469,11 +514,21 @@ def _process_time_series(
         if is_3d and z_batch_size > 0 and timepoint_img.shape[0] > z_batch_size:
             print(f"  Z-batching: Processing in batches of {z_batch_size} planes...")
             timepoint_result = _process_zyx_in_batches(
-                timepoint_img, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+                timepoint_img,
+                model_path,
+                image_downsample,
+                use_dedicated,
+                use_cpu,
+                z_batch_size,
+                tmp_dir=tmp_dir,
             )
         elif use_dedicated:
             timepoint_result = run_convpaint_in_env(
-                timepoint_img, model_path, image_downsample, use_cpu
+                timepoint_img,
+                model_path,
+                image_downsample,
+                use_cpu,
+                tmp_dir=tmp_dir,
             )
         else:
             timepoint_result = _segment_with_convpaint(
@@ -492,7 +547,13 @@ def _process_time_series(
 
 
 def _process_zyx_in_batches(
-    image, model_path, image_downsample, use_dedicated, use_cpu, z_batch_size
+    image,
+    model_path,
+    image_downsample,
+    use_dedicated,
+    use_cpu,
+    z_batch_size,
+    tmp_dir=None,
 ):
     """
     Process a 3D ZYX image in batches along the Z-axis to reduce memory usage.
@@ -541,7 +602,11 @@ def _process_zyx_in_batches(
         # Segment batch
         if use_dedicated:
             batch_result = run_convpaint_in_env(
-                batch_img, model_path, image_downsample, use_cpu
+                batch_img,
+                model_path,
+                image_downsample,
+                use_cpu,
+                tmp_dir=tmp_dir,
             )
         else:
             batch_result = _segment_with_convpaint(

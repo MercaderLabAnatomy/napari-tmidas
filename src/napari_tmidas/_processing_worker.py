@@ -8,6 +8,14 @@ from typing import Any, List, Union
 
 import numpy as np
 
+try:
+    import dask.array as da
+
+    _HAS_DASK = True
+except ImportError:
+    da = None
+    _HAS_DASK = False
+
 # Lazy imports for optional heavy dependencies
 try:
     import tifffile
@@ -121,12 +129,13 @@ class ProcessingWorker(QThread):
             # Load the image using the unified loader
             image_data = load_image_file(filepath)
 
-            # Handle multi-layer data from OME-Zarr - extract first layer for processing
-            if isinstance(image_data, list):
+            # Handle multi-layer data from OME-Zarr
+            is_multi_layer = isinstance(image_data, list)
+            if is_multi_layer:
                 print(
-                    f"Processing first layer of multi-layer file: {filepath}"
+                    f"Processing multi-layer file ({len(image_data)} layers): {filepath}"
                 )
-                # Take the first image layer
+                # Take the first image layer as default
                 for data, _add_kwargs, layer_type in image_data:
                     if layer_type == "image":
                         image = data
@@ -159,13 +168,129 @@ class ProcessingWorker(QThread):
                     f"Original image shape: {image.shape if hasattr(image, 'shape') else 'unknown'}, dtype: {image_dtype}"
                 )
 
-            # Apply the processing function with parameters
-            if self.param_values:
-                processed_image = self.processing_func(
-                    image, **self.param_values
-                )
+            # Handle channel selection if specified in parameters
+            channel_param = self.param_values.get("channel", None) if self.param_values else None
+            images_to_process = []
+            channel_indices = []
+            
+            if channel_param is not None:
+                try:
+                    from napari_tmidas._file_selector import (
+                        detect_channels_in_image,
+                        detect_channels_from_zarr_path,
+                    )
+                    # For zarr files use metadata-based detection (same logic as the UI)
+                    if filepath.lower().endswith(".zarr") or (
+                        os.path.isdir(filepath) and
+                        os.path.exists(os.path.join(filepath, ".zattrs"))
+                    ):
+                        num_channels, channel_axis = detect_channels_from_zarr_path(filepath)
+                    else:
+                        num_channels, channel_axis = detect_channels_in_image(image_data)
+                    
+                    if num_channels > 1:
+                        if channel_axis == -1:
+                            # Channels are in separate layers (multi-layer OME-Zarr)
+                            print(f"Detected {num_channels} channels in separate layers")
+                            
+                            if channel_param == "all":
+                                # Process all layers
+                                print(f"Processing all {num_channels} layers")
+                                for i, (data, _kwargs, layer_type) in enumerate(image_data):
+                                    if layer_type == "image":
+                                        images_to_process.append(data)
+                                        channel_indices.append(i)
+                            elif isinstance(channel_param, int) and 0 <= channel_param < num_channels:
+                                # Process only the selected layer
+                                print(f"Processing layer {channel_param}")
+                                image_idx = 0
+                                for data, _kwargs, layer_type in image_data:
+                                    if layer_type == "image":
+                                        if image_idx == channel_param:
+                                            images_to_process.append(data)
+                                            channel_indices.append(channel_param)
+                                            break
+                                        image_idx += 1
+                            else:
+                                # Invalid channel selection, process first layer
+                                print(f"Invalid channel selection: {channel_param}, processing first layer")
+                                images_to_process.append(image)
+                                channel_indices.append(None)
+                        elif channel_axis is not None:
+                            # Channels are in a dimension within the array
+                            if channel_param == "all":
+                                # Process all channels separately
+                                print(f"Processing all {num_channels} channels separately")
+                                for i in range(num_channels):
+                                    channel_img = np.take(image, i, axis=channel_axis)
+                                    images_to_process.append(channel_img)
+                                    channel_indices.append(i)
+                            elif isinstance(channel_param, int) and 0 <= channel_param < num_channels:
+                                # Process only the selected channel
+                                print(f"Processing channel {channel_param}")
+                                channel_img = np.take(image, channel_param, axis=channel_axis)
+                                images_to_process.append(channel_img)
+                                channel_indices.append(channel_param)
+                            else:
+                                # Invalid channel selection, process entire image
+                                print(f"Invalid channel selection: {channel_param}, processing entire image")
+                                images_to_process.append(image)
+                                channel_indices.append(None)
+                        else:
+                            # Single channel image, process normally
+                            images_to_process.append(image)
+                            channel_indices.append(None)
+                    else:
+                        # Single channel image, process normally
+                        images_to_process.append(image)
+                        channel_indices.append(None)
+                except ImportError:
+                    # Fallback if detection function not available
+                    images_to_process.append(image)
+                    channel_indices.append(None)
             else:
-                processed_image = self.processing_func(image)
+                # No channel parameter specified, process entire image
+                images_to_process.append(image)
+                channel_indices.append(None)
+
+            # Process each image in the list
+            all_processed_images = []
+            for img_idx, (img_to_process, ch_idx) in enumerate(zip(images_to_process, channel_indices)):
+                # Apply the processing function with parameters
+                if self.param_values:
+                    # Remove channel parameter before passing to processing function
+                    proc_params = {k: v for k, v in self.param_values.items() if k != "channel"}
+                    processed_image = self.processing_func(img_to_process, **proc_params)
+                else:
+                    processed_image = self.processing_func(img_to_process)
+                
+                all_processed_images.append((processed_image, ch_idx))
+
+            # Handle saving based on number of processed images
+            if len(all_processed_images) > 1:
+                # Multiple channels were processed separately
+                processed_files = []
+                base_name = os.path.splitext(os.path.basename(filepath))[0]
+                
+                for processed_image, ch_idx in all_processed_images:
+                    if processed_image is None or is_folder_function:
+                        continue
+                    
+                    # Generate output filename with channel suffix
+                    output_filename = f"{base_name}_ch{ch_idx}{self.output_suffix}"
+                    output_path = os.path.join(self.output_folder, output_filename)
+                    
+                    # Save the processed image
+                    save_image_file(processed_image, output_path, image_dtype)
+                    processed_files.append(output_path)
+                
+                return {
+                    "original_file": filepath,
+                    "processed_files": processed_files,
+                }
+            else:
+                # Single image processed (or single channel)
+                processed_image, ch_idx = all_processed_images[0]
 
             # Handle functions that return multiple outputs (e.g., channel splitting)
             if (
@@ -255,9 +380,30 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
     """
     Load image from file, supporting both TIFF and Zarr formats with proper metadata handling
     """
-    # This is a placeholder - the actual implementation would be moved from _file_selector.py
-    # For now, return a dummy array
-    return np.random.rand(100, 100)
+    # Import the actual implementation from _file_selector
+    try:
+        from napari_tmidas._file_selector import load_image_file as _load_impl
+        return _load_impl(filepath)
+    except ImportError:
+        # Fallback implementation
+        if filepath.lower().endswith(".zarr"):
+            try:
+                import zarr
+                root = zarr.open(filepath, mode="r")
+                if hasattr(root, "arrays"):
+                    arrays_list = list(root.arrays())
+                    if arrays_list:
+                        return np.array(arrays_list[0][1])
+                return np.array(root)
+            except Exception:
+                pass
+        
+        # Try tifffile
+        if _HAS_TIFFFILE:
+            return tifffile.imread(filepath)
+        
+        # Last resort: numpy
+        return np.load(filepath)
 
 
 def is_label_image(image: np.ndarray) -> bool:
@@ -282,8 +428,20 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
     if not _HAS_TIFFFILE:
         raise ImportError("tifffile is required to save images")
 
+    def _is_dask_array(obj: Any) -> bool:
+        return _HAS_DASK and isinstance(obj, da.Array)
+
+    def _estimate_size_gb(obj: Any) -> float:
+        try:
+            shape = tuple(int(x) for x in obj.shape)
+            itemsize = np.dtype(obj.dtype).itemsize
+            total = int(np.prod(shape, dtype=np.int64))
+            return (total * itemsize) / (1024**3)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
     # Calculate approx file size in GB
-    size_gb = image.size * image.itemsize / (1024**3)
+    size_gb = _estimate_size_gb(image)
 
     # For very large files, use BigTIFF format
     use_bigtiff = size_gb > 2.0
@@ -301,9 +459,38 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
         # Use image's dtype
         save_dtype = image.dtype
 
+    # Stream dask arrays per leading-axis slab to avoid full materialization.
+    if _is_dask_array(image):
+        if image.ndim <= 2:
+            arr = np.asarray(image.compute(), dtype=save_dtype)
+            tifffile.imwrite(
+                filepath,
+                arr,
+                compression="zlib",
+                bigtiff=use_bigtiff,
+            )
+            return
+
+        expected_shape = tuple(int(x) for x in image.shape)
+
+        def _iter_slabs():
+            for i in range(expected_shape[0]):
+                yield np.asarray(image[i].compute(), dtype=save_dtype)
+
+        tifffile.imwrite(
+            filepath,
+            data=_iter_slabs(),
+            shape=expected_shape,
+            dtype=save_dtype,
+            compression="zlib",
+            photometric="minisblack",
+            bigtiff=use_bigtiff,
+        )
+        return
+
     tifffile.imwrite(
         filepath,
-        image.astype(save_dtype),
+        np.asarray(image, dtype=save_dtype),
         compression="zlib",
         bigtiff=use_bigtiff,
     )

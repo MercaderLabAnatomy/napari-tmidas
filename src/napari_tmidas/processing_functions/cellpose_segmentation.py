@@ -11,9 +11,18 @@ for cellular segmentation without requiring diameter parameter.
 
 Note: This requires the cellpose library to be installed.
 """
+import os
+import shutil
+import time
+from contextlib import suppress
+from tempfile import NamedTemporaryFile
 from typing import Union
+import json
+import hashlib
 
 import numpy as np
+import tifffile
+import zarr
 
 # Import the environment manager
 from napari_tmidas.processing_functions.cellpose_env_manager import (
@@ -91,12 +100,39 @@ def transpose_dimensions(img, dim_order):
 @BatchProcessingRegistry.register(
     name="Cellpose-SAM Segmentation",
     suffix="_labels",
-    description="Automatic instance segmentation using Cellpose 4 (Cellpose-SAM) with improved generalization.",
+    description="Automatic instance segmentation using Cellpose 4 (Cellpose-SAM) with improved generalization. For multichannel images, select which channel to segment.",
     parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to segment (automatically detected from multichannel images)",
+        },
         "dim_order": {
             "type": str,
             "default": "YX",
             "description": "Dimension order of the input (e.g., 'YX', 'ZYX', 'TZYX')",
+        },
+        "timepoint_start": {
+            "type": int,
+            "default": 0,
+            "min": 0,
+            "max": 100000,
+            "description": "Start timepoint index (0-based, inclusive). Only used when T is present.",
+        },
+        "timepoint_end": {
+            "type": int,
+            "default": -1,
+            "min": -1,
+            "max": 100000,
+            "description": "End timepoint index (0-based, inclusive). Use -1 for the last timepoint.",
+        },
+        "timepoint_step": {
+            "type": int,
+            "default": 1,
+            "min": 1,
+            "max": 100,
+            "description": "Take every Nth timepoint (1 = all, 2 = every other, etc.).",
         },
         # "channel_1": {
         #     "type": int,
@@ -161,10 +197,71 @@ def transpose_dimensions(img, dim_order):
             "max": 128,
             "description": "Batch size for processing multiple images/slices at once",
         },
+        "use_distributed_segmentation": {
+            "type": bool,
+            "default": False,
+            "description": "Use distributed blockwise segmentation (cellpose.contrib.distributed_segmentation) for large 3D ZYX zarr volumes. Reduces peak memory use during inference. Only applies to 3D ZYX zarr input.",
+        },
+        "distributed_blocksize": {
+            "type": int,
+            "default": 256,
+            "min": 64,
+            "max": 1024,
+            "description": "Block edge length (voxels) for distributed segmentation. Only used when use_distributed_segmentation=True.",
+        },
+        "use_convpaint_auto_mask": {
+            "type": bool,
+            "default": False,
+            "description": "Use ConvPaint model to generate a foreground mask before distributed Cellpose. Blocks outside mask are skipped.",
+        },
+        "convpaint_model_path": {
+            "type": str,
+            "default": "",
+            "description": "Path to ConvPaint .pkl model used for auto-mask generation (required when use_convpaint_auto_mask=True).",
+        },
+        "convpaint_image_downsample": {
+            "type": int,
+            "default": 4,
+            "min": 1,
+            "max": 16,
+            "description": "Downsampling for ConvPaint auto-mask inference (higher is faster, lower keeps detail).",
+        },
+        "convpaint_background_label": {
+            "type": int,
+            "default": 1,
+            "min": 0,
+            "max": 255,
+            "description": "ConvPaint label id treated as background for foreground-mask conversion.",
+        },
+        "convpaint_mask_dilation": {
+            "type": int,
+            "default": 2,
+            "min": 0,
+            "max": 20,
+            "description": "Binary dilation iterations applied to ConvPaint foreground mask to avoid false negatives.",
+        },
+        "convpaint_use_cpu": {
+            "type": bool,
+            "default": False,
+            "description": "Run ConvPaint mask generation on CPU.",
+        },
+        "convpaint_force_dedicated_env": {
+            "type": bool,
+            "default": False,
+            "description": "Force ConvPaint mask generation in dedicated environment.",
+        },
+        "convpaint_z_batch_size": {
+            "type": int,
+            "default": 0,
+            "min": 0,
+            "max": 200,
+            "description": "Z-batching for ConvPaint auto-mask generation (0 disables batching).",
+        },
     },
 )
 def cellpose_segmentation(
     image: np.ndarray,
+    channel: str = "all",
     dim_order: str = "YX",
     channel_1: int = 0,
     channel_2: int = 0,
@@ -175,6 +272,19 @@ def cellpose_segmentation(
     tile_norm_blocksize: int = 128,
     batch_size: int = 32,
     diameter: float = 0.0,
+    use_distributed_segmentation: bool = False,
+    distributed_blocksize: int = 256,
+    use_convpaint_auto_mask: bool = False,
+    convpaint_model_path: str = "",
+    convpaint_image_downsample: int = 4,
+    convpaint_background_label: int = 1,
+    convpaint_mask_dilation: int = 2,
+    convpaint_use_cpu: bool = False,
+    convpaint_force_dedicated_env: bool = False,
+    convpaint_z_batch_size: int = 0,
+    timepoint_start: int = 0,
+    timepoint_end: int = -1,
+    timepoint_step: int = 1,
     _source_filepath: str = None,  # Hidden parameter for zarr optimization
 ) -> np.ndarray:
     """
@@ -218,13 +328,323 @@ def cellpose_segmentation(
     # The normalize=True parameter (default) will convert to float and normalize
     # to 1st-99th percentile range internally
 
+    print(
+        "Cellpose runtime options: "
+        f"distributed_requested={use_distributed_segmentation}, "
+        f"source_path={_source_filepath}"
+    )
+
+    # Prefer direct zarr processing when a source zarr path is available.
+    # This keeps distributed segmentation enabled for full TCZYX workflows.
+    use_zarr_direct = bool(_source_filepath) and (
+        _source_filepath.lower().endswith(".zarr")
+        or (
+            os.path.isdir(_source_filepath)
+            and os.path.exists(os.path.join(_source_filepath, ".zattrs"))
+        )
+    )
+
+    def _resolve_timepoint_indices(total_timepoints: int):
+        """Resolve selected timepoints from start/end/step controls."""
+        if total_timepoints <= 0:
+            return []
+
+        tp_start = int(timepoint_start)
+        tp_end = int(timepoint_end)
+        tp_step = int(timepoint_step)
+
+        if tp_step <= 0:
+            raise ValueError("timepoint_step must be >= 1")
+
+        # Support Python-like negative indexing for start/end.
+        if tp_start < 0:
+            tp_start = total_timepoints + tp_start
+        tp_start = max(0, min(tp_start, total_timepoints - 1))
+
+        if tp_end < 0:
+            tp_end = total_timepoints - 1
+        else:
+            tp_end = max(0, min(tp_end, total_timepoints - 1))
+
+        if tp_end < tp_start:
+            raise ValueError(
+                "timepoint_end must be >= timepoint_start after bounds handling "
+                f"(got start={tp_start}, end={tp_end})"
+            )
+
+        indices = list(range(tp_start, tp_end + 1, tp_step))
+        if not indices:
+            raise ValueError("No timepoints selected. Check start/end/step settings.")
+
+        return indices
+
+    generated_mask_path = None
+    generated_mask_zarr_path = None
+    convpaint_mask = None
+
+    if use_convpaint_auto_mask:
+        print("ConvPaint auto-mask requested: generating foreground mask...")
+        if not convpaint_model_path or not convpaint_model_path.strip():
+            raise ValueError(
+                "convpaint_model_path is required when use_convpaint_auto_mask=True"
+            )
+        try:
+            from napari_tmidas.processing_functions.convpaint_prediction import (
+                convpaint_predict,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to import ConvPaint prediction function for auto-mask generation"
+            ) from exc
+
+        # Guardrail: if ConvPaint mask is too sparse for distributed block-wise
+        # processing, disable mask pruning for that slab to avoid missing whole
+        # neighboring blocks that still contain cells.
+        sparse_mask_fraction_threshold = 1e-4
+
+        def _compute_active_block_grid(mask: np.ndarray):
+            """Return boolean grid of active distributed blocks for a ZYX mask."""
+            if mask.ndim != 3 or distributed_blocksize <= 0:
+                return None
+
+            bs = int(distributed_blocksize)
+            z, y, x = mask.shape
+            gz = (z + bs - 1) // bs
+            gy = (y + bs - 1) // bs
+            gx = (x + bs - 1) // bs
+            active = np.zeros((gz, gy, gx), dtype=bool)
+
+            for iz in range(gz):
+                z0, z1 = iz * bs, min((iz + 1) * bs, z)
+                for iy in range(gy):
+                    y0, y1 = iy * bs, min((iy + 1) * bs, y)
+                    for ix in range(gx):
+                        x0, x1 = ix * bs, min((ix + 1) * bs, x)
+                        active[iz, iy, ix] = bool(
+                            np.any(mask[z0:z1, y0:y1, x0:x1])
+                        )
+
+            return active
+
+        def _expand_mask_to_neighbor_blocks(
+            mask: np.ndarray, margin_blocks: int = 1
+        ) -> np.ndarray:
+            """Expand mask at distributed-block granularity in YX."""
+            active = _compute_active_block_grid(mask)
+            if active is None:
+                return mask
+
+            if margin_blocks > 0:
+                try:
+                    from scipy import ndimage as ndi
+
+                    # Expand only in YX neighbors for same Z block.
+                    structure = np.ones(
+                        (1, 2 * margin_blocks + 1, 2 * margin_blocks + 1),
+                        dtype=bool,
+                    )
+                    active = ndi.binary_dilation(active, structure=structure)
+                except Exception as exc:
+                    print(
+                        "Warning: block-level mask expansion failed "
+                        f"({exc}); using original block activity"
+                    )
+
+            bs = int(distributed_blocksize)
+            z, y, x = mask.shape
+            expanded = np.zeros_like(mask, dtype=np.uint8)
+
+            for iz in range(active.shape[0]):
+                z0, z1 = iz * bs, min((iz + 1) * bs, z)
+                for iy in range(active.shape[1]):
+                    y0, y1 = iy * bs, min((iy + 1) * bs, y)
+                    for ix in range(active.shape[2]):
+                        if not active[iz, iy, ix]:
+                            continue
+                        x0, x1 = ix * bs, min((ix + 1) * bs, x)
+                        expanded[z0:z1, y0:y1, x0:x1] = 1
+
+            return expanded
+
+        def _summarize_mask(mask: np.ndarray):
+            """Return (foreground_fraction, active_blocks, total_blocks)."""
+            fg = float(np.mean(mask > 0))
+            active_grid = _compute_active_block_grid(mask > 0)
+            if active_grid is None:
+                return fg, None, None
+            return fg, int(np.count_nonzero(active_grid)), int(active_grid.size)
+
+        def _labels_to_mask(labels: np.ndarray) -> np.ndarray:
+            mask = (labels > 0).astype(np.uint8)
+            if convpaint_mask_dilation > 0:
+                try:
+                    from scipy import ndimage as ndi
+
+                    mask = ndi.binary_dilation(
+                        mask, iterations=convpaint_mask_dilation
+                    ).astype(np.uint8)
+                except Exception as exc:
+                    print(
+                        "Warning: ConvPaint mask dilation failed "
+                        f"({exc}); using undilated mask"
+                    )
+
+            if use_distributed_segmentation and mask.ndim == 3:
+                # Expand to neighboring distributed blocks so slight mask holes
+                # do not drop adjacent blocks that still contain cells.
+                mask = _expand_mask_to_neighbor_blocks(mask, margin_blocks=1)
+
+            return mask
+
+        # For zarr-direct workflows, build a mask zarr slab-by-slab (per timepoint)
+        # to avoid loading the full dataset into RAM.
+        if (
+            use_zarr_direct
+            and use_distributed_segmentation
+            and image.ndim == 4
+        ):
+            # For distributed TZYX zarr workflows, defer mask generation to
+            # an interleaved per-timepoint loop below: mask(T) -> segment(T).
+            print(
+                "ConvPaint auto-mask: using interleaved per-timepoint "
+                "mask->segment flow for distributed zarr processing"
+            )
+        elif use_zarr_direct:
+            source_parent = os.path.dirname(os.path.abspath(_source_filepath))
+            tmp_root = os.path.join(source_parent, "tmp")
+            os.makedirs(tmp_root, exist_ok=True)
+            generated_mask_zarr_path = os.path.join(
+                tmp_root, "convpaint_auto_mask.zarr"
+            )
+            if os.path.exists(generated_mask_zarr_path):
+                shutil.rmtree(generated_mask_zarr_path, ignore_errors=True)
+
+            image_shape = tuple(int(s) for s in image.shape)
+            if hasattr(image, "chunks"):
+                chunks = tuple(
+                    int(c[0]) if isinstance(c, tuple) else int(c)
+                    for c in image.chunks
+                )
+            else:
+                chunks = tuple(max(1, min(16, s)) for s in image_shape)
+
+            mask_zarr = zarr.open_array(
+                generated_mask_zarr_path,
+                mode="w",
+                shape=image_shape,
+                chunks=chunks,
+                dtype=np.uint8,
+            )
+
+            if image.ndim == 4:
+                t_count = image_shape[0]
+                print(
+                    "ConvPaint auto-mask: generating slab-wise mask "
+                    f"for {t_count} timepoints..."
+                )
+                for t in range(t_count):
+                    print(f"ConvPaint auto-mask slab {t+1}/{t_count}")
+                    slab = np.asarray(image[t])
+                    labels = convpaint_predict(
+                        slab,
+                        channel="all",
+                        model_path=convpaint_model_path,
+                        image_downsample=convpaint_image_downsample,
+                        output_type="semantic",
+                        background_label=convpaint_background_label,
+                        use_cpu=convpaint_use_cpu,
+                        force_dedicated_env=convpaint_force_dedicated_env,
+                        z_batch_size=convpaint_z_batch_size,
+                        tmp_dir=tmp_root,
+                    )
+                    mask_zarr[t] = _labels_to_mask(labels)
+            elif image.ndim == 5:
+                t_count, c_count = image_shape[:2]
+                print(
+                    "ConvPaint auto-mask: generating slab-wise mask "
+                    f"for {t_count} timepoints x {c_count} channels..."
+                )
+                for t in range(t_count):
+                    for c in range(c_count):
+                        print(
+                            "ConvPaint auto-mask slab "
+                            f"T{t+1}/{t_count}, C{c+1}/{c_count}"
+                        )
+                        slab = np.asarray(image[t, c])
+                        labels = convpaint_predict(
+                            slab,
+                            channel="all",
+                            model_path=convpaint_model_path,
+                            image_downsample=convpaint_image_downsample,
+                            output_type="semantic",
+                            background_label=convpaint_background_label,
+                            use_cpu=convpaint_use_cpu,
+                            force_dedicated_env=convpaint_force_dedicated_env,
+                            z_batch_size=convpaint_z_batch_size,
+                            tmp_dir=tmp_root,
+                        )
+                        mask_zarr[t, c] = _labels_to_mask(labels)
+            elif image.ndim == 3:
+                print("ConvPaint auto-mask: generating slab mask for 3D volume...")
+                slab = np.asarray(image)
+                labels = convpaint_predict(
+                    slab,
+                    channel="all",
+                    model_path=convpaint_model_path,
+                    image_downsample=convpaint_image_downsample,
+                    output_type="semantic",
+                    background_label=convpaint_background_label,
+                    use_cpu=convpaint_use_cpu,
+                    force_dedicated_env=convpaint_force_dedicated_env,
+                    z_batch_size=convpaint_z_batch_size,
+                    tmp_dir=tmp_root,
+                )
+                mask_zarr[:] = _labels_to_mask(labels)
+            else:
+                # Non-3D/4D/5D masks are unsupported in distributed zarr mode.
+                raise ValueError(
+                    "ConvPaint auto-mask with distributed zarr expects 3D, 4D, or 5D "
+                    f"image data after channel selection, got shape {image_shape}."
+                )
+
+            print(
+                "Saved ConvPaint slab-wise mask zarr for distributed processing: "
+                f"{generated_mask_zarr_path}"
+            )
+        else:
+            convpaint_input = np.asarray(image)
+            convpaint_labels = convpaint_predict(
+                convpaint_input,
+                channel="all",
+                model_path=convpaint_model_path,
+                image_downsample=convpaint_image_downsample,
+                output_type="semantic",
+                background_label=convpaint_background_label,
+                use_cpu=convpaint_use_cpu,
+                force_dedicated_env=convpaint_force_dedicated_env,
+                z_batch_size=convpaint_z_batch_size,
+            )
+            convpaint_mask = _labels_to_mask(convpaint_labels)
+            foreground_fraction = float(convpaint_mask.mean())
+            print(
+                "ConvPaint auto-mask ready: "
+                f"shape={convpaint_mask.shape}, foreground_fraction={foreground_fraction:.4f}"
+            )
+
     # Handle TZYX data by processing each timepoint separately
-    if "T" in dim_order and image.ndim == 4:
+    if "T" in dim_order and image.ndim == 4 and not use_zarr_direct:
         print(
             f"Detected TZYX data with shape {image.shape}. Processing each timepoint separately..."
         )
         t_axis = dim_order.index("T")
         num_timepoints = image.shape[t_axis]
+        selected_timepoints = _resolve_timepoint_indices(int(num_timepoints))
+
+        print(
+            "Selected timepoints: "
+            f"{selected_timepoints[0]}..{selected_timepoints[-1]} "
+            f"(count={len(selected_timepoints)}, step={int(timepoint_step)})"
+        )
 
         # Move T axis to front if not already there
         if t_axis != 0:
@@ -234,8 +654,11 @@ def cellpose_segmentation(
 
         # Process each timepoint
         results = []
-        for t in range(num_timepoints):
-            print(f"Processing timepoint {t+1}/{num_timepoints}...")
+        for out_idx, t in enumerate(selected_timepoints):
+            print(
+                f"Processing timepoint {t+1}/{num_timepoints} "
+                f"(selected {out_idx+1}/{len(selected_timepoints)})..."
+            )
             timepoint_image = image[t]
             # Remove 'T' from dim_order for single timepoint
             timepoint_dim_order = dim_order.replace("T", "")
@@ -243,7 +666,11 @@ def cellpose_segmentation(
             # Recursively call this function for the single timepoint
             timepoint_result = cellpose_segmentation(
                 timepoint_image,
+                channel=channel,
                 dim_order=timepoint_dim_order,
+                timepoint_start=0,
+                timepoint_end=-1,
+                timepoint_step=1,
                 channel_1=channel_1,
                 channel_2=channel_2,
                 flow_threshold=flow_threshold,
@@ -252,13 +679,27 @@ def cellpose_segmentation(
                 flow3D_smooth=flow3D_smooth,
                 tile_norm_blocksize=tile_norm_blocksize,
                 batch_size=batch_size,
+                diameter=diameter,
+                use_distributed_segmentation=use_distributed_segmentation,
+                distributed_blocksize=distributed_blocksize,
+                use_convpaint_auto_mask=use_convpaint_auto_mask,
+                convpaint_model_path=convpaint_model_path,
+                convpaint_image_downsample=convpaint_image_downsample,
+                convpaint_background_label=convpaint_background_label,
+                convpaint_mask_dilation=convpaint_mask_dilation,
+                convpaint_use_cpu=convpaint_use_cpu,
+                convpaint_force_dedicated_env=convpaint_force_dedicated_env,
+                convpaint_z_batch_size=convpaint_z_batch_size,
                 _source_filepath=None,  # Don't use zarr optimization for timepoints
             )
             results.append(timepoint_result)
 
         # Stack results back together
         result = np.stack(results, axis=0)
-        print(f"Completed processing all {num_timepoints} timepoints.")
+        print(
+            "Completed processing selected timepoints: "
+            f"{len(selected_timepoints)}/{num_timepoints}."
+        )
         return result
 
     # Convert channel parameters to Cellpose channels list
@@ -273,18 +714,570 @@ def cellpose_segmentation(
         create_cellpose_env()
         print("Environment created successfully.")
 
-    # Check if we can use zarr optimization
-    use_zarr_direct = _source_filepath and _source_filepath.lower().endswith(
-        ".zarr"
-    )
-
     if use_zarr_direct:
         print(f"Using optimized zarr processing for: {_source_filepath}")
+
+        # Interleaved mode: for each timepoint, generate ConvPaint foreground mask
+        # and immediately run distributed Cellpose for that same slab.
+        if (
+            use_distributed_segmentation
+            and use_convpaint_auto_mask
+            and image.ndim == 4
+        ):
+            source_parent = os.path.dirname(os.path.abspath(_source_filepath))
+            tmp_root = os.path.join(source_parent, "tmp")
+            os.makedirs(tmp_root, exist_ok=True)
+
+            t_count = int(image.shape[0])
+            selected_timepoints = _resolve_timepoint_indices(t_count)
+            selected_count = len(selected_timepoints)
+            source_base = os.path.splitext(
+                os.path.basename(_source_filepath)
+            )[0]
+            print(
+                "Distributed+ConvPaint interleaved mode: "
+                f"processing {selected_count} selected timepoints "
+                f"out of {t_count} (mask->segment per slab)"
+            )
+
+            # Cache ConvPaint masks on disk so reruns can reuse them.
+            mask_cache_key_payload = {
+                "source": os.path.abspath(_source_filepath),
+                "source_mtime": os.path.getmtime(_source_filepath),
+                "channel": channel,
+                "convpaint_model_path": convpaint_model_path,
+                "convpaint_image_downsample": int(convpaint_image_downsample),
+                "convpaint_background_label": int(convpaint_background_label),
+                "convpaint_mask_dilation": int(convpaint_mask_dilation),
+                "convpaint_use_cpu": bool(convpaint_use_cpu),
+                "convpaint_force_dedicated_env": bool(
+                    convpaint_force_dedicated_env
+                ),
+                "convpaint_z_batch_size": int(convpaint_z_batch_size),
+                "shape": tuple(int(s) for s in image.shape),
+            }
+            mask_cache_key = hashlib.sha1(
+                json.dumps(mask_cache_key_payload, sort_keys=True).encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:16]
+            mask_cache_root = os.path.join(
+                tmp_root,
+                "convpaint_mask_cache",
+                f"{source_base}_{mask_cache_key}",
+            )
+            os.makedirs(mask_cache_root, exist_ok=True)
+            print(f"ConvPaint mask cache: {mask_cache_root}")
+
+            # Persist interleaved slab results so failed runs can resume from
+            # the last completed slab on restart.
+            channel_tag = str(channel).replace(os.sep, "_")
+            checkpoint_path = os.path.join(
+                tmp_root,
+                f"{source_base}_cellpose_interleaved_ch{channel_tag}.zarr",
+            )
+
+            slab_shape = tuple(int(s) for s in image.shape[1:])
+            checkpoint_shape = (selected_count, *slab_shape)
+            z_chunk = max(1, min(16, slab_shape[0]))
+            y_chunk = max(1, min(512, slab_shape[1]))
+            x_chunk = max(1, min(512, slab_shape[2]))
+            checkpoint_chunks = (1, z_chunk, y_chunk, x_chunk)
+
+            run_signature = {
+                "source": os.path.abspath(_source_filepath),
+                "channel": channel,
+                "distributed_blocksize": int(distributed_blocksize),
+                "flow_threshold": float(flow_threshold),
+                "cellprob_threshold": float(cellprob_threshold),
+                "anisotropy": (
+                    None if anisotropy is None else float(anisotropy)
+                ),
+                "flow3D_smooth": int(flow3D_smooth),
+                "tile_norm_blocksize": int(tile_norm_blocksize),
+                "batch_size": int(batch_size),
+                "diameter": float(diameter),
+                "convpaint_model_path": convpaint_model_path,
+                "convpaint_image_downsample": int(
+                    convpaint_image_downsample
+                ),
+                "convpaint_background_label": int(
+                    convpaint_background_label
+                ),
+                "convpaint_mask_dilation": int(convpaint_mask_dilation),
+                # Increment when mask gating behavior changes so stale
+                # checkpoints are not silently reused.
+                "mask_strategy_version": 4,
+                "sparse_mask_fraction_threshold": float(
+                    sparse_mask_fraction_threshold
+                ),
+                "timepoint_start": int(timepoint_start),
+                "timepoint_end": int(timepoint_end),
+                "timepoint_step": int(timepoint_step),
+                "selected_timepoints": [int(v) for v in selected_timepoints],
+            }
+            run_signature_json = json.dumps(run_signature, sort_keys=True)
+
+            if os.path.exists(checkpoint_path):
+                try:
+                    existing = zarr.open_array(checkpoint_path, mode="r")
+                    existing_sig = existing.attrs.get("run_signature", "")
+                    if (
+                        tuple(existing.shape) != checkpoint_shape
+                        or existing_sig != run_signature_json
+                    ):
+                        print(
+                            "Interleaved checkpoint exists but is incompatible; "
+                            "starting a new checkpoint."
+                        )
+                        shutil.rmtree(checkpoint_path, ignore_errors=True)
+                except Exception as exc:
+                    print(
+                        "Warning: could not inspect existing interleaved "
+                        f"checkpoint ({exc}); recreating it."
+                    )
+                    shutil.rmtree(checkpoint_path, ignore_errors=True)
+
+            try:
+                # Prefer V2 metadata for broad compatibility with tooling.
+                checkpoint = zarr.open_array(
+                    checkpoint_path,
+                    mode="a",
+                    shape=checkpoint_shape,
+                    chunks=checkpoint_chunks,
+                    dtype=np.uint32,
+                    zarr_format=2,
+                    dimension_separator="/",
+                )
+            except TypeError:
+                # Older/newer zarr APIs may not accept zarr_format or
+                # dimension_separator in this call signature.
+                checkpoint = zarr.open_array(
+                    checkpoint_path,
+                    mode="a",
+                    shape=checkpoint_shape,
+                    chunks=checkpoint_chunks,
+                    dtype=np.uint32,
+                )
+            except ValueError as exc:
+                # zarr v3 raises when dimension_separator is provided without
+                # V2 format; retry with default chunk key encoding.
+                if "dimension_separator" in str(exc):
+                    checkpoint = zarr.open_array(
+                        checkpoint_path,
+                        mode="a",
+                        shape=checkpoint_shape,
+                        chunks=checkpoint_chunks,
+                        dtype=np.uint32,
+                    )
+                else:
+                    raise
+            checkpoint.attrs["run_signature"] = run_signature_json
+            completed_slabs = int(checkpoint.attrs.get("completed_slabs", 0))
+            completed_slabs = max(0, min(completed_slabs, selected_count))
+
+            if completed_slabs > 0:
+                print(
+                    "Resuming interleaved run from checkpoint: "
+                    f"{completed_slabs}/{selected_count} slabs already completed"
+                )
+            else:
+                print(
+                    "Starting new interleaved checkpoint at: "
+                    f"{checkpoint_path}"
+                )
+
+            is_3d = "Z" in dim_order
+            slab_perf_records = []
+            current_distributed_blocksize = int(distributed_blocksize)
+            tuning_history = []
+            safe_non_distributed_max_voxels = 80_000_000
+            memory_safe_blocksize_cap = 768
+            for out_idx in range(completed_slabs, selected_count):
+                t = int(selected_timepoints[out_idx])
+                cached_mask_path = os.path.join(
+                    mask_cache_root, f"t{t:04d}_mask.tif"
+                )
+                slab_start = time.perf_counter()
+                slab_shape = tuple(int(s) for s in image.shape[1:])
+                slab_voxels = int(np.prod(slab_shape, dtype=np.int64))
+
+                slab_mask = None
+                loaded_mask_from_cache = False
+                slab_mask_path = cached_mask_path
+                if os.path.exists(cached_mask_path):
+                    try:
+                        slab_mask = tifffile.imread(cached_mask_path).astype(
+                            np.uint8
+                        )
+                        expected_shape = tuple(int(s) for s in image.shape[1:])
+                        if tuple(slab_mask.shape) != expected_shape:
+                            print(
+                                f"Interleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "cached mask shape mismatch, regenerating"
+                            )
+                            slab_mask = None
+                        else:
+                            print(
+                                f"\nInterleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "reusing cached ConvPaint mask"
+                            )
+                            loaded_mask_from_cache = True
+                    except Exception as exc:
+                        print(
+                            f"Interleaved slab {out_idx+1}/{selected_count} "
+                            f"(source t={t}): "
+                            f"failed to load cached mask ({exc}), regenerating"
+                        )
+                        slab_mask = None
+
+                if slab_mask is None:
+                    print(
+                        f"\nInterleaved slab {out_idx+1}/{selected_count} "
+                        f"(source t={t}): "
+                        "generating ConvPaint mask"
+                    )
+                    convpaint_start = time.perf_counter()
+                    slab = np.asarray(image[t])
+                    slab_labels = convpaint_predict(
+                        slab,
+                        channel="all",
+                        model_path=convpaint_model_path,
+                        image_downsample=convpaint_image_downsample,
+                        output_type="semantic",
+                        background_label=convpaint_background_label,
+                        use_cpu=convpaint_use_cpu,
+                        force_dedicated_env=convpaint_force_dedicated_env,
+                        z_batch_size=convpaint_z_batch_size,
+                        tmp_dir=tmp_root,
+                    )
+                    slab_mask = _labels_to_mask(slab_labels).astype(np.uint8)
+                    tifffile.imwrite(cached_mask_path, slab_mask)
+                    convpaint_elapsed = time.perf_counter() - convpaint_start
+                    print(
+                        f"Interleaved slab {out_idx+1}/{selected_count} "
+                        f"(source t={t}): "
+                        f"cached ConvPaint mask -> {cached_mask_path}"
+                    )
+                else:
+                    convpaint_elapsed = 0.0
+
+                foreground_fraction, active_blocks, total_blocks = _summarize_mask(
+                    slab_mask
+                )
+                if active_blocks is not None and total_blocks is not None:
+                    print(
+                        f"Interleaved slab {out_idx+1}/{selected_count} "
+                        f"(source t={t}): "
+                        f"foreground_fraction={foreground_fraction:.4f}, "
+                        f"active_blocks={active_blocks}/{total_blocks}"
+                    )
+                else:
+                    print(
+                        f"Interleaved slab {out_idx+1}/{selected_count} "
+                        f"(source t={t}): "
+                        f"foreground_fraction={foreground_fraction:.4f}"
+                    )
+
+                use_slab_mask = True
+                run_distributed_for_slab = True
+                if foreground_fraction < sparse_mask_fraction_threshold:
+                    print(
+                        f"Warning: ConvPaint mask is very sparse "
+                        f"(fg={foreground_fraction:.6f} < {sparse_mask_fraction_threshold}). "
+                        "Disabling foreground-based block pruning for this slab "
+                        "to avoid missing neighboring regions."
+                    )
+                    use_slab_mask = False
+                elif (
+                    loaded_mask_from_cache
+                    and use_distributed_segmentation
+                    and slab_mask is not None
+                    and slab_mask.ndim == 3
+                ):
+                    expanded_mask = _expand_mask_to_neighbor_blocks(
+                        (slab_mask > 0).astype(np.uint8), margin_blocks=1
+                    )
+                    if not np.array_equal(expanded_mask > 0, slab_mask > 0):
+                        slab_mask = expanded_mask.astype(np.uint8)
+                        slab_mask_path = os.path.join(
+                            mask_cache_root,
+                            (
+                                f"t{t:04d}_mask_runtime_bs"
+                                f"{int(distributed_blocksize)}.tif"
+                            ),
+                        )
+                        tifffile.imwrite(slab_mask_path, slab_mask)
+
+                        foreground_fraction, active_blocks, total_blocks = _summarize_mask(
+                            slab_mask
+                        )
+                        if active_blocks is not None and total_blocks is not None:
+                            print(
+                                f"Interleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "using expanded cached mask, "
+                                f"foreground_fraction={foreground_fraction:.4f}, "
+                                f"active_blocks={active_blocks}/{total_blocks}"
+                            )
+                        else:
+                            print(
+                                f"Interleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "using expanded cached mask, "
+                                f"foreground_fraction={foreground_fraction:.4f}"
+                            )
+
+                if active_blocks is not None and total_blocks is not None:
+                    active_ratio = float(active_blocks) / float(total_blocks)
+                    # If mask does not reduce distributed work, only switch to
+                    # non-distributed mode when the slab itself is small enough
+                    # to be safe in limited-RAM environments.
+                    if total_blocks <= 1 or active_ratio >= 0.95:
+                        use_slab_mask = False
+                        if slab_voxels <= safe_non_distributed_max_voxels:
+                            run_distributed_for_slab = False
+                            print(
+                                f"Interleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "auto-optimization -> using non-distributed Cellpose "
+                                f"(active_blocks={active_blocks}/{total_blocks}, "
+                                f"active_ratio={active_ratio:.3f}, "
+                                f"slab_voxels={slab_voxels})"
+                            )
+                        else:
+                            current_distributed_blocksize = min(
+                                current_distributed_blocksize,
+                                memory_safe_blocksize_cap,
+                            )
+                            print(
+                                f"Interleaved slab {out_idx+1}/{selected_count} "
+                                f"(source t={t}): "
+                                "mask pruning ineffective, but slab is large; "
+                                "keeping distributed mode for RAM safety "
+                                f"(active_blocks={active_blocks}/{total_blocks}, "
+                                f"active_ratio={active_ratio:.3f}, "
+                                f"slab_voxels={slab_voxels}, "
+                                f"blocksize={current_distributed_blocksize})"
+                            )
+
+                args_t = {
+                    "zarr_path": _source_filepath,
+                    "zarr_key": None,
+                    "timepoint_index": t,
+                    "channel": channel,
+                    "channels": channels,
+                    "flow_threshold": flow_threshold,
+                    "cellprob_threshold": cellprob_threshold,
+                    "flow3D_smooth": flow3D_smooth,
+                    "anisotropy": anisotropy,
+                    "normalize": {"tile_norm_blocksize": tile_norm_blocksize},
+                    "batch_size": batch_size,
+                    "diameter": diameter,
+                    "use_gpu": True,
+                    "do_3D": is_3d,
+                    "z_axis": 0 if is_3d else None,
+                    "channel_axis": None,
+                    "use_distributed_segmentation": run_distributed_for_slab,
+                    "distributed_blocksize": current_distributed_blocksize,
+                    "distributed_mask_path": (
+                        slab_mask_path if use_slab_mask else None
+                    ),
+                    "distributed_mask_zarr_path": None,
+                }
+
+                print(
+                    f"Interleaved slab {out_idx+1}/{selected_count} "
+                    f"(source t={t}): "
+                    f"running {'distributed' if run_distributed_for_slab else 'non-distributed'} Cellpose"
+                )
+                try:
+                    cellpose_start = time.perf_counter()
+                    slab_result = run_cellpose_in_env("eval", args_t)
+                    cellpose_mode = (
+                        "distributed" if run_distributed_for_slab else "non-distributed"
+                    )
+                except RuntimeError as exc:
+                    if not args_t.get("use_distributed_segmentation", False):
+                        raise
+
+                    print(
+                        f"Warning: distributed Cellpose failed for "
+                        f"slab {out_idx+1}/{selected_count} "
+                        f"(source t={t}) ({exc}). "
+                        "Retrying this slab in non-distributed mode."
+                    )
+                    args_t_fallback = dict(args_t)
+                    args_t_fallback["use_distributed_segmentation"] = False
+                    args_t_fallback["distributed_mask_path"] = None
+                    args_t_fallback["distributed_mask_zarr_path"] = None
+                    cellpose_start = time.perf_counter()
+                    slab_result = run_cellpose_in_env("eval", args_t_fallback)
+                    cellpose_mode = "fallback-non-distributed"
+                cellpose_elapsed = time.perf_counter() - cellpose_start
+
+                if slab_result.dtype != np.uint32:
+                    slab_result = slab_result.astype(np.uint32)
+                checkpoint[out_idx] = slab_result
+                checkpoint.attrs["completed_slabs"] = out_idx + 1
+
+                slab_elapsed = time.perf_counter() - slab_start
+                slab_record = {
+                    "selected_index": int(out_idx),
+                    "source_timepoint": int(t),
+                    "mode": cellpose_mode,
+                    "distributed_blocksize": int(current_distributed_blocksize),
+                    "convpaint_sec": float(convpaint_elapsed),
+                    "cellpose_sec": float(cellpose_elapsed),
+                    "total_sec": float(slab_elapsed),
+                    "foreground_fraction": float(foreground_fraction),
+                    "active_blocks": (
+                        None if active_blocks is None else int(active_blocks)
+                    ),
+                    "total_blocks": (
+                        None if total_blocks is None else int(total_blocks)
+                    ),
+                }
+                slab_perf_records.append(slab_record)
+                print(
+                    f"Interleaved slab {out_idx+1}/{selected_count} "
+                    f"(source t={t}) timing: "
+                    f"convpaint={convpaint_elapsed:.1f}s, "
+                    f"cellpose={cellpose_elapsed:.1f}s, "
+                    f"total={slab_elapsed:.1f}s, mode={cellpose_mode}, "
+                    f"blocksize={current_distributed_blocksize}"
+                )
+
+                # Auto-tune distributed blocksize after a few distributed samples.
+                if (
+                    cellpose_mode == "distributed"
+                    and active_blocks is not None
+                    and total_blocks is not None
+                    and total_blocks > 0
+                ):
+                    tuning_history.append(
+                        {
+                            "cellpose_sec": float(cellpose_elapsed),
+                            "active_ratio": float(active_blocks) / float(total_blocks),
+                            "blocksize": int(current_distributed_blocksize),
+                        }
+                    )
+
+                    if len(tuning_history) >= 3:
+                        recent = tuning_history[-3:]
+                        avg_cellpose_recent = sum(r["cellpose_sec"] for r in recent) / 3.0
+                        avg_active_ratio_recent = sum(r["active_ratio"] for r in recent) / 3.0
+
+                        tuned_blocksize = int(current_distributed_blocksize)
+
+                        # High active ratio means little pruning benefit; favor smaller tiles.
+                        if (
+                            avg_active_ratio_recent >= 0.85
+                            and avg_cellpose_recent >= 90.0
+                            and tuned_blocksize > 512
+                        ):
+                            tuned_blocksize = max(512, int(round(tuned_blocksize * 0.75)))
+                        # Strong pruning + slow runtime can benefit from moderately larger tiles.
+                        elif (
+                            avg_active_ratio_recent <= 0.35
+                            and avg_cellpose_recent >= 90.0
+                            and tuned_blocksize < 1024
+                        ):
+                            tuned_blocksize = min(1024, int(round(tuned_blocksize * 1.25)))
+
+                        # Keep blocksize aligned to multiples of 32 for stability.
+                        tuned_blocksize = max(256, (tuned_blocksize // 32) * 32)
+
+                        if tuned_blocksize != current_distributed_blocksize:
+                            print(
+                                "Auto-tuner: updating distributed blocksize "
+                                f"{current_distributed_blocksize} -> {tuned_blocksize} "
+                                f"(avg_cellpose={avg_cellpose_recent:.1f}s, "
+                                f"avg_active_ratio={avg_active_ratio_recent:.3f})"
+                            )
+                            current_distributed_blocksize = tuned_blocksize
+
+            if slab_perf_records:
+                total_convpaint = sum(r["convpaint_sec"] for r in slab_perf_records)
+                total_cellpose = sum(r["cellpose_sec"] for r in slab_perf_records)
+                total_elapsed = sum(r["total_sec"] for r in slab_perf_records)
+                distributed_count = sum(
+                    1 for r in slab_perf_records if r["mode"] == "distributed"
+                )
+                non_dist_count = sum(
+                    1 for r in slab_perf_records if r["mode"] == "non-distributed"
+                )
+                fallback_count = sum(
+                    1
+                    for r in slab_perf_records
+                    if r["mode"] == "fallback-non-distributed"
+                )
+                checkpoint.attrs["slab_perf_records"] = json.dumps(
+                    slab_perf_records
+                )
+                checkpoint.attrs["slab_perf_summary"] = json.dumps(
+                    {
+                        "processed_slabs_this_run": len(slab_perf_records),
+                        "convpaint_total_sec": total_convpaint,
+                        "cellpose_total_sec": total_cellpose,
+                        "total_sec": total_elapsed,
+                        "distributed_count": distributed_count,
+                        "non_distributed_count": non_dist_count,
+                        "fallback_non_distributed_count": fallback_count,
+                        "final_distributed_blocksize": int(current_distributed_blocksize),
+                    }
+                )
+                print(
+                    "Interleaved run timing summary: "
+                    f"slabs={len(slab_perf_records)}, "
+                    f"convpaint={total_convpaint:.1f}s, "
+                    f"cellpose={total_cellpose:.1f}s, "
+                    f"total={total_elapsed:.1f}s, "
+                    f"modes(distributed/non-distributed/fallback)="
+                    f"{distributed_count}/{non_dist_count}/{fallback_count}, "
+                    f"final_blocksize={current_distributed_blocksize}"
+                )
+
+            result = np.asarray(checkpoint)
+            print(
+                "Interleaved distributed Cellpose complete. "
+                f"Output shape: {result.shape}, max label: {int(np.max(result))}"
+            )
+            return result
+
+        if use_convpaint_auto_mask:
+            if convpaint_mask is not None:
+                source_parent = os.path.dirname(os.path.abspath(_source_filepath))
+                tmp_root = os.path.join(source_parent, "tmp")
+                os.makedirs(tmp_root, exist_ok=True)
+                with NamedTemporaryFile(
+                    suffix="_convpaint_mask.tif",
+                    delete=False,
+                    dir=tmp_root,
+                ) as mask_file:
+                    generated_mask_path = mask_file.name
+                tifffile.imwrite(generated_mask_path, convpaint_mask.astype(np.uint8))
+                print(
+                    "Saved ConvPaint auto-mask for distributed processing: "
+                    f"{generated_mask_path}"
+                )
+        if use_distributed_segmentation:
+            print(
+                "Distributed segmentation requested: enabled "
+                f"(blocksize={distributed_blocksize})"
+            )
+            print(
+                "Status: preparing blockwise Cellpose processing. "
+                "Detailed block progress will appear from the dedicated environment."
+            )
         # Prepare arguments for direct zarr processing
         is_3d = "Z" in dim_order
         args = {
             "zarr_path": _source_filepath,
             "zarr_key": None,  # Could be enhanced to support specific keys
+            "channel": channel,  # Pass channel selection for filtering
             "channels": channels,
             "flow_threshold": flow_threshold,
             "cellprob_threshold": cellprob_threshold,
@@ -297,8 +1290,88 @@ def cellpose_segmentation(
             "do_3D": is_3d,
             "z_axis": 0 if is_3d else None,
             "channel_axis": None,  # No channel axis for single-channel grayscale images
+            "use_distributed_segmentation": use_distributed_segmentation,
+            "distributed_blocksize": distributed_blocksize,
+            "distributed_mask_path": generated_mask_path,
+            "distributed_mask_zarr_path": generated_mask_zarr_path,
         }
+
+        selected_timepoints = None
+        t_axis = None
+        timepoint_cache_root = None
+        use_timepoint_cache = False
+
+        if "T" in dim_order and image.ndim == 4:
+            t_axis = dim_order.index("T")
+            if t_axis >= image.ndim:
+                t_axis = 0
+
+            total_timepoints = int(image.shape[t_axis])
+            selected_timepoints = _resolve_timepoint_indices(total_timepoints)
+            use_timepoint_cache = True
+
+            source_parent = os.path.dirname(os.path.abspath(_source_filepath))
+            tmp_root = os.path.join(source_parent, "tmp")
+            os.makedirs(tmp_root, exist_ok=True)
+            source_base = os.path.splitext(os.path.basename(_source_filepath))[0]
+
+            # Cache key intentionally excludes selected_timepoints so different
+            # intervals can reuse already completed per-timepoint outputs.
+            tp_cache_signature = {
+                "source": os.path.abspath(_source_filepath),
+                "source_mtime": os.path.getmtime(_source_filepath),
+                "channel": channel,
+                "flow_threshold": float(flow_threshold),
+                "cellprob_threshold": float(cellprob_threshold),
+                "flow3D_smooth": int(flow3D_smooth),
+                "anisotropy": None if anisotropy is None else float(anisotropy),
+                "tile_norm_blocksize": int(tile_norm_blocksize),
+                "batch_size": int(batch_size),
+                "diameter": float(diameter),
+                "use_distributed_segmentation": bool(use_distributed_segmentation),
+                "distributed_blocksize": int(distributed_blocksize),
+                "use_convpaint_auto_mask": bool(use_convpaint_auto_mask),
+                "convpaint_model_path": convpaint_model_path,
+                "convpaint_image_downsample": int(convpaint_image_downsample),
+                "convpaint_background_label": int(convpaint_background_label),
+                "convpaint_mask_dilation": int(convpaint_mask_dilation),
+                "convpaint_use_cpu": bool(convpaint_use_cpu),
+                "convpaint_force_dedicated_env": bool(convpaint_force_dedicated_env),
+                "convpaint_z_batch_size": int(convpaint_z_batch_size),
+            }
+            tp_cache_key = hashlib.sha1(
+                json.dumps(tp_cache_signature, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
+            timepoint_cache_root = os.path.join(
+                tmp_root,
+                "cellpose_timepoint_cache",
+                f"{source_base}_{tp_cache_key}",
+            )
+            os.makedirs(timepoint_cache_root, exist_ok=True)
+
+            print(
+                "Timepoint interval enabled for zarr-direct Cellpose: "
+                f"selected {len(selected_timepoints)} / {total_timepoints} "
+                f"timepoints (start={selected_timepoints[0]}, "
+                f"end={selected_timepoints[-1]}, step={int(timepoint_step)})"
+            )
+            print(f"Per-timepoint cache: {timepoint_cache_root}")
+
+        if use_distributed_segmentation and not is_3d:
+            print(
+                "Distributed segmentation was requested, but dim_order has no Z axis. "
+                "Falling back to standard Cellpose evaluation."
+            )
+        elif use_distributed_segmentation:
+            print(
+                "Distributed segmentation is eligible for this zarr input."
+            )
     else:
+        if use_distributed_segmentation:
+            print(
+                "Distributed segmentation was requested, but input is not a .zarr path. "
+                "Falling back to standard Cellpose evaluation."
+            )
         # Prepare arguments for the Cellpose function (legacy numpy array mode)
         is_3d = "Z" in dim_order
         args = {
@@ -318,7 +1391,81 @@ def cellpose_segmentation(
         }
     # Run Cellpose in the dedicated environment
     print("Running Cellpose model in dedicated environment...")
-    result = run_cellpose_in_env("eval", args)
+    try:
+        if use_zarr_direct and use_timepoint_cache and selected_timepoints is not None:
+            slab_results = []
+            selected_count = len(selected_timepoints)
+            existing_outputs = 0
+            for t in selected_timepoints:
+                tp_existing = os.path.join(
+                    timepoint_cache_root,
+                    f"t{int(t):04d}_labels.tif",
+                )
+                if os.path.exists(tp_existing):
+                    existing_outputs += 1
+
+            skipped_existing = 0
+            newly_processed = 0
+            for idx, t in enumerate(selected_timepoints):
+                t = int(t)
+                tp_output_path = os.path.join(
+                    timepoint_cache_root,
+                    f"t{t:04d}_labels.tif",
+                )
+
+                completed = skipped_existing + newly_processed
+                remaining = selected_count - completed
+                print(
+                    "Timepoint progress: "
+                    f"completed={completed}/{selected_count}, "
+                    f"skipped_existing={skipped_existing}, "
+                    f"newly_processed={newly_processed}, "
+                    f"remaining={remaining}, "
+                    f"preexisting_total={existing_outputs}"
+                )
+
+                if os.path.exists(tp_output_path):
+                    print(
+                        f"Using existing timepoint output {idx+1}/{len(selected_timepoints)} "
+                        f"(source t={t})"
+                    )
+                    slab_result = tifffile.imread(tp_output_path)
+                    skipped_existing += 1
+                else:
+                    print(
+                        f"Running selected timepoint {idx+1}/{len(selected_timepoints)} "
+                        f"(source t={t})"
+                    )
+                    args_t = dict(args)
+                    args_t["timepoint_index"] = t
+                    slab_result = run_cellpose_in_env("eval", args_t)
+
+                    if slab_result.dtype != np.uint32:
+                        slab_result = slab_result.astype(np.uint32)
+                    tifffile.imwrite(tp_output_path, slab_result)
+                    newly_processed += 1
+
+                if slab_result.dtype != np.uint32:
+                    slab_result = slab_result.astype(np.uint32)
+                slab_results.append(slab_result)
+
+            print(
+                "Timepoint progress: "
+                f"completed={selected_count}/{selected_count}, "
+                f"skipped_existing={skipped_existing}, "
+                f"newly_processed={newly_processed}, "
+                "remaining=0"
+            )
+
+            result = np.stack(slab_results, axis=0)
+        else:
+            result = run_cellpose_in_env("eval", args)
+    finally:
+        if generated_mask_path:
+            with suppress(OSError, FileNotFoundError):
+                os.unlink(generated_mask_path)
+        if generated_mask_zarr_path:
+            shutil.rmtree(generated_mask_zarr_path, ignore_errors=True)
     print(f"Segmentation complete. Found {np.max(result)} objects.")
 
     # Ensure result is uint32 for proper label detection in napari
@@ -337,3 +1484,8 @@ def update_cellpose_env_manager():
     # This function can be called to update the environment manager code
     # For example, by modifying the pip install command to install the latest version
     # or specify Cellpose 4 explicitly
+
+
+# Cellpose distributed mode launches internal workers and can be very memory-heavy.
+# Keep the outer batch scheduler single-file-at-a-time for stability.
+cellpose_segmentation.thread_safe = False

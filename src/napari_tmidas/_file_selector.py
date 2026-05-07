@@ -88,6 +88,7 @@ except ImportError:
 
 try:
     from qtpy.QtCore import Qt, QThread, Signal
+    from qtpy.QtCore import Qt as _Qt
     from qtpy.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -100,7 +101,9 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSpinBox,
+        QSplitter,
         QTableWidget,
         QTableWidgetItem,
         QVBoxLayout,
@@ -109,12 +112,12 @@ try:
 
     _HAS_QTPY = True
 except ImportError:
-    Qt = QThread = Signal = None
+    Qt = QThread = Signal = _Qt = None
     QCheckBox = QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
     QHeaderView = QLabel = QLineEdit = QMessageBox = QProgressBar = (
         QPushButton
     ) = None
-    QSpinBox = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
+    QScrollArea = QSpinBox = QSplitter = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
     _HAS_QTPY = False
 
 try:
@@ -225,9 +228,13 @@ def load_zarr_with_napari_ome_zarr(
 
         if layer_data_list and len(layer_data_list) > 0:
             if verbose:
-                print(
-                    f"napari-ome-zarr: Successfully loaded {len(layer_data_list)} layers"
-                )
+                layer_count = len(layer_data_list)
+                if layer_count == 1:
+                    print("napari-ome-zarr: Successfully loaded 1 layer")
+                else:
+                    print(
+                        f"napari-ome-zarr: Successfully loaded {layer_count} layers"
+                    )
 
             # Enhance layer metadata
             enhanced_layers = []
@@ -420,6 +427,156 @@ def get_zarr_info(filepath: str) -> dict:
     return info
 
 
+def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
+    """
+    Detect channels directly from OME-Zarr metadata (.zattrs).
+    This is the most reliable method for zarr files.
+
+    Returns (num_channels, channel_axis) or (1, None) if not found.
+    """
+    try:
+        import json
+
+        # Try reading .zattrs for OME multiscales metadata
+        zattrs_path = os.path.join(zarr_path, ".zattrs")
+        if os.path.exists(zattrs_path):
+            with open(zattrs_path) as f:
+                attrs = json.load(f)
+        else:
+            # Try opening with zarr directly
+            root = zarr.open(zarr_path, mode="r")
+            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
+
+        multiscales = attrs.get("multiscales", [])
+        if not multiscales:
+            print(f"Channel detection: No multiscales metadata in {zarr_path}")
+            # Fall back to inspecting the raw array shape
+            root = zarr.open(zarr_path, mode="r")
+            # Try array at path "0" (highest resolution)
+            arr = None
+            if hasattr(root, "arrays"):
+                for name, a in root.arrays():
+                    if name in ("0", "data"):
+                        arr = a
+                        break
+                if arr is None and list(root.arrays()):
+                    arr = list(root.arrays())[0][1]
+            elif hasattr(root, "shape"):
+                arr = root
+
+            if arr is not None:
+                return _detect_channels_from_shape(arr.shape)
+            return (1, None)
+
+        ms = multiscales[0]
+        axes = ms.get("axes", [])
+        print(f"Channel detection: OME axes = {axes}")
+
+        # Find the channel axis
+        channel_axis = None
+        for i, axis in enumerate(axes):
+            name = axis.get("name", "").lower() if isinstance(axis, dict) else str(axis).lower()
+            atype = axis.get("type", "").lower() if isinstance(axis, dict) else ""
+            if name in ("c", "channel", "ch") or atype == "channel":
+                channel_axis = i
+                break
+
+        if channel_axis is None:
+            print("Channel detection: No channel axis found in OME axes metadata")
+            # Try shape heuristics on the first dataset array
+            datasets = ms.get("datasets", [])
+            if datasets:
+                path = datasets[0].get("path", "0")
+                root = zarr.open(zarr_path, mode="r")
+                arr = root[path]
+                return _detect_channels_from_shape(arr.shape)
+            return (1, None)
+
+        # Get num_channels from the array at the first resolution level
+        datasets = ms.get("datasets", [])
+        path = datasets[0].get("path", "0") if datasets else "0"
+        root = zarr.open(zarr_path, mode="r")
+        arr = root[path]
+        num_channels = arr.shape[channel_axis]
+        print(f"Channel detection: zarr metadata → {num_channels} channels at axis {channel_axis}")
+        return (num_channels, channel_axis)
+
+    except Exception as e:
+        print(f"Channel detection: zarr metadata read failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return (1, None)
+
+
+def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
+    """Heuristic channel detection from array shape alone."""
+    print(f"Channel detection: shape heuristic on {shape}")
+    if len(shape) >= 3 and 2 <= shape[0] <= 16:
+        return (shape[0], 0)
+    if len(shape) >= 4 and 2 <= shape[1] <= 16:
+        return (shape[1], 1)
+    if len(shape) >= 5 and 2 <= shape[1] <= 16:
+        return (shape[1], 1)
+    print(f"Channel detection: No channel dimension found in shape {shape}")
+    return (1, None)
+
+
+def detect_channels_in_image(image_data: Union[np.ndarray, list]) -> Tuple[int, Optional[int]]:
+    """
+    Detect the number of channels and channel axis in an image.
+
+    Parameters
+    ----------
+    image_data : np.ndarray or list
+        Image data or list of layer data from napari-ome-zarr
+
+    Returns
+    -------
+    Tuple[int, Optional[int]]
+        (num_channels, channel_axis) - number of channels and the axis index,
+        or (1, None) if no channel dimension detected
+    """
+    # Handle multi-layer data from OME-Zarr reader
+    if isinstance(image_data, list):
+        # Collect image layers
+        image_layers = []
+        for item in image_data:
+            if len(item) == 3:
+                data, add_kwargs, layer_type = item
+            else:
+                continue
+            if layer_type == "image":
+                image_layers.append((data, add_kwargs))
+
+        # Multiple image layers → each layer is a channel
+        if len(image_layers) > 1:
+            print(f"Channel detection: {len(image_layers)} separate image layers → treating as channels")
+            return (len(image_layers), -1)
+
+        # Single image layer: check channel_axis in kwargs
+        if image_layers:
+            image, add_kwargs = image_layers[0]
+            if isinstance(add_kwargs, dict):
+                for key in ("channel_axis",):
+                    if key in add_kwargs and add_kwargs[key] is not None:
+                        ch_axis = add_kwargs[key]
+                        if hasattr(image, "shape") and len(image.shape) > ch_axis:
+                            n = image.shape[ch_axis]
+                            print(f"Channel detection: channel_axis={ch_axis} from kwargs, {n} channels")
+                            return (n, ch_axis)
+            # Fall through to shape heuristic using this layer's data
+            if hasattr(image, "shape"):
+                return _detect_channels_from_shape(image.shape)
+
+        # No usable image layers
+        return (1, None)
+
+    # Plain array
+    if not hasattr(image_data, "shape"):
+        return (1, None)
+    return _detect_channels_from_shape(image_data.shape)
+
+
 def save_as_zarr(
     data: np.ndarray,
     filepath: str,
@@ -551,9 +708,13 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
             try:
                 layer_data_list = load_zarr_with_napari_ome_zarr(filepath)
                 if layer_data_list:
-                    print(
-                        f"Loaded {len(layer_data_list)} layers from OME-Zarr"
-                    )
+                    layer_count = len(layer_data_list)
+                    if layer_count == 1:
+                        print("Loaded 1 layer from OME-Zarr")
+                    else:
+                        print(
+                            f"Loaded {layer_count} layers from OME-Zarr"
+                        )
                     return layer_data_list
             except (ImportError, ValueError, TypeError, OSError) as e:
                 print(
@@ -1085,15 +1246,51 @@ class ProcessedFilesTableWidget(QTableWidget):
 
                 # Use napari's built-in open method with the plugin
                 try:
-                    layers = self.viewer.open(
-                        filepath, plugin="napari-ome-zarr"
-                    )
+                    # napari-ome-zarr may return colormap=[] when omero
+                    # channels have no color field; that empty list causes
+                    # split_channels to crash because it expects one colormap
+                    # per channel.  Use the reader directly so we can patch
+                    # the kwargs before handing them to the viewer.
+                    from napari_ome_zarr import napari_get_reader as _ozr
+                    _reader_fn = _ozr(filepath)
+                    if _reader_fn is not None:
+                        _layer_data = _reader_fn(filepath)
+                        layers = []
+                        for _data, _kwargs, _ltype in _layer_data:
+                            # Processed resized zarrs are typically modest in
+                            # size; loading level-0 directly avoids napari
+                            # selecting coarser pyramid levels, which can make
+                            # them appear blurrier than expected.
+                            if isinstance(_data, list) and len(_data) > 0:
+                                _data = _data[0]
+                                _kwargs.pop("multiscale", None)
+                                _kwargs["multiscale"] = False
+                            # Drop empty colormap list so napari uses
+                            # its own defaults per channel.
+                            if isinstance(_kwargs.get("colormap"), list) and len(_kwargs["colormap"]) == 0:
+                                _kwargs.pop("colormap")
+                            # Use nearest interpolation in 3D so voxels stay
+                            # sharp; the default 'linear' trilinear blurs the
+                            # volume render even when the 2D slices look fine.
+                            _kwargs["interpolation3d"] = "nearest"
+                            _added = self.viewer._add_layer_from_data(
+                                _data, _kwargs, _ltype
+                            )
+                            layers.extend(_added)
+                    else:
+                        layers = self.viewer.open(
+                            filepath, plugin="napari-ome-zarr"
+                        )
 
                     # Track the added layers and rename them as processed
                     if layers:
                         if isinstance(layers, list):
                             for layer in layers:
                                 layer.name = f"Processed {layer.name}"
+                                # Force level-0 in case napari still treats
+                                # the layer as multiscale internally
+                                if hasattr(layer, "data_level"):
+                                    layer.data_level = 0
                                 self.current_processed_images.append(layer)
                         else:
                             layers.name = f"Processed {layers.name}"
@@ -1111,6 +1308,13 @@ class ProcessedFilesTableWidget(QTableWidget):
                                     print(
                                         f"Switched to 3D view for processed data with shape: {first_layer_data.shape}"
                                     )
+
+                        # Reset camera so napari selects the appropriate
+                        # pyramid level for the loaded data size.
+                        try:
+                            self.viewer.reset_view()
+                        except Exception:
+                            pass
 
                         # Move all processed layers to top
                         for layer in self.current_processed_images:
@@ -1363,6 +1567,7 @@ class ParameterWidget(QWidget):
             step_value = param_info.get("step")
             description = param_info.get("description", "")
             options = param_info.get("options")  # For dropdown parameters
+            widget_type = param_info.get("widget_type")  # For special widgets
 
             # Create a container for this parameter
             param_container = QWidget()
@@ -1378,8 +1583,16 @@ class ParameterWidget(QWidget):
             name_label.setMinimumWidth(120)
             input_layout.addWidget(name_label)
 
-            # Create appropriate widget based on parameter type
-            if options:
+            # Create appropriate widget based on parameter type or widget_type
+            if widget_type == "channel_selector":
+                # Create a combo box for channel selection
+                # Will be populated dynamically when images are loaded
+                widget = QComboBox()
+                widget.addItem("All channels", "all")
+                widget.setToolTip("Select which channel(s) to process")
+                # Store reference to update later
+                setattr(self, "_channel_selector_widget", widget)
+            elif options:
                 # Use QComboBox for parameters with predefined options
                 widget = QComboBox()
                 widget.addItems([str(opt) for opt in options])
@@ -1465,18 +1678,31 @@ class ParameterWidget(QWidget):
         values = {}
         for param_name, widget in self.param_widgets.items():
             param_type = self.parameters[param_name]["type"]
+            widget_type = self.parameters[param_name].get("widget_type")
 
             if isinstance(widget, QComboBox):
-                # For dropdown, get the selected text and convert to appropriate type
-                text_value = widget.currentText()
-                try:
-                    values[param_name] = (
-                        param_type(text_value)
-                        if param_type is not str
-                        else text_value
-                    )
-                except (ValueError, TypeError):
-                    values[param_name] = text_value
+                # For channel selector, use currentData() to get the actual value
+                if widget_type == "channel_selector":
+                    data = widget.currentData()
+                    if data == "all":
+                        values[param_name] = "all"
+                    else:
+                        # Convert to int if it's a specific channel number
+                        try:
+                            values[param_name] = int(data)
+                        except (ValueError, TypeError):
+                            values[param_name] = data
+                else:
+                    # For dropdown, get the selected text and convert to appropriate type
+                    text_value = widget.currentText()
+                    try:
+                        values[param_name] = (
+                            param_type(text_value)
+                            if param_type is not str
+                            else text_value
+                        )
+                    except (ValueError, TypeError):
+                        values[param_name] = text_value
             elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 values[param_name] = widget.value()
             elif isinstance(widget, QCheckBox):
@@ -1490,6 +1716,64 @@ class ParameterWidget(QWidget):
                     values[param_name] = widget.text()
 
         return values
+
+    def update_channel_selector(self, file_list: List[str]):
+        """
+        Update the channel selector widget based on the loaded files.
+        Detects channels in the first file and updates the dropdown.
+        """
+        if not hasattr(self, "_channel_selector_widget"):
+            return
+
+        channel_widget = self._channel_selector_widget
+        previous_data = channel_widget.currentData()
+        channel_widget.clear()
+        channel_widget.addItem("All channels", "all")
+
+        if not file_list:
+            return
+
+        try:
+            first_file = file_list[0]
+            print(f"Channel detection: Examining {os.path.basename(first_file)}")
+
+            # For zarr files, read metadata directly — most reliable method
+            if first_file.lower().endswith(".zarr") or (
+                os.path.isdir(first_file) and os.path.exists(os.path.join(first_file, ".zattrs"))
+            ):
+                num_channels, channel_axis = detect_channels_from_zarr_path(first_file)
+            else:
+                # For other formats, load the file and inspect
+                image_data = load_image_file(first_file)
+                if isinstance(image_data, list):
+                    print(f"Channel detection: Got {len(image_data)} layers from loader")
+                    for i, item in enumerate(image_data):
+                        if len(item) == 3:
+                            d, kw, lt = item
+                            print(f"  Layer {i}: type={lt}, shape={getattr(d, 'shape', '?')}, kwargs_keys={list(kw.keys()) if isinstance(kw, dict) else '?'}")
+                elif hasattr(image_data, "shape"):
+                    print(f"Channel detection: Image shape={image_data.shape}")
+                num_channels, channel_axis = detect_channels_in_image(image_data)
+
+            print(f"Channel detection: result → {num_channels} channels, axis={channel_axis}")
+
+            if num_channels > 1:
+                for i in range(num_channels):
+                    channel_widget.addItem(f"Channel {i}", str(i))
+                print(f"✓ Added {num_channels} channel options")
+            else:
+                print("✓ Single channel, no extra options added")
+
+        except Exception as e:
+            print(f"✗ Channel detection failed: {e}")
+            import traceback
+            traceback.print_exc()
+        # Preserve prior user selection when possible instead of always
+        # resetting to "All channels" on refresh.
+        if previous_data is not None:
+            prev_idx = channel_widget.findData(previous_data)
+            if prev_idx >= 0:
+                channel_widget.setCurrentIndex(prev_idx)
 
 
 @magicgui(
@@ -1583,7 +1867,7 @@ class ProcessingWorker(QThread):
         self.output_suffix = output_suffix
         self.output_format = output_format  # 'tiff' or 'zarr'
         self.stop_requested = False
-        self.thread_count = max(1, (os.cpu_count() or 4) - 1)  # Default value
+        self.thread_count = max(1, (os.cpu_count() or 4) // 2)  # Default value
 
     def stop(self):
         """Request the worker to stop processing"""
@@ -1665,15 +1949,25 @@ class ProcessingWorker(QThread):
                 image = None
                 image_dtype = np.float32
             elif isinstance(image_data, list):
-                print(
-                    f"Processing first layer of multi-layer file: {filepath}"
-                )
+                layer_count = len(image_data)
+                if layer_count > 1:
+                    print(
+                        f"Processing first image layer from {layer_count} OME-Zarr layers: {filepath}"
+                    )
+                else:
+                    print(
+                        f"Processing single OME-Zarr image layer: {filepath}"
+                    )
                 # Initialize image to None to detect extraction issues
                 image = None
                 # Take the first image layer
                 for data, add_kwargs, layer_type in image_data:
                     if layer_type == "image":
                         image = data
+                        # OME-Zarr multiscale: data is a list of arrays,
+                        # one per resolution level. Index 0 = full resolution.
+                        if isinstance(image, list):
+                            image = image[0]
                         # Extract metadata if available
                         if isinstance(add_kwargs, dict):
                             metadata = add_kwargs.get("metadata", {})
@@ -1768,6 +2062,46 @@ class ProcessingWorker(QThread):
                     f"(shape: {image.shape}, chunks: {image.chunks})"
                 )
 
+            # --- Channel extraction ---
+            # If the user selected a specific channel, extract it from the array
+            # before passing to the processing function.  This handles 5D TCZYX
+            # zarr data where C is axis 1.
+            channel_param = (self.param_values or {}).get("channel", None)
+            if (
+                channel_param is not None
+                and channel_param != "all"
+                and image is not None
+                and hasattr(image, "shape")
+            ):
+                try:
+                    from napari_tmidas._file_selector import (
+                        detect_channels_from_zarr_path,
+                        detect_channels_in_image,
+                    )
+                    if filepath.lower().endswith(".zarr") or (
+                        os.path.isdir(filepath)
+                        and os.path.exists(os.path.join(filepath, ".zattrs"))
+                    ):
+                        num_ch, ch_axis = detect_channels_from_zarr_path(filepath)
+                    else:
+                        num_ch, ch_axis = detect_channels_in_image(image)
+
+                    ch_idx = int(channel_param)
+                    if num_ch > 1 and ch_axis is not None and ch_axis >= 0:
+                        if 0 <= ch_idx < num_ch:
+                            image = np.take(image, ch_idx, axis=ch_axis)
+                            print(
+                                f"Channel {ch_idx} extracted "
+                                f"(axis {ch_axis}): new shape {image.shape}"
+                            )
+                        else:
+                            print(
+                                f"Warning: channel {ch_idx} out of range "
+                                f"(0-{num_ch-1}), using full array"
+                            )
+                except Exception as _ce:
+                    print(f"Warning: channel extraction failed: {_ce}")
+
             # Apply processing with parameters
             # Always pass source path, output folder and suffix so functions
             # like merge_channels can write their own output and by-pass the
@@ -1820,6 +2154,23 @@ class ProcessingWorker(QThread):
                     print("Extracting single element from list")
                     image = image[0]
 
+            # Explicit status for Cellpose distributed mode so users can
+            # verify the selected option reached the processing function.
+            if "use_distributed_segmentation" in processing_params:
+                requested_distributed = bool(
+                    processing_params.get("use_distributed_segmentation")
+                )
+                blocksize = processing_params.get(
+                    "distributed_blocksize", "default"
+                )
+                src_path = processing_params.get("_source_filepath", filepath)
+                print(
+                    "Cellpose distributed option: "
+                    f"requested={requested_distributed}, "
+                    f"blocksize={blocksize}, "
+                    f"source={src_path}"
+                )
+
             processed_result = self.processing_func(image, **processing_params)
 
             # If result is a Dask array, compute it now (lazy evaluation complete)
@@ -1838,7 +2189,11 @@ class ProcessingWorker(QThread):
 
             # A function may write its own output (e.g. zarr-based merge) and
             # return the saved file path as a string — treat it as already saved.
-            if isinstance(processed_result, str) and os.path.isfile(processed_result):
+            # A .zarr output is a directory, so check isdir too.
+            if isinstance(processed_result, str) and (
+                os.path.isfile(processed_result)
+                or os.path.isdir(processed_result)
+            ):
                 print(f"✅ Function wrote its own output: {processed_result}")
                 return {
                     "original_file": filepath,
@@ -2360,14 +2715,28 @@ class FileResultsWidget(QWidget):
 
         # Create main layout
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
-        # Create table of files
+        # Use a splitter so the table and controls panels resize independently
+        splitter = QSplitter(_Qt.Vertical)
+        layout.addWidget(splitter)
+
+        # --- Top pane: file table ---
         self.table = ProcessedFilesTableWidget(viewer)
         self.table.add_initial_files(file_list)
+        splitter.addWidget(self.table)
 
-        # Add table to layout
-        layout.addWidget(self.table)
+        # --- Bottom pane: processing controls ---
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout()
+        controls_layout.setContentsMargins(0, 4, 0, 0)
+        controls_widget.setLayout(controls_layout)
+        splitter.addWidget(controls_widget)
+
+        # Give the table 40% and controls 60% of initial height
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
 
         # Load all processing functions
         print("Calling discover_and_load_processing_functions")
@@ -2377,7 +2746,7 @@ class FileResultsWidget(QWidget):
         for func_name in BatchProcessingRegistry.list_functions():
             print(func_name)
 
-        # Create processing function selector
+        # Create processing function selector (added into controls_layout below)
         processing_layout = QVBoxLayout()
 
         # Add dimension order selector FIRST (before function selector)
@@ -2478,11 +2847,11 @@ class FileResultsWidget(QWidget):
         self.thread_count = QSpinBox()
         self.thread_count.setMinimum(1)
         self.thread_count.setMaximum(
-            os.cpu_count() or 4
-        )  # Default to CPU count or 4
+            max(1, (os.cpu_count() or 4) // 2)
+        )  # Cap outer thread count to half the available CPU cores
         self.thread_count.setValue(
-            max(1, (os.cpu_count() or 4) - 1)
-        )  # Default to CPU count - 1
+            max(1, (os.cpu_count() or 4) // 2)
+        )  # Default to half of available CPU cores
         thread_layout.addWidget(self.thread_count)
 
         output_layout.addLayout(thread_layout)
@@ -2493,9 +2862,9 @@ class FileResultsWidget(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)  # Hide initially
 
-        layout.addLayout(processing_layout)
-        layout.addLayout(output_layout)
-        layout.addWidget(self.progress_bar)
+        controls_layout.addLayout(processing_layout)
+        controls_layout.addLayout(output_layout)
+        controls_layout.addWidget(self.progress_bar)
 
         # Add batch processing and cancel buttons
         button_layout = QHBoxLayout()
@@ -2509,7 +2878,7 @@ class FileResultsWidget(QWidget):
         self.cancel_button.setEnabled(False)  # Disabled initially
         button_layout.addWidget(self.cancel_button)
 
-        layout.addLayout(button_layout)
+        controls_layout.addLayout(button_layout)
 
         # Initialize parameters for the first function
         if self.processing_selector.count() > 0:
@@ -2583,8 +2952,12 @@ class FileResultsWidget(QWidget):
         # Get parameters
         parameters = function_info.get("parameters", {})
 
-        # Remove old parameters widget if it exists
-        if hasattr(self, "param_widget_instance"):
+        # Remove old parameters widget / scroll area if it exists
+        if hasattr(self, "_param_scroll_area") and self._param_scroll_area is not None:
+            self.parameters_widget.layout().removeWidget(self._param_scroll_area)
+            self._param_scroll_area.deleteLater()
+            self._param_scroll_area = None
+        elif hasattr(self, "param_widget_instance"):
             self.parameters_widget.layout().removeWidget(
                 self.param_widget_instance
             )
@@ -2601,14 +2974,24 @@ class FileResultsWidget(QWidget):
             self.param_widget_instance.use_cpu_changed.connect(
                 self._update_thread_count_for_gpu
             )
-            self.parameters_widget.layout().addWidget(
-                self.param_widget_instance
-            )
+            # Wrap in a scroll area so crowded parameter lists remain accessible
+            scroll = QScrollArea()
+            scroll.setWidget(self.param_widget_instance)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setMinimumHeight(200)
+            scroll.setMaximumHeight(400)
+            self._param_scroll_area = scroll
+            self.parameters_widget.layout().addWidget(scroll)
+            # Update channel selector if the function has a channel parameter
+            if any(p.get("widget_type") == "channel_selector" for p in parameters.values()):
+                self.param_widget_instance.update_channel_selector(self.file_list)
             # Initial update of thread count based on current use_cpu value
             if "use_cpu" in parameters:
                 use_cpu_value = parameters["use_cpu"].get("default", False)
                 self._update_thread_count_for_gpu(use_cpu_value)
         else:
+            self._param_scroll_area = None
             # Create empty widget if no parameters
             self.param_widget_instance = QLabel(
                 "No parameters for this function"

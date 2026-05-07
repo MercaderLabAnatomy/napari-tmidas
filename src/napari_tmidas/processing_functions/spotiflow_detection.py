@@ -184,8 +184,14 @@ def _convert_points_to_labels_with_heatmap(
 @BatchProcessingRegistry.register(
     name="Spotiflow Spot Detection",
     suffix="_spot_labels",
-    description="Detect spots in fluorescence microscopy images using Spotiflow and return as label masks",
+    description="Detect spots in fluorescence microscopy images using Spotiflow and return as label masks. For multichannel images, select which channel to detect spots in.",
     parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to detect spots in (automatically detected from multichannel images)",
+        },
         "pretrained_model": {
             "type": str,
             "default": "general",
@@ -294,6 +300,7 @@ def _convert_points_to_labels_with_heatmap(
 )
 def spotiflow_detect_spots(
     image: np.ndarray,
+    channel: str = "all",
     pretrained_model: str = "general",
     model_path: str = "",
     subpixel: bool = True,

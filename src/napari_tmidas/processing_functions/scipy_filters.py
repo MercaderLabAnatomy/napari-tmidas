@@ -328,7 +328,7 @@ if SCIPY_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Gaussian Blur",
         suffix="_blurred",
-        description="Apply Gaussian blur to the image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D blur.",
+        description="Apply Gaussian blur to the image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D blur. For multichannel images, select which channel(s) to process.",
         parameters={
             "sigma": {
                 "type": float,
@@ -336,11 +336,17 @@ if SCIPY_AVAILABLE:
                 "min": 0.1,
                 "max": 10.0,
                 "description": "Standard deviation for Gaussian kernel",
-            }
+            },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def gaussian_blur(
-        image: np.ndarray, sigma: float = 1.0, dimension_order: str = "Auto"
+        image: np.ndarray, sigma: float = 1.0, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
         """
         Apply Gaussian blur to the image.
@@ -352,6 +358,7 @@ if SCIPY_AVAILABLE:
                             If TYX/CYX: processes each frame/channel independently (2D blur per slice)
                             If ZYX: applies 3D blur to spatial volume
                             If YX or Auto: processes as-is
+            channel: Which channel to process (handled automatically by the processing worker)
 
         Returns:
             Blurred image with same shape as input
@@ -385,7 +392,7 @@ if SCIPY_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Median Filter",
         suffix="_median",
-        description="Apply median filter for noise reduction. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D filter.",
+        description="Apply median filter for noise reduction. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or apply 3D filter. For multichannel images, select which channel(s) to process.",
         parameters={
             "size": {
                 "type": int,
@@ -393,11 +400,17 @@ if SCIPY_AVAILABLE:
                 "min": 3,
                 "max": 15,
                 "description": "Size of the median filter window",
-            }
+            },
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
         },
     )
     def median_filter(
-        image: np.ndarray, size: int = 3, dimension_order: str = "Auto"
+        image: np.ndarray, size: int = 3, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
         """
         Apply median filter for noise reduction.
