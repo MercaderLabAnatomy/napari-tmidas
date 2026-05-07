@@ -13,7 +13,7 @@ Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** with improve
 - **Automatic Environment Management**: Creates a dedicated conda environment if Cellpose is not installed
 - **Flexible Dimension Orders**: Supports various dimension arrangements (YX, ZYX, TZYX)
 - **GPU Acceleration**: Automatically uses GPU if available
-- **Distributed Segmentation for Large Volumes**: Optional blockwise Cellpose processing for large 3D datasets
+- **Distributed Segmentation for Large Volumes**: Optional blockwise Cellpose processing for zarr volumes (for example ZYX, TZYX, and TCZYX)
 - **Automatic Non-Zarr Conversion**: When distributed mode is enabled, non-zarr microscopy inputs are auto-converted to temporary zarr and processed in distributed mode
 
 ## Installation
@@ -86,7 +86,7 @@ Number of images/slices processed simultaneously.
 - Decrease if you encounter out-of-memory errors
 
 ### `use_distributed_segmentation` (bool, default: False)
-Enable Cellpose distributed blockwise segmentation for large 3D volumes.
+Enable Cellpose distributed blockwise segmentation for large zarr volumes.
 - Recommended for large ZYX/TCZYX datasets to reduce peak RAM usage
 - If the input is already zarr, the zarr is processed directly
 - If the input is not zarr (for example TIFF), napari-tmidas automatically creates a temporary zarr and runs distributed mode on that zarr

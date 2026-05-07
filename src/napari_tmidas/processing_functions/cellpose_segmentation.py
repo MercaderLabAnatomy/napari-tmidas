@@ -200,7 +200,7 @@ def transpose_dimensions(img, dim_order):
         "use_distributed_segmentation": {
             "type": bool,
             "default": False,
-            "description": "Use distributed blockwise segmentation (cellpose.contrib.distributed_segmentation) for large 3D ZYX volumes. Reduces peak memory use during inference. Non-zarr inputs are auto-converted to temporary zarr when possible.",
+            "description": "Use distributed blockwise segmentation (cellpose.contrib.distributed_segmentation) for large zarr volumes (for example ZYX, TZYX, TCZYX). Reduces peak memory use during inference. Non-zarr inputs are auto-converted to temporary zarr when possible.",
         },
         "distributed_blocksize": {
             "type": int,
