@@ -511,6 +511,10 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
 def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
     """Heuristic channel detection from array shape alone."""
     print(f"Channel detection: shape heuristic on {shape}")
+    # Prefer axis 1 for common time-series layouts such as TCYX and TCZYX,
+    # where axis 0 is usually time and axis 1 is channels.
+    if len(shape) >= 4 and 2 <= shape[1] <= 16 and shape[0] > shape[1]:
+        return (shape[1], 1)
     if len(shape) >= 3 and 2 <= shape[0] <= 16:
         return (shape[0], 0)
     if len(shape) >= 4 and 2 <= shape[1] <= 16:
