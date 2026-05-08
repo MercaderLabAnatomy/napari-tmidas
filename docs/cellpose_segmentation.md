@@ -201,6 +201,32 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 - Increase to `0.35-0.5` if tiny speckles still activate blocks
 - Keep `clip_final_labels_to_convpaint_mask=True`
 
+### Distributed Speed Model (Important)
+
+Distributed mode is often used for memory safety, not guaranteed speed.
+It is faster than full-volume processing only when the **active block fraction**
+stays low after mask expansion.
+
+You can think of runtime as:
+
+$$
+T_{distributed} \approx N_{active\ blocks}\cdot t_{block} + T_{overhead}
+$$
+
+where $T_{overhead}$ includes block scheduling, I/O, and merge steps.
+
+- Small foreground fraction alone is not enough; active block fraction matters.
+- If block activation is broad, distributed overhead can dominate.
+- In many datasets, once active blocks exceed about 40-50%, full-volume GPU
+  can be as fast or faster.
+
+Practical tuning:
+
+- Start `distributed_blocksize` around `128-192`; avoid very small blocks unless necessary.
+- Increase `convpaint_min_object_fraction_of_median` if tiny components still activate blocks.
+- Use minimal necessary mask dilation/expansion to avoid turning on large empty regions.
+- If GPU memory allows and many blocks are active, try non-distributed mode.
+
 ### QC Every Run
 
 - Inspect several outputs before large runs
@@ -230,6 +256,8 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 - Use GPU if available
 - Increase `batch_size` if memory permits
 - Use timepoint interval controls to process a subset first
+- In distributed mode, check active block ratio. If many blocks are active,
+  try larger block size tuning and/or full-volume GPU evaluation.
 
 ## Technical Details
 
