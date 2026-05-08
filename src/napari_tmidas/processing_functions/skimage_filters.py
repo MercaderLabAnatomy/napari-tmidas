@@ -33,25 +33,15 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
-    def _resolve_resize_target(shape_yx, target_y, target_x, scale_factor):
-        """Resolve output Y/X from either an explicit scale factor or fixed sizes."""
-        if scale_factor is not None:
-            scale_factor = float(scale_factor)
-            if scale_factor <= 0:
-                raise ValueError(
-                    f"scale_factor must be > 0, got {scale_factor}"
-                )
-            resolved_y = max(1, int(round(shape_yx[0] * scale_factor)))
-            resolved_x = max(1, int(round(shape_yx[1] * scale_factor)))
-            return resolved_y, resolved_x
-
-        resolved_y = int(target_y)
-        resolved_x = int(target_x)
-        if resolved_y < 1 or resolved_x < 1:
+    def _resolve_resize_target(shape_yx, scale_factor):
+        """Resolve output Y/X from a required scale factor."""
+        scale_factor = float(scale_factor)
+        if scale_factor <= 0:
             raise ValueError(
-                "target_y and target_x must be >= 1, "
-                f"got {resolved_y}, {resolved_x}"
+                f"scale_factor must be > 0, got {scale_factor}"
             )
+        resolved_y = max(1, int(round(shape_yx[0] * scale_factor)))
+        resolved_x = max(1, int(round(shape_yx[1] * scale_factor)))
         return resolved_y, resolved_x
 
     def _equalize_histogram_dask(
@@ -866,8 +856,6 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
 def resize_image_fixed_yx(
     image: np.ndarray,
     scale_factor: float = 0.5,
-    target_y: int = 1024,
-    target_x: int = 1024,
     dim_order: str = "auto",
     channel: str = "all",
 ) -> np.ndarray:
@@ -879,9 +867,7 @@ def resize_image_fixed_yx(
     """
     from skimage.transform import resize
 
-    target_y, target_x = _resolve_resize_target(
-        image.shape[-2:], target_y, target_x, scale_factor
-    )
+    target_y, target_x = _resolve_resize_target(image.shape[-2:], scale_factor)
 
     if dim_order == "auto":
         auto_map = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
@@ -1002,8 +988,6 @@ if SKIMAGE_AVAILABLE:
     def resize_zarr_native(
         image: np.ndarray,
         scale_factor: float = 0.5,
-        target_y: int = 1024,
-        target_x: int = 1024,
         channel: str = "all",
         _source_filepath: str = None,
         _output_folder: str = None,
@@ -1112,7 +1096,7 @@ if SKIMAGE_AVAILABLE:
 
                 # ── Build target shape ────────────────────────────────────
                 target_y, target_x = _resolve_resize_target(
-                    src_da.shape[-2:], target_y, target_x, scale_factor
+                    src_da.shape[-2:], scale_factor
                 )
                 out_shape = src_da.shape[:-2] + (target_y, target_x)
                 print(
@@ -1395,8 +1379,6 @@ if SKIMAGE_AVAILABLE:
         return resize_image_fixed_yx(
             image,
             scale_factor=scale_factor,
-            target_y=target_y,
-            target_x=target_x,
             dim_order="auto",
             channel=channel,
         )

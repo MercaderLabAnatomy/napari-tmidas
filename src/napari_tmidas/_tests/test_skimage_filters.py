@@ -285,30 +285,26 @@ class TestResizeImageFixedYX:
 
     def test_resize_2d(self):
         image = np.random.randint(0, 65535, (300, 500), dtype=np.uint16)
-        result = resize_image_fixed_yx(image, target_y=1024, target_x=1024)
-        assert result.shape == (1024, 1024)
+        result = resize_image_fixed_yx(image, scale_factor=2.0)
+        assert result.shape == (600, 1000)
         assert result.dtype == image.dtype
 
     def test_resize_zyx(self):
         image = np.random.rand(7, 256, 384).astype(np.float32)
-        result = resize_image_fixed_yx(
-            image, target_y=1024, target_x=1024, dim_order="ZYX"
-        )
-        assert result.shape == (7, 1024, 1024)
+        result = resize_image_fixed_yx(image, scale_factor=2.0, dim_order="ZYX")
+        assert result.shape == (7, 512, 768)
         assert result.dtype == image.dtype
 
     def test_resize_tyx(self):
         image = np.random.rand(5, 420, 360).astype(np.float32)
-        result = resize_image_fixed_yx(
-            image, target_y=1024, target_x=1024, dim_order="TYX"
-        )
-        assert result.shape == (5, 1024, 1024)
+        result = resize_image_fixed_yx(image, scale_factor=2.0, dim_order="TYX")
+        assert result.shape == (5, 840, 720)
         assert result.dtype == image.dtype
 
     def test_resize_tzyx(self):
         image = np.random.randint(0, 255, (3, 4, 128, 256), dtype=np.uint8)
-        result = resize_image_fixed_yx(image, target_y=1024, target_x=1024)
-        assert result.shape == (3, 4, 1024, 1024)
+        result = resize_image_fixed_yx(image, scale_factor=2.0)
+        assert result.shape == (3, 4, 256, 512)
         assert result.dtype == image.dtype
 
     def test_resize_with_scale_factor(self):
@@ -316,8 +312,6 @@ class TestResizeImageFixedYX:
         result = resize_image_fixed_yx(
             image,
             scale_factor=0.5,
-            target_y=1024,
-            target_x=1024,
             dim_order="TYX",
         )
         assert result.shape == (5, 210, 180)
