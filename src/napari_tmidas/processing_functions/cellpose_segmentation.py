@@ -688,10 +688,18 @@ def cellpose_segmentation(
             blocksize: int,
         ):
             """Build the runtime block-gating mask used by distributed Cellpose."""
+            # If the entire Z dimension fits in one block (gz=1), dilation
+            # would only expand in YX and over-activates blocks on dense
+            # spatial distributions (e.g. 55% CP coverage -> 90% runtime).
+            # Skip dilation in that case: there are no Z block boundaries to
+            # bridge, and YX boundaries are handled by cellpose stitching.
+            bs = int(blocksize)
+            gz = int(np.ceil(mask.shape[0] / bs)) if mask.ndim == 3 else 1
+            effective_margin = 1 if gz > 1 else 0
             runtime_mask = _expand_mask_to_neighbor_blocks(
                 (mask > 0).astype(np.uint8),
                 blocksize=blocksize,
-                margin_blocks=1,
+                margin_blocks=effective_margin,
             ).astype(np.uint8)
             runtime_mask_path = cached_mask_path
             if not np.array_equal(runtime_mask > 0, mask > 0):
