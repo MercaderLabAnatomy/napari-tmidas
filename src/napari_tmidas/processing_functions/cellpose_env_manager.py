@@ -5,6 +5,7 @@ Updated to support Cellpose 4 (Cellpose-SAM) installation.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import threading
 from contextlib import suppress
 
 import tifffile
+import zarr
 
 from napari_tmidas._env_manager import BaseEnvironmentManager
 
@@ -351,14 +353,25 @@ def run_zarr_processing(zarr_path, args_dict):
             "Please adjust folder permissions."
         )
 
-    with (
-        tempfile.NamedTemporaryFile(
-            suffix=".tif", delete=False, dir=tmp_root
-        ) as output_file,
-        tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, dir=tmp_root
-        ) as script_file,
-    ):
+    # If the caller provides a stable zarr output path (e.g. per-timepoint cache),
+    # write directly there. Otherwise create a temporary zarr dir that we delete
+    # after reading the result back.
+    persist_output_zarr_path = args_dict.get("persist_output_zarr_path")
+    if persist_output_zarr_path:
+        output_zarr_path = persist_output_zarr_path
+        os.makedirs(
+            os.path.dirname(os.path.abspath(output_zarr_path)), exist_ok=True
+        )
+        _temp_output_zarr = None
+    else:
+        _temp_output_zarr = tempfile.mkdtemp(
+            suffix="_cellpose_out.zarr", dir=tmp_root
+        )
+        output_zarr_path = _temp_output_zarr
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False, dir=tmp_root
+    ) as script_file:
 
         # Create zarr processing script (similar to working TIFF script)
         script = f"""
@@ -592,6 +605,29 @@ def process_volume(image, name=""):
     sys.stdout.flush()
     return masks
 
+
+def _create_output_array(shape):
+    # Create output zarr at the final destination path with safe chunking.
+    shape = tuple(int(s) for s in shape)
+    if len(shape) >= 3:
+        chunks = (
+            (1,) * (len(shape) - 3)
+            + (
+                max(1, min(BLOCKSIZE, shape[-3])),
+                max(1, min(BLOCKSIZE, shape[-2])),
+                max(1, min(BLOCKSIZE, shape[-1])),
+            )
+        )
+    else:
+        chunks = tuple(max(1, min(BLOCKSIZE, s)) for s in shape)
+    return zarr.open_array(
+        '{output_zarr_path}',
+        mode='w',
+        shape=shape,
+        chunks=chunks,
+        dtype=np.uint32,
+    )
+
 def main():
     # Channel selection: "all" → process every channel; integer → process only that channel
     selected_channel = {repr(args_dict.get('channel', 'all'))}
@@ -649,7 +685,16 @@ def main():
                 sys.stdout.flush()
 
                 n_out_channels = len(channels_to_process)
-                result = np.zeros((len(t_indices), n_out_channels, Z, Y, X), dtype=np.uint32)
+                if TIMEPOINT_INDEX is not None:
+                    if n_out_channels == 1:
+                        result_shape = (Z, Y, X)
+                    else:
+                        result_shape = (n_out_channels, Z, Y, X)
+                elif n_out_channels == 1:
+                    result_shape = (len(t_indices), Z, Y, X)
+                else:
+                    result_shape = (len(t_indices), n_out_channels, Z, Y, X)
+                result = _create_output_array(result_shape)
 
                 for out_t, t in enumerate(t_indices):
                     for out_c, c in enumerate(channels_to_process):
@@ -671,12 +716,16 @@ def main():
                                 _shutil.rmtree(slab_dir, ignore_errors=True)
                         else:
                             masks = process_volume(np.array(zarr_array[t, c, :, :, :]), f"T{{t+1}}C{{c+1}}")
-                        result[out_t, out_c] = masks
 
-                if n_out_channels == 1:
-                    result = result[:, 0, :, :, :]  # → (T, Z, Y, X)
-                if TIMEPOINT_INDEX is not None:
-                    result = result[0]  # → (Z, Y, X) for single requested timepoint
+                        if TIMEPOINT_INDEX is not None:
+                            if n_out_channels == 1:
+                                result[:, :, :] = masks
+                            else:
+                                result[out_c, :, :, :] = masks
+                        elif n_out_channels == 1:
+                            result[out_t, :, :, :] = masks
+                        else:
+                            result[out_t, out_c, :, :, :] = masks
 
             elif len(zarr_array.shape) == 4:  # 4D (T or C)ZYX
                 dim1, Z, Y, X = zarr_array.shape
@@ -726,7 +775,11 @@ def main():
                             )
                         indices = [t_req]
 
-                    result = np.zeros((len(indices), Z, Y, X), dtype=np.uint32)
+                    if TIMEPOINT_INDEX is not None:
+                        result_shape = (Z, Y, X)
+                    else:
+                        result_shape = (len(indices), Z, Y, X)
+                    result = _create_output_array(result_shape)
                     for out_i, i in enumerate(indices):
                         print(f"\\n=== Timepoint {{i+1}}/{{dim1}} ===")
                         sys.stdout.flush()
@@ -738,7 +791,7 @@ def main():
                                 _DISTRIBUTED_MASK, t_idx=i
                             )
                             try:
-                                result[out_i] = run_distributed_on_slab(
+                                masks = run_distributed_on_slab(
                                     slab_z,
                                     f"T{{i+1}}",
                                     slab_mask=slab_mask,
@@ -746,12 +799,14 @@ def main():
                             finally:
                                 _shutil.rmtree(slab_dir, ignore_errors=True)
                         else:
-                            result[out_i] = process_volume(
+                            masks = process_volume(
                                 np.array(zarr_array[i, :, :, :]), f"T{{i+1}}"
                             )
 
-                    if TIMEPOINT_INDEX is not None:
-                        result = result[0]  # -> (Z, Y, X)
+                        if TIMEPOINT_INDEX is not None:
+                            result[:, :, :] = masks
+                        else:
+                            result[out_i, :, :, :] = masks
 
                 else:
                     if TIMEPOINT_INDEX is not None:
@@ -770,7 +825,11 @@ def main():
                             )
                         indices = [c_req]
 
-                    result = np.zeros((len(indices), Z, Y, X), dtype=np.uint32)
+                    if len(indices) == 1:
+                        result_shape = (Z, Y, X)
+                    else:
+                        result_shape = (len(indices), Z, Y, X)
+                    result = _create_output_array(result_shape)
                     for out_i, i in enumerate(indices):
                         print(f"\\n=== Channel {{i+1}}/{{dim1}} ===")
                         sys.stdout.flush()
@@ -782,7 +841,7 @@ def main():
                                 _DISTRIBUTED_MASK, c_idx=i
                             )
                             try:
-                                result[out_i] = run_distributed_on_slab(
+                                masks = run_distributed_on_slab(
                                     slab_z,
                                     f"C{{i+1}}",
                                     slab_mask=slab_mask,
@@ -790,12 +849,14 @@ def main():
                             finally:
                                 _shutil.rmtree(slab_dir, ignore_errors=True)
                         else:
-                            result[out_i] = process_volume(
+                            masks = process_volume(
                                 np.array(zarr_array[i, :, :, :]), f"C{{i+1}}"
                             )
 
-                    if len(indices) == 1:
-                        result = result[0]  # -> (Z, Y, X)
+                        if len(indices) == 1:
+                            result[:, :, :] = masks
+                        else:
+                            result[out_i, :, :, :] = masks
 
             else:  # bare 3D ZYX — zarr_array is already a zarr.Array on disk
                 if _distributed_eval_fn is not None:
@@ -813,7 +874,8 @@ def main():
 
     print(f"Saving results: shape={{result.shape}}, total objects={{np.max(result)}}")
     sys.stdout.flush()
-    tifffile.imwrite('{output_file.name}', result.astype(np.uint32))
+    if isinstance(result, np.ndarray):
+        zarr.save('{output_zarr_path}', result.astype(np.uint32))
     print("Complete!")
     sys.stdout.flush()
 
@@ -858,17 +920,20 @@ if __name__ == "__main__":
                 # Remove from tracking regardless of outcome
                 _remove_process(process)
 
-            # Check if output file was created
-            if not os.path.exists(output_file.name):
-                raise RuntimeError("Output file was not created")
+            # Check if output zarr was created
+            if not os.path.exists(output_zarr_path):
+                raise RuntimeError("Output zarr was not created")
 
-            return tifffile.imread(output_file.name)
+            print(f"Reading result from: {output_zarr_path}")
+            result = np.array(zarr.open(output_zarr_path, mode="r"))
+            return result
 
         finally:
-            # Cleanup
-            for fname in [output_file.name, script_file.name]:
-                with suppress(OSError, FileNotFoundError):
-                    os.unlink(fname)
+            # Cleanup script; delete temp zarr only (stable cache is kept by caller)
+            with suppress(OSError, FileNotFoundError):
+                os.unlink(script_file.name)
+            if _temp_output_zarr is not None:
+                shutil.rmtree(_temp_output_zarr, ignore_errors=True)
 
 
 def run_legacy_processing(args_dict):

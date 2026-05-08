@@ -33,6 +33,27 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 if SKIMAGE_AVAILABLE:
 
+    def _resolve_resize_target(shape_yx, target_y, target_x, scale_factor):
+        """Resolve output Y/X from either an explicit scale factor or fixed sizes."""
+        if scale_factor is not None:
+            scale_factor = float(scale_factor)
+            if scale_factor <= 0:
+                raise ValueError(
+                    f"scale_factor must be > 0, got {scale_factor}"
+                )
+            resolved_y = max(1, int(round(shape_yx[0] * scale_factor)))
+            resolved_x = max(1, int(round(shape_yx[1] * scale_factor)))
+            return resolved_y, resolved_x
+
+        resolved_y = int(target_y)
+        resolved_x = int(target_x)
+        if resolved_y < 1 or resolved_x < 1:
+            raise ValueError(
+                "target_y and target_x must be >= 1, "
+                f"got {resolved_y}, {resolved_x}"
+            )
+        return resolved_y, resolved_x
+
     def _equalize_histogram_dask(
         image, clip_limit: float, kernel_size: int, max_workers: int
     ):
@@ -817,23 +838,16 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
 
 
 @BatchProcessingRegistry.register(
-    name="Resize Image to Fixed YX (skimage)",
+    name="Resize Image by YX Scale (skimage)",
     suffix="_yx_resized",
-    description="Resize intensity images to a fixed YX size for faster downstream processing while preserving T/Z axes. For multichannel images, select which channel(s) to process.",
+    description="Resize intensity images by a YX scale factor for faster downstream processing while preserving T/Z axes. For multichannel images, select which channel(s) to process.",
     parameters={
-        "target_y": {
-            "type": int,
-            "default": 1024,
-            "min": 1,
-            "max": 32768,
-            "description": "Target size for Y dimension.",
-        },
-        "target_x": {
-            "type": int,
-            "default": 1024,
-            "min": 1,
-            "max": 32768,
-            "description": "Target size for X dimension.",
+        "scale_factor": {
+            "type": float,
+            "default": 0.5,
+            "min": 0.0001,
+            "max": 100.0,
+            "description": "YX scale factor. For example, 0.5 resizes both Y and X to half size.",
         },
         "dim_order": {
             "type": str,
@@ -851,6 +865,7 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
 )
 def resize_image_fixed_yx(
     image: np.ndarray,
+    scale_factor: float = 0.5,
     target_y: int = 1024,
     target_x: int = 1024,
     dim_order: str = "auto",
@@ -864,12 +879,9 @@ def resize_image_fixed_yx(
     """
     from skimage.transform import resize
 
-    target_y = int(target_y)
-    target_x = int(target_x)
-    if target_y < 1 or target_x < 1:
-        raise ValueError(
-            f"target_y and target_x must be >= 1, got {target_y}, {target_x}"
-        )
+    target_y, target_x = _resolve_resize_target(
+        image.shape[-2:], target_y, target_x, scale_factor
+    )
 
     if dim_order == "auto":
         auto_map = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
@@ -962,29 +974,22 @@ def resize_image_fixed_yx(
 if SKIMAGE_AVAILABLE:
 
     @BatchProcessingRegistry.register(
-        name="Resize Zarr to Fixed YX (OME-Zarr native)",
+        name="Resize Zarr by YX Scale (OME-Zarr native)",
         suffix="_yx_resized",
         description=(
-            "Resize a zarr file to fixed YX dimensions using OME-Zarr native I/O. "
+            "Resize a zarr file using OME-Zarr native I/O. "
             "Reads the source zarr lazily via dask, resizes each YX plane with "
             "skimage (chunk-by-chunk), and writes a new OME-Zarr with preserved "
-            "axes metadata and a 4-level multiscale pyramid. "
+            "axes metadata and the source pyramid depth using a YX scale factor. "
             "Falls back to the skimage path for TIFF inputs."
         ),
         parameters={
-            "target_y": {
-                "type": int,
-                "default": 1024,
-                "min": 1,
-                "max": 32768,
-                "description": "Target size for Y dimension.",
-            },
-            "target_x": {
-                "type": int,
-                "default": 1024,
-                "min": 1,
-                "max": 32768,
-                "description": "Target size for X dimension.",
+            "scale_factor": {
+                "type": float,
+                "default": 0.5,
+                "min": 0.0001,
+                "max": 100.0,
+                "description": "YX scale factor. For example, 0.5 resizes both Y and X to half size.",
             },
             "channel": {
                 "type": str,
@@ -996,6 +1001,7 @@ if SKIMAGE_AVAILABLE:
     )
     def resize_zarr_native(
         image: np.ndarray,
+        scale_factor: float = 0.5,
         target_y: int = 1024,
         target_x: int = 1024,
         channel: str = "all",
@@ -1105,6 +1111,9 @@ if SKIMAGE_AVAILABLE:
                         axes = [a for i, a in enumerate(axes) if i != ch_axis]
 
                 # ── Build target shape ────────────────────────────────────
+                target_y, target_x = _resolve_resize_target(
+                    src_da.shape[-2:], target_y, target_x, scale_factor
+                )
                 out_shape = src_da.shape[:-2] + (target_y, target_x)
                 print(
                     f"Resize (OME-Zarr native): {src_da.shape} → {out_shape}, "
@@ -1385,6 +1394,7 @@ if SKIMAGE_AVAILABLE:
         # ── TIFF / FALLBACK PATH ─────────────────────────────────────────────
         return resize_image_fixed_yx(
             image,
+            scale_factor=scale_factor,
             target_y=target_y,
             target_x=target_x,
             dim_order="auto",

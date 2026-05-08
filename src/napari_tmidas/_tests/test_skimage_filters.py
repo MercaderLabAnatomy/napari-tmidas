@@ -311,6 +311,23 @@ class TestResizeImageFixedYX:
         assert result.shape == (3, 4, 1024, 1024)
         assert result.dtype == image.dtype
 
+    def test_resize_with_scale_factor(self):
+        image = np.random.rand(5, 420, 360).astype(np.float32)
+        result = resize_image_fixed_yx(
+            image,
+            scale_factor=0.5,
+            target_y=1024,
+            target_x=1024,
+            dim_order="TYX",
+        )
+        assert result.shape == (5, 210, 180)
+        assert result.dtype == image.dtype
+
+    def test_resize_rejects_non_positive_scale_factor(self):
+        image = np.random.rand(100, 120).astype(np.float32)
+        with pytest.raises(ValueError, match="scale_factor must be > 0"):
+            resize_image_fixed_yx(image, scale_factor=0)
+
     def test_invalid_dim_order(self):
         image = np.random.rand(100, 120).astype(np.float32)
         with pytest.raises(ValueError, match="Unsupported dim_order"):

@@ -231,6 +231,36 @@ Image enhancement and filtering functions using scikit-image library.
 
 ## Functions
 
+### Resize Image by YX Scale (skimage)
+**Suffix**: `_yx_resized`
+
+Resize intensity images by a single YX scale factor while preserving non-spatial axes (T/C/Z).
+
+**Parameters**:
+- `scale_factor` (float, default: 0.5): YX scaling factor
+  - `0.5`: Half-size in Y and X (about 4× fewer pixels)
+  - `1.0`: No resize
+  - `>1.0`: Upscale
+
+**Use case**: Speed up downstream segmentation while keeping proportional geometry.
+
+---
+
+### Resize Zarr by YX Scale (OME-Zarr native)
+**Suffix**: `_yx_resized`
+
+Resizes zarr inputs using lazy OME-Zarr/dask I/O and writes output zarr directly.
+
+**Parameters**:
+- `scale_factor` (float, default: 0.5): YX scaling factor
+
+**Technical details**:
+- Preserves source pyramid depth
+- Preserves axes metadata and updates coordinate transforms after resize
+- Supports channel selection
+
+---
+
 ### CLAHE (Adaptive Histogram Equalization)
 **Suffix**: `_clahe`
 

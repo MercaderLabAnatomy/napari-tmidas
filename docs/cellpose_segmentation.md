@@ -1,4 +1,3 @@
-
 # Cellpose-SAM Segmentation
 
 ## Overview
@@ -7,13 +6,14 @@ Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** for batch mi
 
 ## Features
 
-- Cellpose 4 support with improved generalization
-- 2D and 3D segmentation (`YX`, `ZYX`)
-- Time-series support (`TZYX`)
-- Automatic environment management
-- GPU acceleration when available
-- Distributed segmentation for large zarr volumes (`ZYX`, `TZYX`, `TCZYX`)
-- Automatic non-zarr to temporary zarr conversion in distributed mode
+- **Cellpose 4 Support**: Uses Cellpose-SAM with strong generalization.
+- **2D/3D/Time-Series Support**: Works with `YX`, `ZYX`, `TZYX`, and multichannel variants.
+- **Automatic Environment Management**: Uses dedicated Cellpose environment when needed.
+- **GPU Acceleration**: Uses GPU when available.
+- **Distributed Zarr Segmentation**: Optional blockwise processing for large zarr volumes.
+- **ConvPaint Auto-Mask Gating**: Optional foreground mask to skip clear-background blocks.
+- **Fine-Mask Output Clipping**: Optional final clipping of labels to ConvPaint fine mask.
+- **Small-Object Speckle Filtering**: Optional connected-component filtering in ConvPaint mask generation.
 
 ## Installation
 
@@ -29,26 +29,22 @@ If Cellpose is not detected, napari-tmidas will:
 
 ### Environment Selection Behavior
 
-There are two different environment decisions in this workflow:
+There are two independent environment decisions:
 
 - **Cellpose runtime**:
-  - Uses the current environment only if Cellpose is already importable there.
-  - Otherwise uses the dedicated `cellpose-env` (created automatically).
+  - Uses current environment only if Cellpose is importable there.
+  - Otherwise uses dedicated `cellpose-env`.
 
-- **ConvPaint auto-mask runtime** (used only when `use_convpaint_auto_mask=True`):
+- **ConvPaint auto-mask runtime** (only when `use_convpaint_auto_mask=True`):
   - Uses current environment if `napari-convpaint` is available and `convpaint_force_dedicated_env=False`.
-  - Uses dedicated ConvPaint environment automatically when `napari-convpaint` is not available.
+  - Uses dedicated ConvPaint environment automatically when `napari-convpaint` is unavailable.
   - Always uses dedicated ConvPaint environment when `convpaint_force_dedicated_env=True`.
-
-Practical note:
-- `convpaint_force_dedicated_env` is an override switch, not an environment-name selector.
-- At the moment, this workflow does not expose a widget parameter to provide a custom conda/mamba environment name.
 
 ## Parameters
 
 ### `channel` (string, default: `"all"`)
 
-Select which detected channel to segment for multichannel inputs.
+Select channel(s) for multichannel inputs.
 
 - `all`: process all channels
 - `0`, `1`, ...: process one specific channel
@@ -57,16 +53,12 @@ Select which detected channel to segment for multichannel inputs.
 
 Input dimension order.
 
-- `"YX"`: 2D image
-- `"ZYX"`: 3D volume
-- `"CZYX"`: multichannel 3D volume
-- `"TZYX"`: 4D time-lapse 3D data
-- `"TCZYX"`: multichannel time-lapse 3D data
-- `"TYX"`: 2D time-lapse
-
-Recommended for usability:
-- If a `C` dimension exists, include it in `dim_order` (for example `CZYX` or `TCZYX`).
-- Channel selection is still controlled by the `channel` parameter.
+- `YX`: 2D image
+- `ZYX`: 3D volume
+- `CZYX`: multichannel 3D volume
+- `TZYX`: 4D time-lapse 3D data
+- `TCZYX`: multichannel time-lapse 3D data
+- `TYX`: 2D time-lapse
 
 ### `timepoint_start` (int, default: `0`)
 
@@ -74,43 +66,30 @@ Start timepoint index (0-based, inclusive). Used only when `T` is present.
 
 ### `timepoint_end` (int, default: `-1`)
 
-End timepoint index (0-based, inclusive).
-
-- `-1` means the last available timepoint
+End timepoint index (0-based, inclusive). `-1` means last timepoint.
 
 ### `timepoint_step` (int, default: `1`)
 
 Process every Nth timepoint.
 
-- `1`: all timepoints
-- `2`: every other timepoint
-
 ### `diameter` (float, default: `0.0`, range: `0.0-200.0`)
 
 Optional object diameter in pixels.
 
-- Keep at `0.0` in most cases (recommended)
-- Set only when objects are outside the usual 7.5-120 px range
+- Keep `0.0` for most cases (recommended)
+- Set only when objects are outside the usual ~7.5-120 px range
 
 ### `flow_threshold` (float, default: `0.4`, range: `0.1-0.9`)
 
 Flow threshold for detection sensitivity.
 
-- Lower values: more permissive
-- Higher values: more stringent
-
 ### `cellprob_threshold` (float, default: `0.0`, range: `-6.0 to 6.0`)
 
 Cell probability threshold.
 
-- Higher: fewer splits
-- Lower: more splits
-
 ### `anisotropy` (float, default: `1.0`, range: `0.1-100.0`)
 
-Rescaling factor for 3D anisotropy.
-
-`anisotropy = z-step (um) / xy-pixel-size (um)`
+Rescaling factor for 3D anisotropy: `anisotropy = z-step / xy-pixel-size`.
 
 ### `flow3D_smooth` (int, default: `0`, range: `0-10`)
 
@@ -127,10 +106,6 @@ Number of slices/images processed together.
 ### `use_distributed_segmentation` (bool, default: `False`)
 
 Enable distributed blockwise Cellpose for large zarr volumes.
-
-- Recommended for large `ZYX`/`TZYX`/`TCZYX`
-- Direct zarr processing when input is zarr
-- Non-zarr inputs are auto-converted to temporary zarr
 
 ### `distributed_blocksize` (int, default: `256`, range: `64-1024`)
 
@@ -156,22 +131,29 @@ ConvPaint label treated as background for mask generation.
 
 Binary dilation iterations applied to ConvPaint foreground mask.
 
+### `convpaint_min_object_fraction_of_median` (float, default: `0.25`, range: `0.0-2.0`)
+
+Removes ConvPaint foreground components smaller than this fraction of the slab median component size.
+
+- `0.0`: disables filtering
+- `0.25`: good starting point
+- increase to `0.35-0.5` for stricter filtering
+
+### `clip_final_labels_to_convpaint_mask` (bool, default: `True`)
+
+After Cellpose completes, zero labels outside the fine ConvPaint mask.
+
 ### `convpaint_use_cpu` (bool, default: `False`)
 
 Run ConvPaint mask generation on CPU.
 
 ### `convpaint_force_dedicated_env` (bool, default: `False`)
 
-Force ConvPaint execution in its dedicated environment.
-
-Use this when:
-- Current environment has `napari-convpaint` but you still want isolated/consistent dedicated-env behavior.
+Force ConvPaint execution in dedicated environment.
 
 ### `convpaint_z_batch_size` (int, default: `0`, range: `0-200`)
 
-Z-batching for ConvPaint mask generation.
-
-- `0` disables batching
+Z-batching for ConvPaint mask generation (`0` disables batching).
 
 ## Usage
 
@@ -186,14 +168,14 @@ Z-batching for ConvPaint mask generation.
 - Suffix: `_labels`
 - Background: `0`
 - Objects: unique positive integer labels
-- Output dimensionality matches the selected input dimensionality/timepoint subset
+- Output dimensionality matches selected input dimensionality/timepoint subset
 
 ## Tips
 
 ### Start with Defaults
 
 - Cellpose-SAM usually works well out of the box
-- Tune only after checking real outputs
+- Tune only after checking outputs
 
 ### Tune Sensitivity
 
@@ -209,19 +191,26 @@ Z-batching for ConvPaint mask generation.
 ### Manage Memory
 
 - Reduce `batch_size` if memory is tight
-- Use `use_distributed_segmentation` for large 3D volumes
-- In distributed mode, non-zarr inputs are auto-converted to zarr
+- Use `use_distributed_segmentation` for large zarr volumes
+- In distributed mode, non-zarr inputs are auto-converted to temporary zarr
+
+### ConvPaint Gating for Faster Distributed Runs
+
+- Enable `use_convpaint_auto_mask` to skip empty/background blocks
+- Start with `convpaint_min_object_fraction_of_median=0.25`
+- Increase to `0.35-0.5` if tiny speckles still activate blocks
+- Keep `clip_final_labels_to_convpaint_mask=True`
 
 ### QC Every Run
 
-- Inspect several outputs before processing large batches
+- Inspect several outputs before large runs
 - Iterate parameters with side-by-side comparison in the table UI
 
 ## Troubleshooting
 
 ### Cellpose Environment Not Found
 
-- The environment is created automatically on first run
+- Environment is created automatically on first run
 - Wait for installation to complete
 
 ### Out of Memory
@@ -238,7 +227,7 @@ Z-batching for ConvPaint mask generation.
 
 ### Slow Time-Lapse Processing
 
-- Use a GPU if available
+- Use GPU if available
 - Increase `batch_size` if memory permits
 - Use timepoint interval controls to process a subset first
 
@@ -253,8 +242,10 @@ Z-batching for ConvPaint mask generation.
 
 1. Validate dimensions and selected axes
 2. Optionally subset timepoints
-3. Run normalization and inference
-4. Return instance labels
+3. Optionally generate ConvPaint mask and prune tiny components
+4. Run normalization and Cellpose inference
+5. Optionally clip final labels to ConvPaint fine mask
+6. Return instance labels
 
 ## Credits
 
@@ -264,5 +255,3 @@ Z-batching for ConvPaint mask generation.
 ## See Also
 
 - [Basic Processing Functions](basic_processing.md)
-- [Intensity-Based Label Filtering](intensity_label_filter.md)
-- [Regionprops Analysis](regionprops_analysis.md)

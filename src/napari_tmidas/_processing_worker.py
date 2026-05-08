@@ -3,6 +3,7 @@ Processing worker for batch image processing.
 """
 
 import concurrent.futures
+import inspect
 import os
 from typing import Any, List, Union
 
@@ -256,14 +257,33 @@ class ProcessingWorker(QThread):
             # Process each image in the list
             all_processed_images = []
             for img_idx, (img_to_process, ch_idx) in enumerate(zip(images_to_process, channel_indices)):
-                # Apply the processing function with parameters
+                # Apply the processing function
+                proc_params = {
+                    "_source_filepath": filepath,
+                    "_output_folder": self.output_folder,
+                    "_output_suffix": self.output_suffix,
+                }
                 if self.param_values:
                     # Remove channel parameter before passing to processing function
-                    proc_params = {k: v for k, v in self.param_values.items() if k != "channel"}
-                    processed_image = self.processing_func(img_to_process, **proc_params)
-                else:
-                    processed_image = self.processing_func(img_to_process)
-                
+                    proc_params.update(
+                        {k: v for k, v in self.param_values.items() if k != "channel"}
+                    )
+                # Filter parameters to only those accepted by the function
+                try:
+                    _sig = inspect.signature(self.processing_func)
+                    _has_var_kw = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in _sig.parameters.values()
+                    )
+                    if not _has_var_kw:
+                        _valid = set(_sig.parameters.keys())
+                        proc_params = {k: v for k, v in proc_params.items() if k in _valid}
+                except (ValueError, TypeError):
+                    proc_params = {k: v for k, v in proc_params.items() if not k.startswith("_")}
+                processed_image = self.processing_func(
+                    img_to_process, **proc_params
+                )
+
                 all_processed_images.append((processed_image, ch_idx))
 
             # Handle saving based on number of processed images
@@ -275,11 +295,17 @@ class ProcessingWorker(QThread):
                 for processed_image, ch_idx in all_processed_images:
                     if processed_image is None or is_folder_function:
                         continue
-                    
+                    if isinstance(processed_image, str) and (
+                        os.path.isfile(processed_image)
+                        or os.path.isdir(processed_image)
+                    ):
+                        processed_files.append(processed_image)
+                        continue
+
                     # Generate output filename with channel suffix
                     output_filename = f"{base_name}_ch{ch_idx}{self.output_suffix}"
                     output_path = os.path.join(self.output_folder, output_filename)
-                    
+
                     # Save the processed image
                     save_image_file(processed_image, output_path, image_dtype)
                     processed_files.append(output_path)
@@ -291,6 +317,15 @@ class ProcessingWorker(QThread):
             else:
                 # Single image processed (or single channel)
                 processed_image, ch_idx = all_processed_images[0]
+
+            if isinstance(processed_image, str) and (
+                os.path.isfile(processed_image)
+                or os.path.isdir(processed_image)
+            ):
+                return {
+                    "original_file": filepath,
+                    "processed_file": processed_image,
+                }
 
             # Handle functions that return multiple outputs (e.g., channel splitting)
             if (
