@@ -2165,7 +2165,7 @@ class ProcessingWorker(QThread):
                     processing_params.get("use_distributed_segmentation")
                 )
                 blocksize = processing_params.get(
-                    "distributed_blocksize", "default"
+                    "distributed_blocksize_yx", "default"
                 )
                 src_path = processing_params.get("_source_filepath", filepath)
                 print(

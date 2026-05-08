@@ -407,7 +407,8 @@ def _get_writable_tmp_dir():
     return _tmp_root
 
 USE_DISTRIBUTED = {args_dict.get('use_distributed_segmentation', False)}
-BLOCKSIZE = {args_dict.get('distributed_blocksize', 256)}
+BLOCKSIZE = {args_dict.get('distributed_blocksize_yx', args_dict.get('distributed_blocksize', 256))}
+BLOCKSIZE_Z = {args_dict.get('distributed_blocksize_z', args_dict.get('distributed_blocksize', 256))}
 MASK_PATH = {repr(args_dict.get('distributed_mask_path', None))}
 MASK_ZARR_PATH = {repr(args_dict.get('distributed_mask_zarr_path', None))}
 TIMEPOINT_INDEX = {repr(args_dict.get('timepoint_index', None))}
@@ -495,7 +496,8 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
     \"\"\"Run distributed_eval on a zarr.Array (ZYX). Returns numpy uint32 masks.\"\"\"
     tmp_out = _tempfile.mkdtemp(dir=_TMP_BASE_DIR, suffix='.zarr')
     try:
-        print(f"\\nDistributed_eval {{name}}: shape={{slab_zarr.shape}}, blocksize={{BLOCKSIZE}}")
+        _blocksize_z = min(BLOCKSIZE_Z, slab_zarr.shape[0]) if slab_zarr.ndim >= 3 else BLOCKSIZE_Z
+        print(f"\\nDistributed_eval {{name}}: shape={{slab_zarr.shape}}, blocksize=(z={{_blocksize_z}}, yx={{BLOCKSIZE}})")
         sys.stdout.flush()
         try:
             if slab_mask is not None and slab_mask.shape != slab_zarr.shape:
@@ -506,7 +508,7 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
                 slab_mask = None
             segments, boxes = _distributed_eval_fn(
                 input_zarr=slab_zarr,
-                blocksize=(BLOCKSIZE, BLOCKSIZE, BLOCKSIZE),
+                blocksize=(_blocksize_z, BLOCKSIZE, BLOCKSIZE),
                 write_path=tmp_out,
                 mask=slab_mask,
                 model_kwargs=_MODEL_KWARGS,
