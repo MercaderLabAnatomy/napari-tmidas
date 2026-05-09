@@ -12,6 +12,7 @@ import tempfile
 import threading
 from contextlib import suppress
 
+import numpy as np
 import tifffile
 import zarr
 
