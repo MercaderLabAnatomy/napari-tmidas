@@ -1158,6 +1158,7 @@ def cellpose_segmentation(
             is_3d = "Z" in dim_order
             slab_perf_records = []
             current_distributed_blocksize = int(distributed_blocksize_yx)
+            min_distributed_blocksize = int(distributed_blocksize_yx)  # respect user choice as floor
             tuning_history = []
             safe_non_distributed_max_voxels = 80_000_000
             memory_safe_blocksize_cap = 768
@@ -1509,8 +1510,8 @@ def cellpose_segmentation(
                         ):
                             tuned_blocksize = min(1024, int(round(tuned_blocksize * 1.25)))
 
-                        # Keep blocksize aligned to multiples of 32 for stability.
-                        tuned_blocksize = max(256, (tuned_blocksize // 32) * 32)
+                        # Keep blocksize aligned to multiples of 32, honouring the user's configured minimum.
+                        tuned_blocksize = max(min_distributed_blocksize, (tuned_blocksize // 32) * 32)
 
                         if tuned_blocksize != current_distributed_blocksize:
                             print(
