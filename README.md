@@ -1,3 +1,4 @@
+
 # napari-tmidas
 
 [![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/macromeer/napari-tmidas/raw/main/LICENSE)
@@ -7,7 +8,6 @@
 [![GitHub stars](https://img.shields.io/github/stars/MercaderLabAnatomy/napari-tmidas?style=social)](https://github.com/MercaderLabAnatomy/napari-tmidas/)
 [![DOI](https://zenodo.org/badge/943353883.svg)](https://doi.org/10.5281/zenodo.17988815)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
-
 
 
 **Need fast batch processing for confocal & whole-slide microscopy images of biological cells and tissues?**
@@ -38,9 +38,11 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 
 ## 🚀 Quick Start
 
-```bash
+
+Supports Python 3.11+; commands below use Python 3.12.
+```sh
 # Install napari and the plugin
-mamba create -y -n napari-tmidas -c conda-forge python=3.11
+mamba create -y -n napari-tmidas -c conda-forge python=3.12
 mamba activate napari-tmidas
 pip install "napari[all]"
 pip install napari-tmidas
@@ -88,8 +90,8 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 ### Step 1: Install napari
 
-```bash
-mamba create -y -n napari-tmidas -c conda-forge python=3.11
+```sh
+mamba create -y -n napari-tmidas -c conda-forge python=3.12
 mamba activate napari-tmidas
 python -m pip install "napari[all]"
 ```
@@ -155,7 +157,7 @@ Interactive object selection and cropping with SAM2.
 
 Contributions are welcome! Please ensure tests pass before submitting PRs:
 
-```bash
+```sh
 pip install tox
 tox
 ```
@@ -186,3 +188,4 @@ Built with [napari](https://github.com/napari/napari) and powered by:
 [PyPI]: https://pypi.org/project/napari-tmidas
 [pip]: https://pypi.org/project/pip/
 [tox]: https://tox.readthedocs.io/en/latest/
+

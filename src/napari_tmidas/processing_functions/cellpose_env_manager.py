@@ -395,6 +395,40 @@ import shutil as _shutil
 import tempfile as _tempfile
 
 
+def _patch_zarr_open_for_cellpose_distributed():
+    # Make zarr.open(path, mode) legacy calls work on zarr>=3.
+    try:
+        _zarr_major = int(str(getattr(zarr, "__version__", "0")).split(".")[0])
+    except Exception:
+        _zarr_major = 0
+
+    if _zarr_major < 3:
+        return
+
+    _orig_open = zarr.open
+
+    def _open_compat(store=None, *args, **kwargs):
+        # Cellpose distributed code may call zarr.open(path, "a").
+        if args and "mode" not in kwargs:
+            kwargs["mode"] = args[0]
+            args = args[1:]
+        if args and "path" not in kwargs:
+            kwargs["path"] = args[0]
+            args = args[1:]
+        if args:
+            raise TypeError(
+                f"Unsupported positional zarr.open arguments: {{args}}"
+            )
+        return _orig_open(store=store, **kwargs)
+
+    zarr.open = _open_compat
+    print(
+        "Applied zarr.open compatibility shim for Cellpose distributed "
+        f"mode (zarr={{getattr(zarr, '__version__', 'unknown')}})"
+    )
+    sys.stdout.flush()
+
+
 def _get_writable_tmp_dir():
     # Enforce all temp artifacts under input-folder/tmp only.
     _source_parent = _os.path.dirname(_os.path.abspath('{zarr_path}'))
@@ -413,6 +447,9 @@ BLOCKSIZE_Z = {args_dict.get('distributed_blocksize_z', args_dict.get('distribut
 MASK_PATH = {repr(args_dict.get('distributed_mask_path', None))}
 MASK_ZARR_PATH = {repr(args_dict.get('distributed_mask_zarr_path', None))}
 TIMEPOINT_INDEX = {repr(args_dict.get('timepoint_index', None))}
+
+if USE_DISTRIBUTED:
+    _patch_zarr_open_for_cellpose_distributed()
 
 _distributed_eval_fn = None
 if USE_DISTRIBUTED:
