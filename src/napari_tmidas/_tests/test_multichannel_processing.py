@@ -2,10 +2,12 @@
 import numpy as np
 import pytest
 import tifffile
+import json
 
 from napari_tmidas._file_selector import (
     detect_channels_for_file,
     detect_channels_in_image,
+    resolve_cellpose_dim_order,
 )
 
 
@@ -70,6 +72,68 @@ class TestChannelDetection:
         num_channels, channel_axis = detect_channels_for_file(str(path))
         assert num_channels == 2
         assert channel_axis == 2
+
+    def test_resolve_cellpose_dim_order_tiff_tzcyx(self, tmp_path):
+        """Cellpose dim_order should strip C from TIFF axes metadata."""
+        image = np.random.randint(
+            0, 255, size=(47, 25, 2, 32, 32), dtype=np.uint8
+        )
+        path = tmp_path / "cellpose_tzcyx.tif"
+        tifffile.imwrite(
+            path,
+            image,
+            imagej=True,
+            metadata={"axes": "TZCYX"},
+        )
+
+        dim_order = resolve_cellpose_dim_order(
+            str(path), image, channel_param="0", dimension_order_hint="Auto"
+        )
+        assert dim_order == "TZYX"
+
+    def test_resolve_cellpose_dim_order_zarr_tczyx(self, tmp_path):
+        """Cellpose dim_order should strip C from OME-Zarr axes metadata."""
+        zarr_path = tmp_path / "sample.zarr"
+        zarr_path.mkdir()
+        attrs = {
+            "multiscales": [
+                {
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [{"path": "0"}],
+                }
+            ]
+        }
+        (zarr_path / ".zattrs").write_text(json.dumps(attrs), encoding="utf-8")
+
+        image = np.random.rand(5, 2, 7, 16, 16)
+        dim_order = resolve_cellpose_dim_order(
+            str(zarr_path), image, channel_param="1", dimension_order_hint="Auto"
+        )
+        assert dim_order == "TZYX"
+
+    def test_resolve_cellpose_dim_order_rejects_all_channels(self, tmp_path):
+        """Cellpose should reject multichannel input when all channels are requested."""
+        image = np.random.randint(
+            0, 255, size=(47, 25, 2, 32, 32), dtype=np.uint8
+        )
+        path = tmp_path / "cellpose_all_channels.tif"
+        tifffile.imwrite(
+            path,
+            image,
+            imagej=True,
+            metadata={"axes": "TZCYX"},
+        )
+
+        with pytest.raises(ValueError, match="specific channel selection"):
+            resolve_cellpose_dim_order(
+                str(path), image, channel_param="all", dimension_order_hint="Auto"
+            )
 
     def test_no_channel_dimension_3d(self):
         """Test 3D image without channel dimension (ZYX)"""

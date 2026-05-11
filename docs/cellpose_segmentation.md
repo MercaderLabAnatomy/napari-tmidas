@@ -1,3 +1,4 @@
+
 # Cellpose-SAM Segmentation
 
 ## Overview
@@ -46,8 +47,9 @@ There are two independent environment decisions:
 
 Select channel(s) for multichannel inputs.
 
-- `all`: process all channels
 - `0`, `1`, ...: process one specific channel
+
+For Cellpose-SAM, multichannel inputs must use one selected channel. `all` is not supported for multichannel segmentation.
 
 ### `dim_order` (string, default: `"YX"`)
 
@@ -55,10 +57,16 @@ Input dimension order.
 
 - `YX`: 2D image
 - `ZYX`: 3D volume
-- `CZYX`: multichannel 3D volume
 - `TZYX`: 4D time-lapse 3D data
-- `TCZYX`: multichannel time-lapse 3D data
 - `TYX`: 2D time-lapse
+
+For Cellpose-SAM, `dim_order` should describe only the non-channel axes used for segmentation. The channel axis is handled separately by the `channel` selector.
+
+Examples:
+
+- `TCZYX` input with one selected channel -> use `TZYX`
+- `TZCYX` input with one selected channel -> use `TZYX`
+- `CZYX` input with one selected channel -> use `ZYX`
 
 ### `timepoint_start` (int, default: `0`)
 
@@ -160,8 +168,10 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 1. Open **Plugins > T-MIDAS > Image Processing**
 2. Select your input folder
 3. Choose **Cellpose-SAM Segmentation**
-4. Set parameters for your dataset
-5. Start batch processing
+4. Select a single segmentation channel for multichannel data
+5. Set `dim_order` for the non-channel axes, or leave the selector on `Auto`
+6. Set the remaining parameters for your dataset
+7. Start batch processing
 
 ## Output
 
@@ -193,6 +203,12 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 - Reduce `batch_size` if memory is tight
 - Use `use_distributed_segmentation` for large zarr volumes
 - In distributed mode, non-zarr inputs are auto-converted to temporary zarr
+
+### Mixed TCZYX and TZCYX Inputs
+
+- Cellpose-SAM normalizes multichannel inputs to a channel-free axis order after channel selection.
+- This means mixed folders containing `TCZYX` zarr data and `TZCYX` TIFF data can both be segmented correctly when a single channel is selected.
+- In these cases, the effective Cellpose `dim_order` is `TZYX` for both layouts.
 
 ### ConvPaint Gating for Faster Distributed Runs
 
@@ -283,3 +299,4 @@ Practical tuning:
 ## See Also
 
 - [Basic Processing Functions](basic_processing.md)
+

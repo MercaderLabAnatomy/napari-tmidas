@@ -508,6 +508,37 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
         return (1, None)
 
 
+def detect_axes_from_zarr_path(zarr_path: str) -> Optional[str]:
+    """Read OME-Zarr axes metadata as an uppercase axes string."""
+    try:
+        import json
+
+        zattrs_path = os.path.join(zarr_path, ".zattrs")
+        if os.path.exists(zattrs_path):
+            with open(zattrs_path) as f:
+                attrs = json.load(f)
+        else:
+            root = zarr.open(zarr_path, mode="r")
+            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
+
+        multiscales = attrs.get("multiscales", [])
+        if not multiscales:
+            return None
+
+        axes = multiscales[0].get("axes", [])
+        axis_names = []
+        for axis in axes:
+            if isinstance(axis, dict):
+                axis_names.append(str(axis.get("name", "")).upper())
+            else:
+                axis_names.append(str(axis).upper())
+
+        axes_str = "".join(axis_names)
+        return axes_str or None
+    except Exception:
+        return None
+
+
 def detect_channels_from_tiff_path(
     filepath: str,
 ) -> Tuple[int, Optional[int]]:
@@ -544,6 +575,22 @@ def detect_channels_from_tiff_path(
         return (1, None)
 
 
+def detect_axes_from_tiff_path(filepath: str) -> Optional[str]:
+    """Read TIFF series axes metadata as an uppercase axes string."""
+    if not _HAS_TIFFFILE:
+        return None
+
+    try:
+        with tifffile.TiffFile(filepath) as tif:
+            if not tif.series:
+                return None
+
+            axes = str(getattr(tif.series[0], "axes", "") or "").upper()
+            return axes or None
+    except Exception:
+        return None
+
+
 def detect_channels_for_file(
     filepath: str, image_data: Optional[Union[np.ndarray, list]] = None
 ) -> Tuple[int, Optional[int]]:
@@ -563,6 +610,58 @@ def detect_channels_for_file(
         image_data = load_image_file(filepath)
 
     return detect_channels_in_image(image_data)
+
+
+def detect_axes_for_file(
+    filepath: str, image_data: Optional[Union[np.ndarray, list]] = None
+) -> Optional[str]:
+    """Detect the file axes string from metadata when available."""
+    if filepath.lower().endswith(".zarr") or (
+        os.path.isdir(filepath)
+        and os.path.exists(os.path.join(filepath, ".zattrs"))
+    ):
+        return detect_axes_from_zarr_path(filepath)
+
+    if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
+        return detect_axes_from_tiff_path(filepath)
+
+    if image_data is not None and hasattr(image_data, "shape"):
+        inferred = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
+        return inferred.get(image_data.ndim)
+
+    return None
+
+
+def resolve_cellpose_dim_order(
+    filepath: str,
+    image_data: Optional[Union[np.ndarray, list]],
+    channel_param: Optional[str],
+    dimension_order_hint: str = "Auto",
+) -> str:
+    """Resolve Cellpose dim_order as a channel-free spatial/time axes string."""
+    num_channels, channel_axis = detect_channels_for_file(filepath, image_data)
+    if channel_param in (None, "all") and num_channels > 1 and channel_axis is not None:
+        raise ValueError(
+            "Cellpose-SAM requires a specific channel selection for multichannel inputs. "
+            "Select one channel instead of 'All channels'."
+        )
+
+    if dimension_order_hint and str(dimension_order_hint).upper() != "AUTO":
+        axes = str(dimension_order_hint).upper()
+    else:
+        axes = detect_axes_for_file(filepath, image_data) or ""
+
+    normalized = axes.replace("C", "")
+    if normalized:
+        return normalized
+
+    if image_data is not None and hasattr(image_data, "ndim"):
+        fallback = {2: "YX", 3: "ZYX", 4: "TZYX"}
+        resolved = fallback.get(image_data.ndim)
+        if resolved:
+            return resolved
+
+    return "YX"
 
 
 def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
@@ -2173,6 +2272,14 @@ class ProcessingWorker(QThread):
                 "_output_format": self.output_format,
             }
 
+            if getattr(self.processing_func, "__name__", "") == "cellpose_segmentation":
+                processing_params["dim_order"] = resolve_cellpose_dim_order(
+                    filepath,
+                    image,
+                    channel_param,
+                    str(processing_params.get("dimension_order", "Auto")),
+                )
+
             # Filter parameters based on function signature
             # Check if function accepts **kwargs or has specific parameters
             try:
@@ -2186,6 +2293,14 @@ class ProcessingWorker(QThread):
                 if not has_var_keyword:
                     # Function doesn't accept **kwargs, so filter parameters
                     valid_params = set(sig.parameters.keys())
+                    if (
+                        "dimension_order" in processing_params
+                        and "dim_order" in valid_params
+                        and "dimension_order" not in valid_params
+                    ):
+                        processing_params["dim_order"] = processing_params[
+                            "dimension_order"
+                        ]
                     processing_params = {
                         k: v
                         for k, v in processing_params.items()
