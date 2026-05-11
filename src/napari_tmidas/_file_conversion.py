@@ -16,7 +16,7 @@ import shutil
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import dask.array as da
 import napari
@@ -1377,8 +1377,14 @@ class CZILoader(FormatLoader):
                             raw_metadata, "Z"
                         )
 
-                        if scale_x and scale_y:
+                        # Keep `resolution` as pixels per micrometer to match
+                        # the conversion logic in _build_scale_transform.
+                        if scale_x and scale_y and scale_x > 0 and scale_y > 0:
                             metadata["resolution"] = (scale_x, scale_y)
+                            metadata["resolution"] = (
+                                1.0 / scale_x,
+                                1.0 / scale_y,
+                            )
                         if scale_z:
                             metadata["spacing"] = scale_z
 
@@ -1444,13 +1450,37 @@ class CZILoader(FormatLoader):
             return {}
 
     @staticmethod
-    def _extract_scale_from_xml(metadata_xml: str, dimension: str) -> float:
+    def _extract_scale_from_xml(
+        metadata_xml: Union[str, Dict[str, Any]], dimension: str
+    ) -> float:
         """
         Extract scale information from CZI XML metadata
 
         This looks for Distance elements with the specified dimension ID
         """
         try:
+            # Handle parsed dictionary metadata returned by pylibCZIrw.
+            if isinstance(metadata_xml, dict):
+                scaling = (
+                    metadata_xml.get("ImageDocument", {})
+                    .get("Metadata", {})
+                    .get("Scaling", {})
+                )
+                distance_items = scaling.get("Items", {}).get("Distance", [])
+
+                if isinstance(distance_items, dict):
+                    distance_items = [distance_items]
+
+                for item in distance_items:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("@Id", "")).upper() != dimension.upper():
+                        continue
+
+                    raw_value = float(item.get("Value", 0.0))
+                    if raw_value > 0:
+                        return CZILoader._normalize_czi_scale_to_um(raw_value)
+
             # Pattern to find Distance elements with specific dimension
             pattern = re.compile(
                 rf'<Distance[^>]*Id="{re.escape(dimension)}"[^>]*>.*?<Value[^>]*>(.*?)</Value>',
@@ -1460,8 +1490,7 @@ class CZILoader(FormatLoader):
             match = pattern.search(metadata_xml)
             if match:
                 value = float(match.group(1))
-                # CZI typically stores in meters, convert to micrometers
-                return value * 1e6
+                return CZILoader._normalize_czi_scale_to_um(value)
 
             # Alternative pattern for older CZI format
             pattern2 = re.compile(
@@ -1472,12 +1501,29 @@ class CZILoader(FormatLoader):
             match2 = pattern2.search(metadata_xml)
             if match2:
                 value = float(match2.group(1))
-                return value * 1e6
+                return CZILoader._normalize_czi_scale_to_um(value)
 
             return 1.0  # Default fallback
 
         except (ValueError, TypeError, AttributeError):
             return 1.0
+
+    @staticmethod
+    def _normalize_czi_scale_to_um(value: float) -> float:
+        """Normalize CZI scale value to micrometers-per-pixel."""
+        if value <= 0:
+            return 1.0
+
+        # CZI commonly stores distances in meters. If already in micrometers,
+        # keep the raw value when meter conversion is clearly implausible.
+        as_um_from_meters = value * 1e6
+        if 0.01 <= as_um_from_meters <= 100.0:
+            return as_um_from_meters
+
+        if 0.01 <= value <= 100.0:
+            return value
+
+        return as_um_from_meters
 
 
 class AcquiferLoader(FormatLoader):
