@@ -344,7 +344,7 @@ class TestTimepointSorting:
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir) / "timelapse.zarr"
             root = zarr.open_group(str(zarr_path), mode="w")
-            root.create_dataset(
+            root.create_array(
                 "0",
                 shape=(7, 3, 16, 16),
                 chunks=(1, 3, 16, 16),
@@ -379,7 +379,7 @@ class TestTimepointSorting:
 
             zarr_path = input_dir / "img_t5.zarr"
             root = zarr.open_group(str(zarr_path), mode="w")
-            root.create_dataset(
+            root.create_array(
                 "0",
                 shape=(5, 2, 8, 8),
                 chunks=(1, 2, 8, 8),
