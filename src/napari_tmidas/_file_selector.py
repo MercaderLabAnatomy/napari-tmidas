@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import inspect
+import json
 import os
 import sys
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -342,30 +343,15 @@ def is_ome_zarr(filepath: str) -> bool:
             return False
 
         root = zarr.open(filepath, mode="r")
+        attrs = _read_zarr_root_attrs(filepath, root=root)
 
-        if hasattr(root, "attrs") and (
-            "ome" in root.attrs
-            or "omero" in root.attrs
-            or "multiscales" in root.attrs
+        if (
+            "ome" in attrs
+            or "omero" in attrs
+            or "multiscales" in attrs
+            or _get_ome_multiscales(attrs)
         ):
             return True
-
-        # Check for .zattrs file with OME metadata
-        zattrs_path = os.path.join(filepath, ".zattrs")
-        if os.path.exists(zattrs_path):
-            import json
-
-            try:
-                with open(zattrs_path) as f:
-                    attrs = json.load(f)
-                if (
-                    "ome" in attrs
-                    or "omero" in attrs
-                    or "multiscales" in attrs
-                ):
-                    return True
-            except (OSError, json.JSONDecodeError):
-                pass
 
         return False
 
@@ -391,21 +377,18 @@ def get_zarr_info(filepath: str) -> dict:
         root = zarr.open(filepath, mode="r")
         info["is_ome_zarr"] = is_ome_zarr(filepath)
 
+        attrs = _read_zarr_root_attrs(filepath, root=root)
+
         if hasattr(root, "arrays"):
             arrays_list = list(root.arrays())
             info["num_arrays"] = len(arrays_list)
             info["arrays"] = [name for name, _ in arrays_list]
 
-            if (
-                info["is_ome_zarr"]
-                and hasattr(root, "attrs")
-                and "multiscales" in root.attrs
-            ):
+            multiscales = _get_ome_multiscales(attrs)
+            if info["is_ome_zarr"] and multiscales:
                 info["is_multiscale"] = True
-                multiscales = root.attrs["multiscales"]
-                if multiscales and len(multiscales) > 0:
-                    datasets = multiscales[0].get("datasets", [])
-                    info["resolution_levels"] = len(datasets)
+                datasets = multiscales[0].get("datasets", [])
+                info["resolution_levels"] = len(datasets)
 
             if arrays_list:
                 first_array = arrays_list[0][1]
@@ -435,34 +418,13 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
     Returns (num_channels, channel_axis) or (1, None) if not found.
     """
     try:
-        import json
-
-        # Try reading .zattrs for OME multiscales metadata
-        zattrs_path = os.path.join(zarr_path, ".zattrs")
-        if os.path.exists(zattrs_path):
-            with open(zattrs_path) as f:
-                attrs = json.load(f)
-        else:
-            # Try opening with zarr directly
-            root = zarr.open(zarr_path, mode="r")
-            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
-
-        multiscales = attrs.get("multiscales", [])
+        root = zarr.open(zarr_path, mode="r")
+        attrs = _read_zarr_root_attrs(zarr_path, root=root)
+        multiscales = _get_ome_multiscales(attrs)
         if not multiscales:
             print(f"Channel detection: No multiscales metadata in {zarr_path}")
             # Fall back to inspecting the raw array shape
-            root = zarr.open(zarr_path, mode="r")
-            # Try array at path "0" (highest resolution)
-            arr = None
-            if hasattr(root, "arrays"):
-                for name, a in root.arrays():
-                    if name in ("0", "data"):
-                        arr = a
-                        break
-                if arr is None and list(root.arrays()):
-                    arr = list(root.arrays())[0][1]
-            elif hasattr(root, "shape"):
-                arr = root
+            arr = _resolve_first_array(root)
 
             if arr is not None:
                 return _detect_channels_from_shape(arr.shape)
@@ -486,16 +448,15 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
             # Try shape heuristics on the first dataset array
             datasets = ms.get("datasets", [])
             if datasets:
-                path = datasets[0].get("path", "0")
-                root = zarr.open(zarr_path, mode="r")
+                path = datasets[0].get("path")
                 arr = root[path]
                 return _detect_channels_from_shape(arr.shape)
             return (1, None)
 
         # Get num_channels from the array at the first resolution level
         datasets = ms.get("datasets", [])
-        path = datasets[0].get("path", "0") if datasets else "0"
-        root = zarr.open(zarr_path, mode="r")
+        path = datasets[0].get("path") if datasets else None
+        path = _resolve_dataset_path(root, path)
         arr = root[path]
         num_channels = arr.shape[channel_axis]
         print(f"Channel detection: zarr metadata → {num_channels} channels at axis {channel_axis}")
@@ -511,17 +472,9 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
 def detect_axes_from_zarr_path(zarr_path: str) -> Optional[str]:
     """Read OME-Zarr axes metadata as an uppercase axes string."""
     try:
-        import json
-
-        zattrs_path = os.path.join(zarr_path, ".zattrs")
-        if os.path.exists(zattrs_path):
-            with open(zattrs_path) as f:
-                attrs = json.load(f)
-        else:
-            root = zarr.open(zarr_path, mode="r")
-            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
-
-        multiscales = attrs.get("multiscales", [])
+        root = zarr.open(zarr_path, mode="r")
+        attrs = _read_zarr_root_attrs(zarr_path, root=root)
+        multiscales = _get_ome_multiscales(attrs)
         if not multiscales:
             return None
 
@@ -537,6 +490,94 @@ def detect_axes_from_zarr_path(zarr_path: str) -> Optional[str]:
         return axes_str or None
     except Exception:
         return None
+
+
+def _read_zarr_root_attrs(filepath: str, root=None) -> Dict[str, Any]:
+    """Read Zarr root attributes from both v2 and v3 metadata files."""
+    attrs: Dict[str, Any] = {}
+
+    if root is not None and hasattr(root, "attrs"):
+        try:
+            attrs.update(dict(root.attrs))
+        except (TypeError, ValueError):
+            pass
+
+    zattrs_path = os.path.join(filepath, ".zattrs")
+    if os.path.exists(zattrs_path):
+        try:
+            with open(zattrs_path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                attrs.update(loaded)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    zarr_json_path = os.path.join(filepath, "zarr.json")
+    if os.path.exists(zarr_json_path):
+        try:
+            with open(zarr_json_path) as f:
+                loaded = json.load(f)
+            zarr_attrs = (
+                loaded.get("attributes", {}) if isinstance(loaded, dict) else {}
+            )
+            if isinstance(zarr_attrs, dict):
+                attrs.update(zarr_attrs)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return attrs
+
+
+def _get_ome_multiscales(attrs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return multiscales from either root attrs or nested OME attrs."""
+    multiscales = attrs.get("multiscales", [])
+    if isinstance(multiscales, list) and multiscales:
+        return multiscales
+
+    ome = attrs.get("ome")
+    if isinstance(ome, dict):
+        ome_multiscales = ome.get("multiscales", [])
+        if isinstance(ome_multiscales, list) and ome_multiscales:
+            return ome_multiscales
+
+    return []
+
+
+def _resolve_dataset_path(root, preferred_path: Optional[str]) -> Optional[str]:
+    """Resolve first available dataset path, supporting both 0 and s0 naming."""
+    candidates: List[str] = []
+    if preferred_path:
+        candidates.append(preferred_path)
+    candidates.extend(["0", "s0", "data"])
+
+    for candidate in candidates:
+        try:
+            root[candidate]
+            return candidate
+        except Exception:
+            continue
+
+    if hasattr(root, "arrays"):
+        arrays_list = list(root.arrays())
+        if arrays_list:
+            return arrays_list[0][0]
+
+    return None
+
+
+def _resolve_first_array(root):
+    """Resolve the first array-like dataset from a Zarr root."""
+    if hasattr(root, "shape"):
+        return root
+
+    path = _resolve_dataset_path(root, preferred_path=None)
+    if path is not None:
+        try:
+            return root[path]
+        except Exception:
+            return None
+
+    return None
 
 
 def detect_channels_from_tiff_path(

@@ -40,6 +40,79 @@ except ImportError:
 # ============================================================================
 
 
+def _read_zarr_root_attrs(image_path, root=None):
+    """Read Zarr root attributes from v2 (.zattrs) and v3 (zarr.json)."""
+    attrs = {}
+
+    if root is not None and hasattr(root, "attrs"):
+        try:
+            attrs.update(dict(root.attrs))
+        except (TypeError, ValueError):
+            pass
+
+    zattrs_path = os.path.join(image_path, ".zattrs")
+    if os.path.exists(zattrs_path):
+        try:
+            with open(zattrs_path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                attrs.update(loaded)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    zarr_json_path = os.path.join(image_path, "zarr.json")
+    if os.path.exists(zarr_json_path):
+        try:
+            with open(zarr_json_path) as f:
+                loaded = json.load(f)
+            zarr_attrs = (
+                loaded.get("attributes", {}) if isinstance(loaded, dict) else {}
+            )
+            if isinstance(zarr_attrs, dict):
+                attrs.update(zarr_attrs)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return attrs
+
+
+def _get_ome_multiscales(attrs):
+    """Return multiscales from either root attrs or nested OME attrs."""
+    multiscales = attrs.get("multiscales", [])
+    if isinstance(multiscales, list) and multiscales:
+        return multiscales
+
+    ome = attrs.get("ome")
+    if isinstance(ome, dict):
+        ome_multiscales = ome.get("multiscales", [])
+        if isinstance(ome_multiscales, list) and ome_multiscales:
+            return ome_multiscales
+
+    return []
+
+
+def _resolve_dataset_path(root, preferred_path=None):
+    """Resolve first available dataset path, supporting both 0 and s0 naming."""
+    candidates = []
+    if preferred_path:
+        candidates.append(preferred_path)
+    candidates.extend(["0", "s0", "data"])
+
+    for candidate in candidates:
+        try:
+            root[candidate]
+            return candidate
+        except Exception:
+            continue
+
+    if hasattr(root, "arrays"):
+        arrays_list = list(root.arrays())
+        if arrays_list:
+            return arrays_list[0][0]
+
+    return None
+
+
 def get_timepoint_count(image_path):
     """
     Read image metadata and determine the number of timepoints without loading image data.
@@ -65,14 +138,8 @@ def get_timepoint_count(image_path):
             import zarr
 
             root = zarr.open(image_path, mode="r")
-            attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
-
-            zattrs_path = os.path.join(image_path, ".zattrs")
-            if os.path.exists(zattrs_path):
-                with open(zattrs_path) as f:
-                    attrs = json.load(f)
-
-            multiscales = attrs.get("multiscales", [])
+            attrs = _read_zarr_root_attrs(image_path, root=root)
+            multiscales = _get_ome_multiscales(attrs)
             if multiscales:
                 ms = multiscales[0]
                 axes = ms.get("axes", [])
@@ -91,7 +158,10 @@ def get_timepoint_count(image_path):
                         t_axis = i
                         break
 
-                path = datasets[0].get("path", "0") if datasets else "0"
+                path = datasets[0].get("path") if datasets else None
+                path = _resolve_dataset_path(root, path)
+                if path is None:
+                    return 1
                 arr = root[path]
 
                 if t_axis is not None and t_axis < len(arr.shape):
@@ -1558,23 +1628,18 @@ def split_tzyx_stack(
         _source_filepath.lower().endswith(".zarr")
         or (
             os.path.isdir(_source_filepath)
-            and os.path.exists(os.path.join(_source_filepath, ".zattrs"))
+            and (
+                os.path.exists(os.path.join(_source_filepath, ".zattrs"))
+                or os.path.exists(os.path.join(_source_filepath, "zarr.json"))
+            )
         )
     ):
         try:
-            zattrs_path = os.path.join(_source_filepath, ".zattrs")
-            attrs = {}
+            import zarr
 
-            if os.path.exists(zattrs_path):
-                with open(zattrs_path) as f:
-                    attrs = json.load(f)
-            else:
-                import zarr
-
-                root = zarr.open(_source_filepath, mode="r")
-                attrs = dict(root.attrs) if hasattr(root, "attrs") else {}
-
-            multiscales = attrs.get("multiscales", [])
+            root = zarr.open(_source_filepath, mode="r")
+            attrs = _read_zarr_root_attrs(_source_filepath, root=root)
+            multiscales = _get_ome_multiscales(attrs)
             if multiscales:
                 axes = multiscales[0].get("axes", [])
                 for i, axis in enumerate(axes):

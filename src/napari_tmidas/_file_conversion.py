@@ -2195,6 +2195,9 @@ class ConversionWorker(QThread):
             print(
                 f"Successfully saved ZARR with metadata: axes={axes}, scale={scale_transform}"
             )
+            # Fix non-standard ome_zarr pyramid naming (s0,s1,s2 → 0,1,2)
+            self._fix_ome_zarr_pyramid_naming(store)
+
             return True
 
         except (OSError, PermissionError, ImportError) as e:
@@ -2297,6 +2300,76 @@ class ConversionWorker(QThread):
             )
 
         return transformations
+
+    def _fix_ome_zarr_pyramid_naming(self, zarr_store_path: Union[str, Path]) -> None:
+        """
+        Fix non-standard ome_zarr pyramid naming (s0,s1,s2,... → 0,1,2,...)
+        
+        ome_zarr v0.14+ writes pyramid levels as s0, s1, s2, etc., which is
+        non-compliant with the OME-Zarr NGFF specification (which requires 0, 1, 2).
+        This function renames the directories and updates metadata accordingly.
+        """
+        import json
+        
+        try:
+            zarr_path = Path(zarr_store_path)
+            
+            # Find all s0, s1, s2, ... subdirectories
+            scale_dirs = sorted([d for d in zarr_path.iterdir() 
+                                if d.is_dir() and d.name.startswith('s') 
+                                and d.name[1:].isdigit()])
+            
+            if not scale_dirs:
+                # No s0, s1, s2 directories found - already using standard naming or empty
+                return
+            
+            _debug_print(f"Fixing ome_zarr pyramid naming in {zarr_path}")
+            
+            # Create mapping: s0→0, s1→1, etc.
+            rename_mapping = {}
+            for scale_dir in scale_dirs:
+                new_name = scale_dir.name[1:]  # Strip 's' prefix
+                rename_mapping[scale_dir.name] = new_name
+            
+            # Rename directories s0→0, s1→1, etc.
+            for old_name, new_name in rename_mapping.items():
+                old_path = zarr_path / old_name
+                new_path = zarr_path / new_name
+                if old_path.exists():
+                    _debug_print(f"  Renaming {old_name} → {new_name}")
+                    shutil.move(str(old_path), str(new_path))
+            
+            # Update metadata in zarr.json
+            zarr_json_path = zarr_path / "zarr.json"
+            if zarr_json_path.exists():
+                try:
+                    with open(zarr_json_path, 'r') as f:
+                        zarr_json = json.load(f)
+                    
+                    # Update multiscales dataset paths
+                    ome = zarr_json.get('attributes', {}).get('ome', {})
+                    multiscales = ome.get('multiscales', [])
+                    
+                    for ms in multiscales:
+                        datasets = ms.get('datasets', [])
+                        for ds in datasets:
+                            old_path = ds.get('path', '')
+                            if old_path in rename_mapping:
+                                ds['path'] = rename_mapping[old_path]
+                                _debug_print(f"  Updated metadata: {old_path} → {ds['path']}")
+                    
+                    # Write updated metadata back
+                    with open(zarr_json_path, 'w') as f:
+                        json.dump(zarr_json, f, indent=2)
+                    
+                    _debug_print("Pyramid naming fix complete - NGFF compliant")
+                
+                except (json.JSONDecodeError, OSError, KeyError) as e:
+                    _debug_print(f"Warning: Could not update zarr.json metadata: {e}")
+        
+        except Exception as e:
+            _debug_print(f"Warning: Pyramid naming fix failed: {e}")
+            # Don't raise - this is post-processing, conversion is already successful
 
 
 class MicroscopyImageConverterWidget(QWidget):
