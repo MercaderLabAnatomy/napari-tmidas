@@ -1,7 +1,12 @@
 """Test multichannel processing with channel selection"""
 import numpy as np
 import pytest
-from napari_tmidas._file_selector import detect_channels_in_image
+import tifffile
+
+from napari_tmidas._file_selector import (
+    detect_channels_for_file,
+    detect_channels_in_image,
+)
 
 
 class TestChannelDetection:
@@ -41,6 +46,30 @@ class TestChannelDetection:
         num_channels, channel_axis = detect_channels_in_image(image)
         assert num_channels == 2
         assert channel_axis == 1
+
+    def test_detect_tzcyx_format(self):
+        """Test detection in TZCYX format from ImageJ-generated TIFF stacks."""
+        image = np.random.rand(47, 25, 2, 1024, 1024)
+        num_channels, channel_axis = detect_channels_in_image(image)
+        assert num_channels == 2
+        assert channel_axis == 2
+
+    def test_detect_tiff_axes_metadata_tzcyx(self, tmp_path):
+        """Prefer TIFF axes metadata over shape heuristics when available."""
+        image = np.random.randint(
+            0, 255, size=(47, 25, 2, 32, 32), dtype=np.uint8
+        )
+        path = tmp_path / "imagej_tzcyx.tif"
+        tifffile.imwrite(
+            path,
+            image,
+            imagej=True,
+            metadata={"axes": "TZCYX"},
+        )
+
+        num_channels, channel_axis = detect_channels_for_file(str(path))
+        assert num_channels == 2
+        assert channel_axis == 2
 
     def test_no_channel_dimension_3d(self):
         """Test 3D image without channel dimension (ZYX)"""

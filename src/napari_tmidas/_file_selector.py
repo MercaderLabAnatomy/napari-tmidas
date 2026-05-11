@@ -508,6 +508,63 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
         return (1, None)
 
 
+def detect_channels_from_tiff_path(
+    filepath: str,
+) -> Tuple[int, Optional[int]]:
+    """Detect channels from TIFF metadata before falling back to shape."""
+    if not _HAS_TIFFFILE:
+        return (1, None)
+
+    try:
+        with tifffile.TiffFile(filepath) as tif:
+            if not tif.series:
+                return (1, None)
+
+            series = tif.series[0]
+            axes = str(getattr(series, "axes", "") or "").upper()
+            shape = tuple(getattr(series, "shape", ()) or ())
+
+            print(f"Channel detection: TIFF axes = {axes or '?'}")
+            if axes and len(axes) == len(shape):
+                channel_axis = axes.find("C")
+                if channel_axis >= 0:
+                    num_channels = shape[channel_axis]
+                    print(
+                        "Channel detection: TIFF metadata "
+                        f"→ {num_channels} channels at axis {channel_axis}"
+                    )
+                    return (num_channels, channel_axis)
+
+            if shape:
+                return _detect_channels_from_shape(shape)
+            return (1, None)
+
+    except Exception as e:
+        print(f"Channel detection: TIFF metadata read failed: {e}")
+        return (1, None)
+
+
+def detect_channels_for_file(
+    filepath: str, image_data: Optional[Union[np.ndarray, list]] = None
+) -> Tuple[int, Optional[int]]:
+    """Detect channels using file metadata when available, then data fallback."""
+    if filepath.lower().endswith(".zarr") or (
+        os.path.isdir(filepath)
+        and os.path.exists(os.path.join(filepath, ".zattrs"))
+    ):
+        return detect_channels_from_zarr_path(filepath)
+
+    if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
+        num_channels, channel_axis = detect_channels_from_tiff_path(filepath)
+        if num_channels > 1:
+            return (num_channels, channel_axis)
+
+    if image_data is None:
+        image_data = load_image_file(filepath)
+
+    return detect_channels_in_image(image_data)
+
+
 def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
     """Heuristic channel detection from array shape alone."""
     print(f"Channel detection: shape heuristic on {shape}")
@@ -515,6 +572,15 @@ def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
     # where axis 0 is usually time and axis 1 is channels.
     if len(shape) >= 4 and 2 <= shape[1] <= 16 and shape[0] > shape[1]:
         return (shape[1], 1)
+    # ImageJ-generated TIFF stacks may come through as TZCYX, where the
+    # channel axis is the third dimension.
+    if (
+        len(shape) >= 5
+        and 2 <= shape[2] <= 16
+        and shape[-1] > shape[2]
+        and shape[-2] > shape[2]
+    ):
+        return (shape[2], 2)
     if len(shape) >= 3 and 2 <= shape[0] <= 16:
         return (shape[0], 0)
     if len(shape) >= 4 and 2 <= shape[1] <= 16:
@@ -1741,13 +1807,8 @@ class ParameterWidget(QWidget):
             first_file = file_list[0]
             print(f"Channel detection: Examining {os.path.basename(first_file)}")
 
-            # For zarr files, read metadata directly — most reliable method
-            if first_file.lower().endswith(".zarr") or (
-                os.path.isdir(first_file) and os.path.exists(os.path.join(first_file, ".zattrs"))
-            ):
-                num_channels, channel_axis = detect_channels_from_zarr_path(first_file)
-            else:
-                # For other formats, load the file and inspect
+            image_data = None
+            if not (_HAS_TIFFFILE and first_file.lower().endswith((".tif", ".tiff"))):
                 image_data = load_image_file(first_file)
                 if isinstance(image_data, list):
                     print(f"Channel detection: Got {len(image_data)} layers from loader")
@@ -1757,7 +1818,8 @@ class ParameterWidget(QWidget):
                             print(f"  Layer {i}: type={lt}, shape={getattr(d, 'shape', '?')}, kwargs_keys={list(kw.keys()) if isinstance(kw, dict) else '?'}")
                 elif hasattr(image_data, "shape"):
                     print(f"Channel detection: Image shape={image_data.shape}")
-                num_channels, channel_axis = detect_channels_in_image(image_data)
+
+            num_channels, channel_axis = detect_channels_for_file(first_file, image_data)
 
             print(f"Channel detection: result → {num_channels} channels, axis={channel_axis}")
 
@@ -2078,17 +2140,9 @@ class ProcessingWorker(QThread):
                 and hasattr(image, "shape")
             ):
                 try:
-                    from napari_tmidas._file_selector import (
-                        detect_channels_from_zarr_path,
-                        detect_channels_in_image,
-                    )
-                    if filepath.lower().endswith(".zarr") or (
-                        os.path.isdir(filepath)
-                        and os.path.exists(os.path.join(filepath, ".zattrs"))
-                    ):
-                        num_ch, ch_axis = detect_channels_from_zarr_path(filepath)
-                    else:
-                        num_ch, ch_axis = detect_channels_in_image(image)
+                    from napari_tmidas._file_selector import detect_channels_for_file
+
+                    num_ch, ch_axis = detect_channels_for_file(filepath, image)
 
                     ch_idx = int(channel_param)
                     if num_ch > 1 and ch_axis is not None and ch_axis >= 0:
