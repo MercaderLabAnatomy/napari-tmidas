@@ -56,6 +56,18 @@ except ImportError:
     TiffSlide = None  # Will fall back to tifffile in TIFFSlideLoader
 
 
+def _is_conversion_debug_enabled() -> bool:
+    """Enable verbose conversion diagnostics only when requested."""
+    value = os.getenv("TMIDAS_CONVERSION_DEBUG", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _debug_print(message: str) -> None:
+    """Print diagnostic messages only in debug mode."""
+    if _is_conversion_debug_enabled():
+        print(message)
+
+
 # Custom exceptions for better error handling
 class FileFormatError(Exception):
     """Raised when file format is not supported or corrupted"""
@@ -401,7 +413,7 @@ class LIFLoader(FormatLoader):
 
         lif_file = None
         try:
-            print(f"Loading LIF series {series_index} from {filepath}")
+            _debug_print(f"Loading LIF series {series_index} from {filepath}")
             lif_file = LifFile(filepath)
 
             # Get the specific image
@@ -419,7 +431,7 @@ class LIFLoader(FormatLoader):
             timepoints = image.nt
             x_dim, y_dim = image.dims[0], image.dims[1]
 
-            print(
+            _debug_print(
                 f"LIF Image dimensions: T={timepoints}, Z={z_stacks}, C={channels}, Y={y_dim}, X={x_dim}"
             )
 
@@ -429,30 +441,31 @@ class LIFLoader(FormatLoader):
                 1024**3
             )  # Assuming 16-bit
 
-            print(
+            _debug_print(
                 f"Estimated memory: {estimated_size_gb:.2f} GB for {total_frames} frames"
             )
 
             # Choose loading strategy based on size
             if estimated_size_gb > 4.0:
-                print("Large dataset detected, using Dask lazy loading")
+                _debug_print("Large dataset detected, using Dask lazy loading")
                 return LIFLoader._load_as_dask(
                     image, timepoints, z_stacks, channels, y_dim, x_dim
                 )
             elif estimated_size_gb > 1.0:
-                print("Medium dataset, using chunked numpy loading")
+                _debug_print("Medium dataset, using chunked numpy loading")
                 return LIFLoader._load_chunked_numpy(
                     image, timepoints, z_stacks, channels, y_dim, x_dim
                 )
             else:
-                print("Small dataset, using standard numpy loading")
+                _debug_print("Small dataset, using standard numpy loading")
                 return LIFLoader._load_numpy(
                     image, timepoints, z_stacks, channels, y_dim, x_dim
                 )
 
         except (OSError, IndexError, ValueError, AttributeError) as e:
-            print("Full error traceback for LIF loading:")
-            traceback.print_exc()
+            _debug_print("Full error traceback for LIF loading:")
+            if _is_conversion_debug_enabled():
+                traceback.print_exc()
             raise FileFormatError(
                 f"Failed to load LIF series {series_index}: {str(e)}"
             ) from e
@@ -513,7 +526,7 @@ class LIFLoader(FormatLoader):
                                 series_data[t, z, c, :, :] = frame_array
                                 loaded_frames += 1
                             else:
-                                print(
+                                _debug_print(
                                     f"Warning: Frame shape mismatch at T={t}, Z={z}, C={c}: "
                                     f"expected {(y_dim, x_dim)}, got {frame_array.shape}"
                                 )
@@ -521,14 +534,14 @@ class LIFLoader(FormatLoader):
                         else:
                             missing_frames += 1
                     except (OSError, ValueError, AttributeError) as e:
-                        print(f"Error loading frame T={t}, Z={z}, C={c}: {e}")
+                        _debug_print(f"Error loading frame T={t}, Z={z}, C={c}: {e}")
                         missing_frames += 1
 
             # Progress feedback for large datasets
             if timepoints > 10 and (t + 1) % max(1, timepoints // 10) == 0:
-                print(f"Loaded {t + 1}/{timepoints} timepoints")
+                _debug_print(f"Loaded {t + 1}/{timepoints} timepoints")
 
-        print(
+            _debug_print(
             f"Loading complete: {loaded_frames} frames loaded, {missing_frames} frames missing"
         )
 
@@ -550,7 +563,7 @@ class LIFLoader(FormatLoader):
     ) -> np.ndarray:
         """Load medium datasets with memory management"""
 
-        print("Using chunked loading strategy")
+        _debug_print("Using chunked loading strategy")
 
         # Load in chunks to manage memory
         chunk_size = max(
@@ -578,7 +591,7 @@ class LIFLoader(FormatLoader):
 
         for t_start in range(0, timepoints, chunk_size):
             t_end = min(t_start + chunk_size, timepoints)
-            print(f"Loading timepoints {t_start} to {t_end-1}")
+            _debug_print(f"Loading timepoints {t_start} to {t_end-1}")
 
             for t in range(t_start, t_end):
                 for z in range(z_stacks):
@@ -600,7 +613,7 @@ class LIFLoader(FormatLoader):
             gc.collect()
 
         if missing_frames > 0:
-            print(
+            _debug_print(
                 f"Warning: {missing_frames} frames were missing and filled with zeros"
             )
 
@@ -617,7 +630,7 @@ class LIFLoader(FormatLoader):
     ) -> da.Array:
         """Load large datasets as dask arrays for lazy evaluation"""
 
-        print("Creating Dask array for lazy loading")
+        _debug_print("Creating Dask array for lazy loading")
 
         # Determine data type
         dtype = np.uint16
@@ -656,7 +669,7 @@ class LIFLoader(FormatLoader):
                                 if frame_array.shape == (y_dim, x_dim):
                                     chunk_data[t_idx, z, c, :, :] = frame_array
                         except (OSError, ValueError, AttributeError) as e:
-                            print(
+                            _debug_print(
                                 f"Error in chunk loading T={t}, Z={z}, C={c}: {e}"
                             )
 
@@ -804,8 +817,8 @@ class ND2Loader(FormatLoader):
                 pixel_size = np.dtype(nd2_file.dtype).itemsize
                 size_gb = (total_voxels * pixel_size) / (1024**3)
 
-                print(f"ND2 file dimensions: {dims}")
-                print(f"Single series estimated size: {size_gb:.2f} GB")
+                _debug_print(f"ND2 file dimensions: {dims}")
+                _debug_print(f"Single series estimated size: {size_gb:.2f} GB")
 
             # Now load the data using the appropriate method
             use_dask = size_gb > 2.0
@@ -847,7 +860,7 @@ class ND2Loader(FormatLoader):
         if use_dask:
             # METHOD 1: Use nd2.imread with xarray for better indexing
             try:
-                print("Loading multi-position file as dask-xarray...")
+                _debug_print("Loading multi-position file as dask-xarray...")
                 data_xr = nd2.imread(filepath, dask=True, xarray=True)
 
                 # Use xarray's isel to extract position - this stays lazy!
@@ -867,11 +880,11 @@ class ND2Loader(FormatLoader):
                 MemoryError,
                 FileFormatError,
             ) as e:
-                print(f"xarray method failed: {e}, trying alternative...")
+                _debug_print(f"xarray method failed: {e}, trying alternative...")
 
             # METHOD 2: Fallback - use direct indexing on ResourceBackedDaskArray
             try:
-                print(
+                _debug_print(
                     "Loading multi-position file with direct dask indexing..."
                 )
                 # We need to keep the file open for the duration of the dask operations
@@ -895,7 +908,7 @@ class ND2Loader(FormatLoader):
                     # For large arrays, we compute immediately to avoid file closure issues
                     # This is not ideal but necessary due to ResourceBackedDaskArray limitations
                     if hasattr(series_data, "compute"):
-                        print(
+                        _debug_print(
                             "Computing dask array immediately due to file closure limitations..."
                         )
                         return series_data.compute()
@@ -909,10 +922,10 @@ class ND2Loader(FormatLoader):
                 MemoryError,
                 FileFormatError,
             ) as e:
-                print(f"Dask method failed: {e}, falling back to numpy...")
+                _debug_print(f"Dask method failed: {e}, falling back to numpy...")
 
         # METHOD 3: Load as numpy array (for small files or as fallback)
-        print("Loading multi-position file as numpy array...")
+            _debug_print("Loading multi-position file as numpy array...")
         with nd2.ND2File(filepath) as nd2_file:
             # Use direct indexing on the ND2File object
             if hasattr(nd2_file, "__getitem__"):
@@ -1138,11 +1151,11 @@ class CZILoader(FormatLoader):
                 if scenes_bbox:
                     # File has scenes - each scene is a series
                     scene_count = len(scenes_bbox)
-                    print(f"CZI file has {scene_count} scenes")
+                    _debug_print(f"CZI file has {scene_count} scenes")
                     return scene_count
                 else:
                     # No scenes - single series
-                    print("CZI file has no scenes - treating as single series")
+                    _debug_print("CZI file has no scenes - treating as single series")
                     return 1
 
         except (
@@ -1169,15 +1182,15 @@ class CZILoader(FormatLoader):
         filepath = os.path.abspath(os.path.expanduser(filepath))
 
         try:
-            print(f"Loading CZI series {series_index} from {filepath}")
+            _debug_print(f"Loading CZI series {series_index} from {filepath}")
 
             with pyczi.open_czi(filepath) as czidoc:
                 # Get file information
                 total_bbox = czidoc.total_bounding_box
                 scenes_bbox = czidoc.scenes_bounding_rectangle
 
-                print(f"Total bounding box: {total_bbox}")
-                print(f"Scenes: {len(scenes_bbox) if scenes_bbox else 0}")
+                _debug_print(f"Total bounding box: {total_bbox}")
+                _debug_print(f"Scenes: {len(scenes_bbox) if scenes_bbox else 0}")
 
                 # Determine scene ID
                 if scenes_bbox:
@@ -1188,7 +1201,7 @@ class CZILoader(FormatLoader):
                             f"Scene index {series_index} out of range (0-{len(scene_indices)-1})"
                         )
                     scene_id = scene_indices[series_index]
-                    print(f"Loading scene ID: {scene_id}")
+                    _debug_print(f"Loading scene ID: {scene_id}")
                 else:
                     # Single scene file
                     if series_index != 0:
@@ -1196,7 +1209,7 @@ class CZILoader(FormatLoader):
                             f"Single scene file only supports series index 0, got {series_index}"
                         )
                     scene_id = None
-                    print("Loading single scene CZI")
+                    _debug_print("Loading single scene CZI")
 
                 # Extract dimension sizes from total_bbox
                 T_start, T_size = total_bbox.get("T", (0, 1))
@@ -1205,7 +1218,7 @@ class CZILoader(FormatLoader):
                 Y_start, Y_size = total_bbox.get("Y", (0, 1))
                 X_start, X_size = total_bbox.get("X", (0, 1))
 
-                print(
+                _debug_print(
                     f"Dimensions: T={T_size}, Z={Z_size}, C={C_size}, Y={Y_size}, X={X_size}"
                 )
 
@@ -1223,7 +1236,7 @@ class CZILoader(FormatLoader):
                 dtype = sample_plane.dtype
                 y_dim, x_dim = sample_plane.shape
 
-                print(
+                _debug_print(
                     f"Sample plane shape after squeeze: {sample_plane.shape}, dtype: {dtype}"
                 )
 
@@ -1236,7 +1249,7 @@ class CZILoader(FormatLoader):
                     * x_dim
                     * np.dtype(dtype).itemsize
                 ) / (1024**3)
-                print(f"Estimated total size: {total_size_gb:.2f} GB")
+                _debug_print(f"Estimated total size: {total_size_gb:.2f} GB")
 
                 # Build the full array by reading all planes
                 # Use the actual Y, X dimensions from the sample plane
@@ -1244,7 +1257,7 @@ class CZILoader(FormatLoader):
 
                 # For large datasets, use Dask for lazy loading
                 if total_size_gb > 2.0:
-                    print("Using Dask for lazy loading")
+                    _debug_print("Using Dask for lazy loading")
 
                     def load_plane(t, c, z):
                         """Load a single plane"""
@@ -1285,11 +1298,11 @@ class CZILoader(FormatLoader):
                         delayed_planes.append(t_stack)
 
                     image_data = da.stack(delayed_planes, axis=0)
-                    print(f"Created Dask array with shape: {image_data.shape}")
+                    _debug_print(f"Created Dask array with shape: {image_data.shape}")
 
                 else:
                     # For smaller datasets, load everything into memory
-                    print("Loading all data into memory")
+                    _debug_print("Loading all data into memory")
                     image_data = np.empty(full_shape, dtype=dtype)
 
                     total_planes = T_size * C_size * Z_size
@@ -1317,11 +1330,11 @@ class CZILoader(FormatLoader):
                                     plane_count % 100 == 0
                                     or plane_count == total_planes
                                 ):
-                                    print(
+                                    _debug_print(
                                         f"Loaded {plane_count}/{total_planes} planes..."
                                     )
 
-                print(f"Final CZI data shape: {image_data.shape}")
+                _debug_print(f"Final CZI data shape: {image_data.shape}")
                 return image_data
 
         except (
@@ -1352,12 +1365,12 @@ class CZILoader(FormatLoader):
                         return {}
                     scene_indices = list(scenes_bbox.keys())
                     scene_id = scene_indices[series_index]
-                    print(f"Getting metadata for scene {scene_id}")
+                    _debug_print(f"Getting metadata for scene {scene_id}")
                 else:
                     if series_index != 0:
                         return {}
                     scene_id = None
-                    print("Getting metadata for single scene CZI")
+                    _debug_print("Getting metadata for single scene CZI")
 
                 # Get basic metadata
                 metadata = {}
@@ -1389,7 +1402,7 @@ class CZILoader(FormatLoader):
                             metadata["spacing"] = scale_z
 
                 except (AttributeError, RuntimeError):
-                    print(
+                    _debug_print(
                         "Warning: Could not extract scale information from metadata"
                     )
 
@@ -1409,10 +1422,10 @@ class CZILoader(FormatLoader):
                     axes = "TCZYX"
                     actual_shape = (T_size, C_size, Z_size, Y_size, X_size)
 
-                    print(f"CZI dimensions: {axes} = {actual_shape}")
+                    _debug_print(f"CZI dimensions: {axes} = {actual_shape}")
 
                 except (AttributeError, RuntimeError) as e:
-                    print(f"Could not get sample data for metadata: {e}")
+                    _debug_print(f"Could not get sample data for metadata: {e}")
                     # Fallback to original logic
                     filtered_dims = {}
                     for dim, (_start, size) in total_bbox.items():
@@ -1925,6 +1938,7 @@ class ConversionWorker(QThread):
 
             image_data = loader.load_series(filepath, series_index)
             metadata = loader.get_metadata(filepath, series_index) or {}
+            self._log_spatial_metadata_summary(filepath, metadata)
 
             # Generate output path
             base_name = Path(filepath).stem
@@ -1953,6 +1967,21 @@ class ConversionWorker(QThread):
             import gc
 
             gc.collect()
+
+    def _log_spatial_metadata_summary(self, filepath: str, metadata: dict):
+        """Print a concise, user-focused spatial metadata summary."""
+        resolution = metadata.get("resolution")
+        spacing = metadata.get("spacing")
+        unit = metadata.get("unit", "unknown")
+
+        if resolution is None and spacing is None:
+            return
+
+        filename = Path(filepath).name
+        print(
+            "Spatial metadata detected "
+            f"for {filename}: resolution={resolution}, spacing={spacing}, unit={unit}"
+        )
 
     def _save_tif(
         self,
@@ -2217,7 +2246,17 @@ class ConversionWorker(QThread):
         # Build the scale transformation
         scale_transform = {"type": "scale", "scale": scales}
 
-        print(f"Built scale transformation: {scales} (unit: {unit})")
+        # Keep one concise, user-useful spatial metadata line in normal mode.
+        axis_to_scale = {axis: scale for axis, scale in zip(axes, scales)}
+        if "x" in axis_to_scale or "y" in axis_to_scale or "z" in axis_to_scale:
+            x_um = axis_to_scale.get("x", 1.0)
+            y_um = axis_to_scale.get("y", 1.0)
+            z_um = axis_to_scale.get("z", 1.0)
+            print(
+                f"Spatial scale used (um): X={x_um:.6g}, Y={y_um:.6g}, Z={z_um:.6g}"
+            )
+
+        _debug_print(f"Built scale transformation: {scales} (unit: {unit})")
         return scale_transform
 
     def _build_pyramid_coordinate_transformations(
