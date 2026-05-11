@@ -418,13 +418,18 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
     Returns (num_channels, channel_axis) or (1, None) if not found.
     """
     try:
-        root = zarr.open(zarr_path, mode="r")
+        root = None
+        try:
+            root = zarr.open(zarr_path, mode="r")
+        except Exception:
+            # Allow metadata-only zarr folders (e.g. tests) to still resolve axes.
+            root = None
         attrs = _read_zarr_root_attrs(zarr_path, root=root)
         multiscales = _get_ome_multiscales(attrs)
         if not multiscales:
             print(f"Channel detection: No multiscales metadata in {zarr_path}")
             # Fall back to inspecting the raw array shape
-            arr = _resolve_first_array(root)
+            arr = _resolve_first_array(root) if root is not None else None
 
             if arr is not None:
                 return _detect_channels_from_shape(arr.shape)
@@ -447,7 +452,7 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
             print("Channel detection: No channel axis found in OME axes metadata")
             # Try shape heuristics on the first dataset array
             datasets = ms.get("datasets", [])
-            if datasets:
+            if datasets and root is not None:
                 path = datasets[0].get("path")
                 arr = root[path]
                 return _detect_channels_from_shape(arr.shape)
@@ -456,6 +461,9 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
         # Get num_channels from the array at the first resolution level
         datasets = ms.get("datasets", [])
         path = datasets[0].get("path") if datasets else None
+        if root is None:
+            # We know a channel axis exists from metadata but cannot read array.
+            return (1, channel_axis)
         path = _resolve_dataset_path(root, path)
         arr = root[path]
         num_channels = arr.shape[channel_axis]
@@ -472,7 +480,11 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
 def detect_axes_from_zarr_path(zarr_path: str) -> Optional[str]:
     """Read OME-Zarr axes metadata as an uppercase axes string."""
     try:
-        root = zarr.open(zarr_path, mode="r")
+        root = None
+        try:
+            root = zarr.open(zarr_path, mode="r")
+        except Exception:
+            root = None
         attrs = _read_zarr_root_attrs(zarr_path, root=root)
         multiscales = _get_ome_multiscales(attrs)
         if not multiscales:
@@ -638,9 +650,14 @@ def detect_channels_for_file(
     """Detect channels using file metadata when available, then data fallback."""
     if filepath.lower().endswith(".zarr") or (
         os.path.isdir(filepath)
-        and os.path.exists(os.path.join(filepath, ".zattrs"))
+        and (
+            os.path.exists(os.path.join(filepath, ".zattrs"))
+            or os.path.exists(os.path.join(filepath, "zarr.json"))
+        )
     ):
-        return detect_channels_from_zarr_path(filepath)
+        num_channels, channel_axis = detect_channels_from_zarr_path(filepath)
+        if num_channels > 1:
+            return (num_channels, channel_axis)
 
     if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
         num_channels, channel_axis = detect_channels_from_tiff_path(filepath)
@@ -659,9 +676,14 @@ def detect_axes_for_file(
     """Detect the file axes string from metadata when available."""
     if filepath.lower().endswith(".zarr") or (
         os.path.isdir(filepath)
-        and os.path.exists(os.path.join(filepath, ".zattrs"))
+        and (
+            os.path.exists(os.path.join(filepath, ".zattrs"))
+            or os.path.exists(os.path.join(filepath, "zarr.json"))
+        )
     ):
-        return detect_axes_from_zarr_path(filepath)
+        zarr_axes = detect_axes_from_zarr_path(filepath)
+        if zarr_axes:
+            return zarr_axes
 
     if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
         return detect_axes_from_tiff_path(filepath)
@@ -697,7 +719,7 @@ def resolve_cellpose_dim_order(
         return normalized
 
     if image_data is not None and hasattr(image_data, "ndim"):
-        fallback = {2: "YX", 3: "ZYX", 4: "TZYX"}
+        fallback = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TZYX"}
         resolved = fallback.get(image_data.ndim)
         if resolved:
             return resolved
@@ -810,10 +832,17 @@ def save_as_zarr(
     chunks : tuple or str
         Chunk size for zarr storage, 'auto' for automatic chunking
     """
+
     try:
         import zarr
         from ome_zarr.io import parse_url
+        from ome_zarr.scale import Scaler
         from ome_zarr.writer import write_image
+
+        if int(zarr.__version__.split(".")[0]) < 3:
+            raise RuntimeError(
+                "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
+            )
 
         # Ensure filepath ends with .zarr
         if not filepath.endswith(".zarr"):
@@ -821,7 +850,7 @@ def save_as_zarr(
 
         # Create zarr store
         store = parse_url(filepath, mode="w").store
-        root = zarr.group(store=store)
+        root = zarr.group(store=store, zarr_format=3)
 
         # Infer axes if not provided
         if not axes or len(axes) != data.ndim:
@@ -855,21 +884,20 @@ def save_as_zarr(
                 auto_chunks[i] = 1
             chunks = tuple(auto_chunks)
 
-        # Use zlib (GZip) compression — widely supported.
-        # zarr v3 uses zarr.codecs.GzipCodec + "compressors" (list).
-        # zarr v2 uses numcodecs.GZip + "compressor".
-        _zarr_major = int(zarr.__version__.split(".")[0])
+        # Use zlib (GZip) compression with zarr v3 codecs.
         try:
-            if _zarr_major >= 3:
-                from zarr.codecs import GzipCodec as _GzipCodec
-                _storage_opts: dict = {"chunks": chunks, "compressors": [_GzipCodec(level=6)]}
-            else:
-                from numcodecs import GZip as _GZip
-                _storage_opts = {"chunks": chunks, "compressor": _GZip(level=6)}
+            from zarr.codecs import GzipCodec as _GzipCodec
+            _storage_opts: dict = {
+                "chunks": chunks,
+                "compressors": [_GzipCodec(level=6)],
+            }
         except (ImportError, Exception):
             _storage_opts = {"chunks": chunks}  # no compression if codec unavailable
 
-        print(f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}")
+        print(
+            f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}"
+            ", zarr_format=3"
+        )
 
         # Write as OME-Zarr
         write_image(
@@ -879,6 +907,7 @@ def save_as_zarr(
             coordinate_transformations=(
                 [[scale_transform]] if scale_transform else None
             ),
+            scaler=Scaler(max_layer=0),
             storage_options=_storage_opts,
         )
 
@@ -889,17 +918,22 @@ def save_as_zarr(
         # Fallback to basic zarr without OME metadata
         import zarr
 
+        if int(zarr.__version__.split(".")[0]) < 3:
+            raise RuntimeError(
+                "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
+            )
+
         if chunks == "auto":
             chunks = True  # Let zarr decide
 
-        _zarr_major = int(zarr.__version__.split(".")[0])
         try:
-            if _zarr_major >= 3:
-                from zarr.codecs import GzipCodec as _GzipCodec
-                zarr.save(filepath, data, chunks=chunks, compressors=[_GzipCodec(level=6)])
-            else:
-                from numcodecs import GZip as _GZip
-                zarr.save(filepath, data, chunks=chunks, compressor=_GZip(level=6))
+            from zarr.codecs import GzipCodec as _GzipCodec
+            zarr.save(
+                filepath,
+                data,
+                chunks=chunks,
+                compressors=[_GzipCodec(level=6)],
+            )
         except Exception:
             zarr.save(filepath, data, chunks=chunks)  # no compression fallback
         print(f"Saved basic Zarr to: {filepath}")

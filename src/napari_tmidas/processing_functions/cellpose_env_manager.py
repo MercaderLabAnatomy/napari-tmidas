@@ -131,7 +131,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         # Install packages one by one with error checking
         packages = [
             "cellpose",
-            "zarr<3",
+            "zarr>=3",
             "tifffile",
             "dask[distributed]",
             "dask-jobqueue",
@@ -240,8 +240,8 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         required_packages = [
             ("cellpose", "import cellpose"),
             (
-                "zarr<3",
-                "import zarr; assert int(zarr.__version__.split('.')[0]) < 3",
+                "zarr>=3",
+                "import zarr; assert int(zarr.__version__.split('.')[0]) >= 3",
             ),
             ("tifffile", "import tifffile"),
             ("dask", "import dask"),

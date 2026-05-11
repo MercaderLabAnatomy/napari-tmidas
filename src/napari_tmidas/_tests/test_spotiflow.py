@@ -64,14 +64,15 @@ def test_spotiflow_detection_with_synthetic_data():
         image = image + np.random.normal(0, 50, image.shape).astype(np.uint16)
 
         # Test detection (this will likely use the dedicated environment)
-        points = spotiflow_detect_spots(
+        labels = spotiflow_detect_spots(
             image, pretrained_model="general", force_dedicated_env=True
         )
 
-        # Should return an array of points
-        assert isinstance(points, np.ndarray)
-        assert points.ndim == 2
-        assert points.shape[1] == 2  # 2D coordinates
+        # The processing function returns a label mask for napari Labels.
+        assert isinstance(labels, np.ndarray)
+        assert labels.shape == image.shape
+        assert labels.ndim == image.ndim
+        assert labels.dtype == np.uint16
 
     except ImportError:
         pytest.skip("Spotiflow not available for testing")

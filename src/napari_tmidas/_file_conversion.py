@@ -27,6 +27,7 @@ import zarr
 from dask.diagnostics import ProgressBar
 from magicgui import magicgui
 from ome_zarr.io import parse_url
+from ome_zarr.scale import Scaler
 from ome_zarr.writer import write_image
 from pylibCZIrw import czi as pyczi
 from qtpy.QtCore import Qt, QThread, Signal
@@ -2161,16 +2162,10 @@ class ConversionWorker(QThread):
             scale_transform = self._build_scale_transform(
                 metadata, axes, image_data.shape
             )
-            pyramid_factors = (2, 4, 8, 16)
-
-            # OME-Zarr requires one coordinate transformation entry per pyramid
-            # dataset when scale_factors are provided.
-            pyramid_coordinate_transform = (
-                self._build_pyramid_coordinate_transformations(
-                    scale_transform,
-                    axes or "zyx",
-                    pyramid_factors,
-                )
+            # Downstream segmentation workflows use full-resolution data only,
+            # so write a single-level OME-Zarr (no multiscale pyramid).
+            base_coordinate_transform = (
+                [[scale_transform]] if scale_transform else None
             )
 
             # Save with OME-ZARR including physical metadata
@@ -2180,15 +2175,13 @@ class ConversionWorker(QThread):
                 # Set layer name for napari compatibility
                 root.attrs["name"] = layer_name
 
-                # Write the image with proper OME-ZARR structure and physical metadata
-                # Pass scale_factors to generate pyramid and base coordinate transformation
+                # Write a single-level OME-Zarr with physical metadata.
                 write_image(
                     image_data,
                     group=root,
                     axes=axes or "zyx",
-                    coordinate_transformations=pyramid_coordinate_transform,
-                    scale_factors=pyramid_factors,
-                    scaler=None,
+                    coordinate_transformations=base_coordinate_transform,
+                    scaler=Scaler(max_layer=0),
                     storage_options={"compression": "zstd"},
                 )
 

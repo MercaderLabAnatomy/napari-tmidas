@@ -8,6 +8,8 @@ import sys
 import numpy as np
 import pytest
 
+pytest.importorskip("pytestqt")
+
 # Skip all Qt widget tests on macOS CI due to segfaults with headless Qt/OpenGL
 pytestmark = pytest.mark.skipif(
     sys.platform == "darwin" and os.environ.get("CI") == "true",
