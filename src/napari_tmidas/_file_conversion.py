@@ -8,11 +8,13 @@ Supported formats: Leica LIF, Nikon ND2, Zeiss CZI, TIFF-based whole slide image
 
 import concurrent.futures
 import contextlib
+import csv
 import gc
 import os
 import re
 import shutil
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -1724,6 +1726,7 @@ class ConversionWorker(QThread):
 
     def run(self):
         success_count = 0
+        conversion_results = []
 
         for i, (filepath, series_index) in enumerate(self.files_to_convert):
             if not self.running:
@@ -1737,10 +1740,26 @@ class ConversionWorker(QThread):
                 success = self._convert_single_file(filepath, series_index)
                 if success:
                     success_count += 1
+                    conversion_results.append(
+                        {
+                            "filepath": filepath,
+                            "series_index": series_index,
+                            "status": "success",
+                            "message": "Conversion successful",
+                        }
+                    )
                     self.file_done.emit(
                         filepath, True, "Conversion successful"
                     )
                 else:
+                    conversion_results.append(
+                        {
+                            "filepath": filepath,
+                            "series_index": series_index,
+                            "status": "failed",
+                            "message": "Conversion failed",
+                        }
+                    )
                     self.file_done.emit(filepath, False, "Conversion failed")
 
             except (
@@ -1749,13 +1768,102 @@ class ConversionWorker(QThread):
                 ConversionError,
                 MemoryError,
             ) as e:
-                self.file_done.emit(filepath, False, str(e))
+                error_message = str(e)
+                if self._should_skip_file(filepath, error_message):
+                    skip_message = f"SKIPPED: {error_message}"
+                    conversion_results.append(
+                        {
+                            "filepath": filepath,
+                            "series_index": series_index,
+                            "status": "skipped",
+                            "message": error_message,
+                        }
+                    )
+                    self.file_done.emit(filepath, False, skip_message)
+                else:
+                    conversion_results.append(
+                        {
+                            "filepath": filepath,
+                            "series_index": series_index,
+                            "status": "failed",
+                            "message": error_message,
+                        }
+                    )
+                    self.file_done.emit(filepath, False, error_message)
             except (OSError, PermissionError) as e:
+                file_error = f"File access error: {str(e)}"
+                conversion_results.append(
+                    {
+                        "filepath": filepath,
+                        "series_index": series_index,
+                        "status": "failed",
+                        "message": file_error,
+                    }
+                )
                 self.file_done.emit(
-                    filepath, False, f"File access error: {str(e)}"
+                    filepath, False, file_error
                 )
 
+        report_path = self._write_conversion_report(conversion_results)
+        if report_path:
+            print(f"Conversion report written to: {report_path}")
+
         self.finished.emit(success_count)
+
+    def _should_skip_file(self, filepath: str, error_message: str) -> bool:
+        """Return True for known read errors that should be skipped."""
+        if not filepath.lower().endswith(".czi"):
+            return False
+
+        known_czi_read_errors = (
+            "Invalid SubBlkDirectory-magic",
+            "Illegal data detected at offset",
+        )
+
+        return any(token in error_message for token in known_czi_read_errors)
+
+    def _write_conversion_report(
+        self, conversion_results: List[Dict[str, Union[str, int]]]
+    ) -> Optional[str]:
+        """Write a CSV report with per-file conversion status."""
+        if not conversion_results:
+            return None
+
+        try:
+            os.makedirs(self.output_folder, exist_ok=True)
+            report_path = os.path.join(
+                self.output_folder, "conversion_report.csv"
+            )
+
+            with open(report_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "timestamp",
+                        "filepath",
+                        "series_index",
+                        "status",
+                        "message",
+                    ],
+                )
+                writer.writeheader()
+
+                timestamp = datetime.now().isoformat(timespec="seconds")
+                for row in conversion_results:
+                    writer.writerow(
+                        {
+                            "timestamp": timestamp,
+                            "filepath": row["filepath"],
+                            "series_index": row["series_index"],
+                            "status": row["status"],
+                            "message": row["message"],
+                        }
+                    )
+
+            return report_path
+        except (OSError, PermissionError, ValueError) as e:
+            print(f"Warning: Could not write conversion report: {e}")
+            return None
 
     def stop(self):
         self.running = False
@@ -2659,6 +2767,8 @@ class MicroscopyImageConverterWidget(QWidget):
         filename = Path(filepath).name
         if success:
             print(f"Successfully converted: {filename}")
+        elif message.startswith("SKIPPED:"):
+            print(f"Skipped file: {filename} - {message}")
         else:
             print(f"Failed to convert: {filename} - {message}")
             QMessageBox.warning(
