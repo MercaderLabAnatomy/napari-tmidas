@@ -51,7 +51,9 @@ class TestChannelDetection:
 
     def test_detect_tzcyx_format(self):
         """Test detection in TZCYX format from ImageJ-generated TIFF stacks."""
-        image = np.random.rand(47, 25, 2, 1024, 1024)
+        # Keep a small synthetic tensor to validate axis inference without
+        # allocating large arrays that can OOM constrained CI runners.
+        image = np.random.rand(4, 8, 2, 32, 32)
         num_channels, channel_axis = detect_channels_in_image(image)
         assert num_channels == 2
         assert channel_axis == 2
