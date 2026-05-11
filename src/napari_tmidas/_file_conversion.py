@@ -1979,17 +1979,16 @@ class ConversionWorker(QThread):
                 metadata, axes, image_data.shape
             )
             pyramid_factors = (2, 4, 8, 16)
-            
-            # Build base-level coordinate transformation only
-            # When using scale_factors, OME-Zarr will automatically generate
-            # coordinate transformations for pyramid levels
-            base_coordinate_transform = None
-            if scale_transform:
-                base_scales = scale_transform.get("scale")
-                if base_scales and isinstance(base_scales, list):
-                    base_coordinate_transform = [
-                        [{"type": "scale", "scale": base_scales}]
-                    ]
+
+            # OME-Zarr requires one coordinate transformation entry per pyramid
+            # dataset when scale_factors are provided.
+            pyramid_coordinate_transform = (
+                self._build_pyramid_coordinate_transformations(
+                    scale_transform,
+                    axes or "zyx",
+                    pyramid_factors,
+                )
+            )
 
             # Save with OME-ZARR including physical metadata
             with ProgressBar():
@@ -2004,7 +2003,7 @@ class ConversionWorker(QThread):
                     image_data,
                     group=root,
                     axes=axes or "zyx",
-                    coordinate_transformations=base_coordinate_transform,
+                    coordinate_transformations=pyramid_coordinate_transform,
                     scale_factors=pyramid_factors,
                     scaler=None,
                     storage_options={"compression": "zstd"},
