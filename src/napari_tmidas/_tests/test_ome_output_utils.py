@@ -121,3 +121,29 @@ def test_write_labels_with_source_metadata_writes_ome_tiff(tmp_path):
         arr = tif.asarray()
         assert arr.dtype == np.uint32
         assert arr.shape == labels.shape
+
+
+def test_write_labels_with_source_metadata_tiff_failure_is_atomic(
+    tmp_path, monkeypatch
+):
+    labels = np.ones((4, 8, 8), dtype=np.uint32)
+    output_path = tmp_path / "labels.ome.tif"
+
+    def _failing_imwrite(path, *args, **kwargs):
+        with open(path, "wb") as f:
+            f.write(b"partial")
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(tifffile, "imwrite", _failing_imwrite)
+
+    with pytest.raises(RuntimeError, match="simulated write failure"):
+        write_labels_with_source_metadata(
+            labels=labels,
+            source_path=None,
+            output_path=str(output_path),
+            output_format="tiff",
+            dim_order="ZYX",
+        )
+
+    assert not output_path.exists()
+    assert not list(tmp_path.glob("*.tmp-*"))

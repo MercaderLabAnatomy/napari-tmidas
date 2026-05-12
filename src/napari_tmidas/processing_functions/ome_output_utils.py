@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from contextlib import suppress
 from typing import Any, Optional
 
 import numpy as np
@@ -147,23 +149,65 @@ def write_labels_with_source_metadata(
         return output_path
 
     # OME-TIFF path
-    arr = np.asarray(labels, dtype=labels_dtype)
-    shape = tuple(int(s) for s in arr.shape)
-    size_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(labels_dtype).itemsize
+    labels_shape = tuple(
+        int(s) for s in getattr(labels, "shape", np.asarray(labels).shape)
+    )
+    labels_ndim = len(labels_shape)
+    size_bytes = int(np.prod(labels_shape, dtype=np.int64)) * np.dtype(labels_dtype).itemsize
     use_bigtiff = (size_bytes / (1024**3)) > 2.0
     axes = str(dim_order or "YX").upper()
-    if len(axes) != arr.ndim:
+    if len(axes) != labels_ndim:
         fallback = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
-        axes = fallback.get(arr.ndim, "YX")
+        axes = fallback.get(labels_ndim, "YX")
 
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    tifffile.imwrite(
-        output_path,
-        arr,
-        dtype=labels_dtype,
-        ome=True,
-        metadata={"axes": axes},
-        compression="zlib",
-        bigtiff=use_bigtiff,
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    tmp_output_path = os.path.join(
+        output_dir,
+        f".{os.path.basename(output_path)}.tmp-{os.getpid()}-{time.time_ns()}",
     )
+
+    try:
+        # Stream slab-by-slab for large array-like inputs to avoid materializing
+        # the full volume in memory prior to TIFF serialization.
+        can_stream = (
+            not isinstance(labels, np.ndarray)
+            and hasattr(labels, "shape")
+            and labels_ndim > 2
+        )
+
+        if can_stream:
+            def _iter_slabs():
+                for i in range(labels_shape[0]):
+                    yield np.asarray(labels[i], dtype=labels_dtype)
+
+            tifffile.imwrite(
+                tmp_output_path,
+                data=_iter_slabs(),
+                shape=labels_shape,
+                dtype=labels_dtype,
+                ome=True,
+                metadata={"axes": axes},
+                compression="zlib",
+                photometric="minisblack",
+                bigtiff=use_bigtiff,
+            )
+        else:
+            arr = np.asarray(labels, dtype=labels_dtype)
+            tifffile.imwrite(
+                tmp_output_path,
+                arr,
+                dtype=labels_dtype,
+                ome=True,
+                metadata={"axes": axes},
+                compression="zlib",
+                bigtiff=use_bigtiff,
+            )
+
+        os.replace(tmp_output_path, output_path)
+    except Exception:
+        with suppress(OSError, FileNotFoundError):
+            os.unlink(tmp_output_path)
+        raise
+
     return output_path
