@@ -113,7 +113,7 @@ Number of slices/images processed together.
 
 ### `use_distributed_segmentation` (bool, default: `False`)
 
-Enable distributed blockwise Cellpose for large zarr volumes.
+Enable distributed blockwise Cellpose for large zarr datasets, including large 3D volumes and large 2D planes such as whole-slide-style images.
 
 ### `distributed_blocksize` (int, default: `256`, range: `64-1024`)
 
@@ -179,6 +179,8 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 - Background: `0`
 - Objects: unique positive integer labels
 - Output dimensionality matches selected input dimensionality/timepoint subset
+- Direct zarr output preserves OME multiscale depth and metadata when source metadata is available
+- TIFF output is written as OME-TIFF labels
 
 ## Tips
 
@@ -201,8 +203,8 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 ### Manage Memory
 
 - Reduce `batch_size` if memory is tight
-- Use `use_distributed_segmentation` for large zarr volumes
-- In distributed mode, non-zarr inputs are auto-converted to temporary zarr
+- Use `use_distributed_segmentation` for large zarr volumes or very large 2D zarr planes
+- In distributed mode, non-zarr inputs are auto-converted to temporary zarr (v3 by default)
 
 ### Mixed TCZYX and TZCYX Inputs
 
@@ -299,4 +301,5 @@ Practical tuning:
 ## See Also
 
 - [Basic Processing Functions](basic_processing.md)
+
 

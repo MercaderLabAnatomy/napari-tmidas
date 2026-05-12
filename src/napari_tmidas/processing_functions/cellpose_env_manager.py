@@ -592,6 +592,44 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
         _shutil.rmtree(tmp_out, ignore_errors=True)
 
 
+def run_distributed_on_2d_slab(slab_2d, name="", slab_mask_2d=None):
+    # Run distributed_eval for 2D data by wrapping as a single-Z slab.
+    slab_2d = np.asarray(slab_2d)
+    if slab_2d.ndim != 2:
+        raise ValueError(f"Expected 2D slab, got shape={{slab_2d.shape}}")
+
+    tmp_slab_dir = _tempfile.mkdtemp(dir=_TMP_BASE_DIR, suffix='_2d_as_3d.zarr')
+    try:
+        slab_3d = zarr.open_array(
+            tmp_slab_dir,
+            mode='w',
+            shape=(1, slab_2d.shape[0], slab_2d.shape[1]),
+            chunks=(1, min(BLOCKSIZE, slab_2d.shape[0]), min(BLOCKSIZE, slab_2d.shape[1])),
+            dtype=slab_2d.dtype,
+        )
+        slab_3d[0, :, :] = slab_2d
+
+        mask_3d = None
+        if slab_mask_2d is not None:
+            slab_mask_2d = np.asarray(slab_mask_2d)
+            if slab_mask_2d.shape == slab_2d.shape:
+                mask_3d = slab_mask_2d[np.newaxis, :, :]
+            else:
+                print(
+                    f"Warning: 2D mask shape {{slab_mask_2d.shape}} does not match "
+                    f"slab shape {{slab_2d.shape}} for {{name}}; ignoring mask"
+                )
+
+        masks_3d = run_distributed_on_slab(
+            slab_3d,
+            name=name,
+            slab_mask=mask_3d,
+        )
+        return np.asarray(masks_3d[0], dtype=np.uint32)
+    finally:
+        _shutil.rmtree(tmp_slab_dir, ignore_errors=True)
+
+
 def slab_to_disk_zarr(source_5d_or_4d, index_slices, shape_zyx, chunks, tmp_dir):
     \"\"\"
     Stream a ZYX slab from a source zarr array to an on-disk temp zarr without
@@ -898,15 +936,45 @@ def main():
                         else:
                             result[out_i, :, :, :] = masks
 
-            else:  # bare 3D ZYX — zarr_array is already a zarr.Array on disk
+            elif len(zarr_array.shape) == 3:
+                # 3D can be either ZYX (3D) or TYX (2D time series).
+                if TIMEPOINT_INDEX is not None and not _EVAL_KWARGS.get('do_3D', False):
+                    t_req = int(TIMEPOINT_INDEX)
+                    if t_req < 0 or t_req >= zarr_array.shape[0]:
+                        raise ValueError(
+                            f"Requested timepoint {{t_req}} out of range "
+                            f"(0-{{zarr_array.shape[0]-1}})"
+                        )
+                    slab_2d = np.array(zarr_array[t_req, :, :])
+                    slab_mask = _select_mask_for_volume(_DISTRIBUTED_MASK, t_idx=t_req)
+                    if _distributed_eval_fn is not None:
+                        result = run_distributed_on_2d_slab(
+                            slab_2d,
+                            name=f"T{{t_req+1}}",
+                            slab_mask_2d=slab_mask,
+                        )
+                    else:
+                        result = process_volume(slab_2d, f"T{{t_req+1}}")
+                else:
+                    if _distributed_eval_fn is not None:
+                        result = run_distributed_on_slab(
+                            zarr_array,
+                            "3D",
+                            slab_mask=_select_mask_for_volume(_DISTRIBUTED_MASK),
+                        )
+                    else:
+                        result = process_volume(np.array(zarr_array), "3D")
+            else:  # bare 2D YX
+                slab_2d = np.array(zarr_array)
+                slab_mask = _select_mask_for_volume(_DISTRIBUTED_MASK)
                 if _distributed_eval_fn is not None:
-                    result = run_distributed_on_slab(
-                        zarr_array,
-                        "3D",
-                        slab_mask=_select_mask_for_volume(_DISTRIBUTED_MASK),
+                    result = run_distributed_on_2d_slab(
+                        slab_2d,
+                        name="2D",
+                        slab_mask_2d=slab_mask,
                     )
                 else:
-                    result = process_volume(np.array(zarr_array), "3D")
+                    result = process_volume(slab_2d, "2D")
 
         finally:
             if _tmp_slabs is not None:

@@ -47,6 +47,9 @@ except ImportError:
     )
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions.ome_output_utils import (
+    write_labels_with_source_metadata,
+)
 
 
 def transpose_dimensions(img, dim_order):
@@ -372,47 +375,14 @@ def cellpose_segmentation(
             return None
 
         os.makedirs(_output_folder, exist_ok=True)
-        if _output_format == "zarr":
-            shutil.rmtree(output_path, ignore_errors=True)
-            shutil.copytree(checkpoint_path, output_path)
-            print(f"Saved interleaved checkpoint zarr to: {output_path}")
-            return output_path
-
-        shape = tuple(int(s) for s in checkpoint.shape)
-        size_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(np.uint32).itemsize
-        use_bigtiff = (size_bytes / (1024**3)) > 2.0
-        axes_by_ndim = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
-        axes = axes_by_ndim.get(len(shape), "YX")
-
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-        if len(shape) <= 2:
-            tifffile.imwrite(
-                output_path,
-                np.asarray(checkpoint, dtype=np.uint32),
-                compression="zlib",
-                bigtiff=use_bigtiff,
-                metadata={"axes": axes},
-            )
-            print(f"Saved interleaved checkpoint TIFF to: {output_path}")
-            return output_path
-
-        def _iter_checkpoint_slabs():
-            for i in range(shape[0]):
-                yield np.asarray(checkpoint[i], dtype=np.uint32)
-
-        tifffile.imwrite(
-            output_path,
-            data=_iter_checkpoint_slabs(),
-            shape=shape,
-            dtype=np.uint32,
-            compression="zlib",
-            photometric="minisblack",
-            bigtiff=use_bigtiff,
-            metadata={"axes": axes},
+        write_labels_with_source_metadata(
+            labels=checkpoint,
+            source_path=_source_filepath,
+            output_path=output_path,
+            output_format=_output_format,
+            dim_order=dim_order,
         )
-        print(f"Saved interleaved checkpoint TIFF to: {output_path}")
+        print(f"Saved interleaved output to: {output_path}")
         return output_path
 
     # Prefer direct zarr processing when a source zarr path is available.
@@ -474,6 +444,7 @@ def cellpose_segmentation(
                     data=np.asarray(image),
                     filepath=auto_zarr_path,
                     axes=axes,
+                    zarr_format=3,
                 )
             else:
                 print(
@@ -1692,8 +1663,8 @@ def cellpose_segmentation(
 
         if use_distributed_segmentation and not is_3d:
             print(
-                "Distributed segmentation was requested, but dim_order has no Z axis. "
-                "Falling back to standard Cellpose evaluation."
+                "Distributed segmentation requested without Z axis. "
+                "Proceeding with distributed mode for large 2D-compatible workflows."
             )
         elif use_distributed_segmentation:
             print(
@@ -1805,6 +1776,18 @@ def cellpose_segmentation(
     # Cellpose typically returns int32, but uint32 is preferred for labels
     if result.dtype != np.uint32:
         result = result.astype(np.uint32)
+
+    direct_output = _direct_output_path()
+    if use_zarr_direct and direct_output:
+        write_labels_with_source_metadata(
+            labels=result,
+            source_path=_source_filepath,
+            output_path=direct_output,
+            output_format=_output_format,
+            dim_order=dim_order,
+        )
+        print(f"Saved direct output to: {direct_output}")
+        return direct_output
 
     return result
 

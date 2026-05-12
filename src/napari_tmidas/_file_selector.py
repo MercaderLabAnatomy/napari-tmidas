@@ -815,6 +815,7 @@ def save_as_zarr(
     axes: str = "TCZYX",
     scale: tuple = None,
     chunks: tuple = "auto",
+    zarr_format: int = 3,
 ) -> None:
     """
     Save data as OME-Zarr format with metadata
@@ -831,6 +832,8 @@ def save_as_zarr(
         Physical scale for each dimension
     chunks : tuple or str
         Chunk size for zarr storage, 'auto' for automatic chunking
+    zarr_format : int
+        Zarr format version for output metadata (2 or 3)
     """
 
     try:
@@ -844,13 +847,18 @@ def save_as_zarr(
                 "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
             )
 
+        if zarr_format not in (2, 3):
+            raise ValueError(
+                f"Unsupported zarr_format={zarr_format}. Use 2 or 3."
+            )
+
         # Ensure filepath ends with .zarr
         if not filepath.endswith(".zarr"):
             filepath = filepath + ".zarr"
 
         # Create zarr store
         store = parse_url(filepath, mode="w").store
-        root = zarr.group(store=store, zarr_format=3)
+        root = zarr.group(store=store, zarr_format=zarr_format)
 
         # Infer axes if not provided
         if not axes or len(axes) != data.ndim:
@@ -884,19 +892,25 @@ def save_as_zarr(
                 auto_chunks[i] = 1
             chunks = tuple(auto_chunks)
 
-        # Use zlib (GZip) compression with zarr v3 codecs.
-        try:
-            from zarr.codecs import GzipCodec as _GzipCodec
-            _storage_opts: dict = {
-                "chunks": chunks,
-                "compressors": [_GzipCodec(level=6)],
-            }
-        except (ImportError, Exception):
-            _storage_opts = {"chunks": chunks}  # no compression if codec unavailable
+        # Use zlib compression when available for zarr v3.
+        if zarr_format == 3:
+            try:
+                from zarr.codecs import GzipCodec as _GzipCodec
+
+                _storage_opts: dict = {
+                    "chunks": chunks,
+                    "compressors": [_GzipCodec(level=6)],
+                }
+            except (ImportError, Exception):
+                _storage_opts = {
+                    "chunks": chunks
+                }  # no compression if codec unavailable
+        else:
+            _storage_opts = {"chunks": chunks}
 
         print(
             f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}"
-            ", zarr_format=3"
+            f", zarr_format={zarr_format}"
         )
 
         # Write as OME-Zarr
@@ -923,19 +937,47 @@ def save_as_zarr(
                 "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
             )
 
+        if zarr_format not in (2, 3):
+            raise ValueError(
+                f"Unsupported zarr_format={zarr_format}. Use 2 or 3."
+            )
+
         if chunks == "auto":
             chunks = True  # Let zarr decide
 
         try:
-            from zarr.codecs import GzipCodec as _GzipCodec
-            zarr.save(
-                filepath,
-                data,
-                chunks=chunks,
-                compressors=[_GzipCodec(level=6)],
-            )
+            if zarr_format == 2:
+                arr = zarr.open_array(
+                    filepath,
+                    mode="w",
+                    shape=data.shape,
+                    dtype=data.dtype,
+                    chunks=chunks,
+                    zarr_format=2,
+                )
+                arr[:] = data
+            else:
+                from zarr.codecs import GzipCodec as _GzipCodec
+
+                zarr.save(
+                    filepath,
+                    data,
+                    chunks=chunks,
+                    compressors=[_GzipCodec(level=6)],
+                )
         except Exception:
-            zarr.save(filepath, data, chunks=chunks)  # no compression fallback
+            if zarr_format == 2:
+                arr = zarr.open_array(
+                    filepath,
+                    mode="w",
+                    shape=data.shape,
+                    dtype=data.dtype,
+                    chunks=chunks,
+                    zarr_format=2,
+                )
+                arr[:] = data
+            else:
+                zarr.save(filepath, data, chunks=chunks)  # no compression fallback
         print(f"Saved basic Zarr to: {filepath}")
     except Exception as e:
         raise ValueError(f"Failed to save Zarr: {e}") from e
