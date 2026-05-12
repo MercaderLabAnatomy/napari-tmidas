@@ -649,6 +649,36 @@ def slab_to_disk_zarr(source_5d_or_4d, index_slices, shape_zyx, chunks, tmp_dir)
     return dest, zarr_dir
 
 
+def run_zyx_slab(source_array, index_slices, shape_zyx, chunks, tmp_dir,
+                 name="", t_idx=None, c_idx=None):
+    if _distributed_eval_fn is not None:
+        slab_z, slab_dir = slab_to_disk_zarr(
+            source_array,
+            index_slices,
+            shape_zyx,
+            chunks,
+            tmp_dir,
+        )
+        slab_mask = _select_mask_for_volume(
+            _DISTRIBUTED_MASK,
+            t_idx=t_idx,
+            c_idx=c_idx,
+        )
+        try:
+            return run_distributed_on_slab(
+                slab_z,
+                name,
+                slab_mask=slab_mask,
+            )
+        finally:
+            _shutil.rmtree(slab_dir, ignore_errors=True)
+
+    return process_volume(
+        np.array(source_array[index_slices + (slice(None), slice(None), slice(None))]),
+        name,
+    )
+
+
 def process_volume(image, name=""):
     print(f"\\nProcessing {{name}}: shape={{image.shape}}, range={{np.min(image):.1f}}-{{np.max(image):.1f}}")
     sys.stdout.flush()
@@ -778,22 +808,16 @@ def main():
                     for out_c, c in enumerate(channels_to_process):
                         print(f"\\n=== T={{t+1}}/{{T}}, C={{c+1}}/{{C}} ===")
                         sys.stdout.flush()
-                        if _distributed_eval_fn is not None:
-                            slab_z, slab_dir = slab_to_disk_zarr(
-                                zarr_array, (t, c), (Z, Y, X), chunk_3d, _tmp_slabs)
-                            slab_mask = _select_mask_for_volume(
-                                _DISTRIBUTED_MASK, t_idx=t, c_idx=c
-                            )
-                            try:
-                                masks = run_distributed_on_slab(
-                                    slab_z,
-                                    f"T{{t+1}}C{{c+1}}",
-                                    slab_mask=slab_mask,
-                                )
-                            finally:
-                                _shutil.rmtree(slab_dir, ignore_errors=True)
-                        else:
-                            masks = process_volume(np.array(zarr_array[t, c, :, :, :]), f"T{{t+1}}C{{c+1}}")
+                        masks = run_zyx_slab(
+                            zarr_array,
+                            (t, c),
+                            (Z, Y, X),
+                            chunk_3d,
+                            _tmp_slabs,
+                            name=f"T{{t+1}}C{{c+1}}",
+                            t_idx=t,
+                            c_idx=c,
+                        )
 
                         if TIMEPOINT_INDEX is not None:
                             if n_out_channels == 1:
@@ -861,25 +885,15 @@ def main():
                     for out_i, i in enumerate(indices):
                         print(f"\\n=== Timepoint {{i+1}}/{{dim1}} ===")
                         sys.stdout.flush()
-                        if _distributed_eval_fn is not None:
-                            slab_z, slab_dir = slab_to_disk_zarr(
-                                zarr_array, (i,), (Z, Y, X), chunk_3d, _tmp_slabs
-                            )
-                            slab_mask = _select_mask_for_volume(
-                                _DISTRIBUTED_MASK, t_idx=i
-                            )
-                            try:
-                                masks = run_distributed_on_slab(
-                                    slab_z,
-                                    f"T{{i+1}}",
-                                    slab_mask=slab_mask,
-                                )
-                            finally:
-                                _shutil.rmtree(slab_dir, ignore_errors=True)
-                        else:
-                            masks = process_volume(
-                                np.array(zarr_array[i, :, :, :]), f"T{{i+1}}"
-                            )
+                        masks = run_zyx_slab(
+                            zarr_array,
+                            (i,),
+                            (Z, Y, X),
+                            chunk_3d,
+                            _tmp_slabs,
+                            name=f"T{{i+1}}",
+                            t_idx=i,
+                        )
 
                         if TIMEPOINT_INDEX is not None:
                             result[:, :, :] = masks
@@ -911,25 +925,15 @@ def main():
                     for out_i, i in enumerate(indices):
                         print(f"\\n=== Channel {{i+1}}/{{dim1}} ===")
                         sys.stdout.flush()
-                        if _distributed_eval_fn is not None:
-                            slab_z, slab_dir = slab_to_disk_zarr(
-                                zarr_array, (i,), (Z, Y, X), chunk_3d, _tmp_slabs
-                            )
-                            slab_mask = _select_mask_for_volume(
-                                _DISTRIBUTED_MASK, c_idx=i
-                            )
-                            try:
-                                masks = run_distributed_on_slab(
-                                    slab_z,
-                                    f"C{{i+1}}",
-                                    slab_mask=slab_mask,
-                                )
-                            finally:
-                                _shutil.rmtree(slab_dir, ignore_errors=True)
-                        else:
-                            masks = process_volume(
-                                np.array(zarr_array[i, :, :, :]), f"C{{i+1}}"
-                            )
+                        masks = run_zyx_slab(
+                            zarr_array,
+                            (i,),
+                            (Z, Y, X),
+                            chunk_3d,
+                            _tmp_slabs,
+                            name=f"C{{i+1}}",
+                            c_idx=i,
+                        )
 
                         if len(indices) == 1:
                             result[:, :, :] = masks
