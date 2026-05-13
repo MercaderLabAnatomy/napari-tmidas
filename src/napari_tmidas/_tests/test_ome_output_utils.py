@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pytest
 import tifffile
+import zarr
 
 from napari_tmidas.processing_functions.ome_output_utils import (
     write_labels_with_source_metadata,
@@ -147,3 +148,37 @@ def test_write_labels_with_source_metadata_tiff_failure_is_atomic(
 
     assert not output_path.exists()
     assert not list(tmp_path.glob("*.tmp-*"))
+
+
+def test_write_labels_with_source_metadata_streams_zarr_array_to_ome_tiff(
+    tmp_path,
+):
+    labels_path = tmp_path / "labels_cache.zarr"
+    labels = zarr.open_array(
+        str(labels_path),
+        mode="w",
+        shape=(2, 3, 16, 16),
+        chunks=(1, 1, 16, 16),
+        dtype=np.uint32,
+    )
+    labels[:] = np.arange(2 * 3 * 16 * 16, dtype=np.uint32).reshape(
+        2, 3, 16, 16
+    )
+
+    output_path = tmp_path / "labels_streamed.ome.tif"
+    returned = write_labels_with_source_metadata(
+        labels=labels,
+        source_path=None,
+        output_path=str(output_path),
+        output_format="tiff",
+        dim_order="TZYX",
+    )
+
+    assert returned == str(output_path)
+    assert output_path.exists()
+
+    with tifffile.TiffFile(output_path) as tif:
+        assert tif.is_ome
+        arr = tif.asarray()
+        assert arr.dtype == np.uint32
+        assert arr.shape == (2, 3, 16, 16)

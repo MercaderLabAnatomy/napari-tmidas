@@ -14,6 +14,7 @@ Note: This requires the cellpose library to be installed.
 import os
 import shutil
 import time
+import glob
 from contextlib import suppress
 from tempfile import NamedTemporaryFile
 from typing import Union
@@ -272,6 +273,11 @@ def transpose_dimensions(img, dim_order):
             "max": 200,
             "description": "Z-batching for ConvPaint auto-mask generation (0 disables batching).",
         },
+        "auto_load_saved_interleaved_settings": {
+            "type": bool,
+            "default": True,
+            "description": "When restarting interleaved distributed+ConvPaint runs, automatically reuse the most recent cached run settings for the same source and channel.",
+        },
     },
 )
 def cellpose_segmentation(
@@ -299,6 +305,7 @@ def cellpose_segmentation(
     convpaint_use_cpu: bool = False,
     convpaint_force_dedicated_env: bool = False,
     convpaint_z_batch_size: int = 0,
+    auto_load_saved_interleaved_settings: bool = True,
     timepoint_start: int = 0,
     timepoint_end: int = -1,
     timepoint_step: int = 1,
@@ -939,6 +946,143 @@ def cellpose_segmentation(
             source_base = os.path.splitext(
                 os.path.basename(_source_filepath)
             )[0]
+            channel_tag = str(channel).replace(os.sep, "_")
+
+            if auto_load_saved_interleaved_settings:
+                settings_glob = os.path.join(
+                    tmp_root,
+                    "cellpose_timepoint_cache",
+                    f"{source_base}_interleaved_ch{channel_tag}_*",
+                    "run_settings.json",
+                )
+                settings_candidates = [
+                    p for p in glob.glob(settings_glob) if os.path.isfile(p)
+                ]
+                if settings_candidates:
+                    latest_settings = max(
+                        settings_candidates, key=os.path.getmtime
+                    )
+                    try:
+                        with open(latest_settings, encoding="utf-8") as f:
+                            loaded = json.load(f)
+
+                        loaded_signature = loaded.get("run_signature", {})
+                        if not isinstance(loaded_signature, dict):
+                            loaded_signature = {}
+
+                        same_source = (
+                            os.path.abspath(_source_filepath)
+                            == loaded_signature.get("source")
+                        )
+                        same_channel = str(channel) == str(
+                            loaded_signature.get("channel", channel)
+                        )
+
+                        if same_source and same_channel:
+                            distributed_blocksize_yx = int(
+                                loaded_signature.get(
+                                    "distributed_blocksize_yx",
+                                    distributed_blocksize_yx,
+                                )
+                            )
+                            flow_threshold = float(
+                                loaded_signature.get(
+                                    "flow_threshold", flow_threshold
+                                )
+                            )
+                            cellprob_threshold = float(
+                                loaded_signature.get(
+                                    "cellprob_threshold",
+                                    cellprob_threshold,
+                                )
+                            )
+                            anisotropy = loaded_signature.get(
+                                "anisotropy", anisotropy
+                            )
+                            if anisotropy is not None:
+                                anisotropy = float(anisotropy)
+                            flow3D_smooth = int(
+                                loaded_signature.get(
+                                    "flow3D_smooth", flow3D_smooth
+                                )
+                            )
+                            tile_norm_blocksize = int(
+                                loaded_signature.get(
+                                    "tile_norm_blocksize",
+                                    tile_norm_blocksize,
+                                )
+                            )
+                            batch_size = int(
+                                loaded_signature.get("batch_size", batch_size)
+                            )
+                            diameter = float(
+                                loaded_signature.get("diameter", diameter)
+                            )
+                            convpaint_model_path = str(
+                                loaded_signature.get(
+                                    "convpaint_model_path",
+                                    convpaint_model_path,
+                                )
+                            )
+                            convpaint_image_downsample = int(
+                                loaded_signature.get(
+                                    "convpaint_image_downsample",
+                                    convpaint_image_downsample,
+                                )
+                            )
+                            convpaint_background_label = int(
+                                loaded_signature.get(
+                                    "convpaint_background_label",
+                                    convpaint_background_label,
+                                )
+                            )
+                            convpaint_mask_dilation = int(
+                                loaded_signature.get(
+                                    "convpaint_mask_dilation",
+                                    convpaint_mask_dilation,
+                                )
+                            )
+                            convpaint_min_object_fraction_of_median = float(
+                                loaded_signature.get(
+                                    "convpaint_min_object_fraction_of_median",
+                                    convpaint_min_object_fraction_of_median,
+                                )
+                            )
+                            clip_final_labels_to_convpaint_mask = bool(
+                                loaded_signature.get(
+                                    "clip_final_labels_to_convpaint_mask",
+                                    clip_final_labels_to_convpaint_mask,
+                                )
+                            )
+                            timepoint_start = int(
+                                loaded_signature.get(
+                                    "timepoint_start", timepoint_start
+                                )
+                            )
+                            timepoint_end = int(
+                                loaded_signature.get(
+                                    "timepoint_end", timepoint_end
+                                )
+                            )
+                            timepoint_step = int(
+                                loaded_signature.get(
+                                    "timepoint_step", timepoint_step
+                                )
+                            )
+                            print(
+                                "Auto-loaded interleaved run settings from: "
+                                f"{latest_settings}"
+                            )
+                        else:
+                            print(
+                                "Ignoring cached run settings due to source/channel mismatch: "
+                                f"{latest_settings}"
+                            )
+                    except Exception as exc:
+                        print(
+                            "Warning: failed to load cached interleaved settings "
+                            f"from {latest_settings} ({exc})"
+                        )
             print(
                 "Distributed+ConvPaint interleaved mode: "
                 f"processing {selected_count} selected timepoints "
@@ -980,7 +1124,6 @@ def cellpose_segmentation(
 
             # Persist interleaved slab results so failed runs can resume from
             # the last completed slab on restart.
-            channel_tag = str(channel).replace(os.sep, "_")
             checkpoint_path = os.path.join(
                 tmp_root,
                 f"{source_base}_cellpose_interleaved_ch{channel_tag}.zarr",

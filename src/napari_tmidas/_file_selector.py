@@ -13,6 +13,7 @@ as the first argument, and any additional keyword arguments for parameters.
 from __future__ import annotations
 
 import concurrent.futures
+import glob
 import inspect
 import json
 import os
@@ -2003,6 +2004,44 @@ class ParameterWidget(QWidget):
 
         return values
 
+    def apply_parameter_values(self, values: Dict[str, Any]):
+        """Apply parameter values to existing widgets when keys are present."""
+        for param_name, raw_value in (values or {}).items():
+            if param_name not in self.param_widgets:
+                continue
+
+            widget = self.param_widgets[param_name]
+            param_info = self.parameters.get(param_name, {})
+            param_type = param_info.get("type", str)
+            widget_type = param_info.get("widget_type")
+
+            try:
+                if isinstance(widget, QComboBox):
+                    if widget_type == "channel_selector":
+                        target = "all" if raw_value in ("all", None) else str(raw_value)
+                        idx = widget.findData(target)
+                        if idx < 0:
+                            idx = widget.findData(raw_value)
+                        if idx >= 0:
+                            widget.setCurrentIndex(idx)
+                    else:
+                        idx = widget.findText(str(raw_value))
+                        if idx >= 0:
+                            widget.setCurrentIndex(idx)
+                elif isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(raw_value))
+                elif isinstance(widget, QSpinBox):
+                    widget.setValue(int(raw_value))
+                elif isinstance(widget, QDoubleSpinBox):
+                    widget.setValue(float(raw_value))
+                elif isinstance(widget, QLineEdit):
+                    widget.setText(
+                        "" if raw_value is None else str(param_type(raw_value))
+                    )
+            except Exception:
+                # Ignore invalid values and keep current/default widget value.
+                continue
+
     def update_channel_selector(self, file_list: List[str]):
         """
         Update the channel selector widget based on the loaded files.
@@ -3276,6 +3315,8 @@ class FileResultsWidget(QWidget):
             # Update channel selector if the function has a channel parameter
             if any(p.get("widget_type") == "channel_selector" for p in parameters.values()):
                 self.param_widget_instance.update_channel_selector(self.file_list)
+            # Auto-load cached Cellpose interleaved settings into UI controls.
+            self._maybe_apply_cached_cellpose_settings(function_name)
             # Initial update of thread count based on current use_cpu value
             if "use_cpu" in parameters:
                 use_cpu_value = parameters["use_cpu"].get("default", False)
@@ -3288,6 +3329,74 @@ class FileResultsWidget(QWidget):
             )
             self.parameters_widget.layout().addWidget(
                 self.param_widget_instance
+            )
+
+    def _maybe_apply_cached_cellpose_settings(self, function_name: str):
+        """Populate Cellpose parameters from the most recent cached run settings."""
+        if "cellpose" not in str(function_name).lower():
+            return
+        if not getattr(self, "file_list", None):
+            return
+        if not hasattr(self, "param_widget_instance") or not hasattr(
+            self.param_widget_instance, "apply_parameter_values"
+        ):
+            return
+
+        first_file = self.file_list[0]
+        source_base = os.path.splitext(os.path.basename(first_file))[0]
+        source_parent = os.path.dirname(os.path.abspath(first_file))
+
+        patterns = [
+            os.path.join(
+                source_parent,
+                "tmp",
+                "cellpose_timepoint_cache",
+                f"{source_base}*_interleaved_ch*_*/run_settings.json",
+            ),
+            os.path.join(
+                source_parent,
+                "tmp",
+                "cellpose_auto_zarr",
+                "tmp",
+                "cellpose_timepoint_cache",
+                f"{source_base}*_interleaved_ch*_*/run_settings.json",
+            ),
+        ]
+
+        settings_candidates = []
+        for pattern in patterns:
+            settings_candidates.extend(
+                p for p in glob.glob(pattern) if os.path.isfile(p)
+            )
+
+        if not settings_candidates:
+            return
+
+        latest_settings = max(settings_candidates, key=os.path.getmtime)
+        try:
+            with open(latest_settings, encoding="utf-8") as f:
+                loaded = json.load(f)
+
+            loaded_signature = loaded.get("run_signature", {})
+            if not isinstance(loaded_signature, dict):
+                return
+
+            # Map saved run signature keys to current widget parameters.
+            widget_values = {
+                k: v
+                for k, v in loaded_signature.items()
+                if k in getattr(self.param_widget_instance, "parameters", {})
+            }
+            if widget_values:
+                self.param_widget_instance.apply_parameter_values(widget_values)
+                print(
+                    "Loaded cached Cellpose parameters into widget from: "
+                    f"{latest_settings}"
+                )
+        except Exception as exc:
+            print(
+                "Warning: could not load cached Cellpose settings into widget "
+                f"({exc})"
             )
 
     def _update_thread_count_for_gpu(self, use_cpu: bool):

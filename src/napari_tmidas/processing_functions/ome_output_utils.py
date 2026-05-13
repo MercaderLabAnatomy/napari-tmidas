@@ -177,13 +177,20 @@ def write_labels_with_source_metadata(
         )
 
         if can_stream:
-            def _iter_slabs():
-                for i in range(labels_shape[0]):
-                    yield np.asarray(labels[i], dtype=labels_dtype)
+            # tifffile expects page-wise data chunks for multidimensional OME
+            # writes; yield YX planes in C order across all leading indices.
+            def _iter_planes():
+                lead_shape = labels_shape[:-2]
+                if not lead_shape:
+                    yield np.asarray(labels, dtype=labels_dtype)
+                    return
+
+                for lead_idx in np.ndindex(*lead_shape):
+                    yield np.asarray(labels[lead_idx], dtype=labels_dtype)
 
             tifffile.imwrite(
                 tmp_output_path,
-                data=_iter_slabs(),
+                data=_iter_planes(),
                 shape=labels_shape,
                 dtype=labels_dtype,
                 ome=True,
