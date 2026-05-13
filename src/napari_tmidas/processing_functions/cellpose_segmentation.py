@@ -1047,6 +1047,33 @@ def cellpose_segmentation(
             os.makedirs(slab_output_root, exist_ok=True)
             print(f"Interleaved slab output cache: {slab_output_root}")
 
+            # Persist run settings alongside the slab cache for reproducibility
+            # and to make restart/resume behavior easy to audit.
+            settings_path = os.path.join(slab_output_root, "run_settings.json")
+            settings_payload = {
+                "saved_at_unix": time.time(),
+                "run_signature": run_signature,
+                "run_signature_json": run_signature_json,
+                "slab_output_cache_key": slab_output_cache_key,
+                "checkpoint_path": checkpoint_path,
+                "slab_output_root": slab_output_root,
+            }
+            settings_tmp_path = (
+                f"{settings_path}.tmp-{os.getpid()}-{time.time_ns()}"
+            )
+            try:
+                with open(settings_tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(settings_payload, f, indent=2, sort_keys=True)
+                os.replace(settings_tmp_path, settings_path)
+                print(f"Saved interleaved run settings to: {settings_path}")
+            except Exception as exc:
+                with suppress(OSError, FileNotFoundError):
+                    os.unlink(settings_tmp_path)
+                print(
+                    "Warning: could not persist interleaved run settings "
+                    f"({exc})"
+                )
+
             if os.path.exists(checkpoint_path):
                 try:
                     existing = zarr.open_array(checkpoint_path, mode="r")
