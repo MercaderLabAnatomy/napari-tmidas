@@ -278,6 +278,11 @@ def transpose_dimensions(img, dim_order):
             "default": True,
             "description": "When restarting interleaved distributed+ConvPaint runs, automatically reuse the most recent cached run settings for the same source and channel.",
         },
+        "skip_overwrite_existing_valid_output": {
+            "type": bool,
+            "default": True,
+            "description": "Skip writing final output when an existing TIFF already appears valid and matches expected shape/dtype.",
+        },
     },
 )
 def cellpose_segmentation(
@@ -306,6 +311,7 @@ def cellpose_segmentation(
     convpaint_force_dedicated_env: bool = False,
     convpaint_z_batch_size: int = 0,
     auto_load_saved_interleaved_settings: bool = True,
+    skip_overwrite_existing_valid_output: bool = True,
     timepoint_start: int = 0,
     timepoint_end: int = -1,
     timepoint_step: int = 1,
@@ -380,6 +386,35 @@ def cellpose_segmentation(
         output_path = _direct_output_path()
         if not output_path:
             return None
+
+        def _existing_tiff_is_valid(path: str) -> bool:
+            try:
+                expected_shape = tuple(int(s) for s in checkpoint.shape)
+                with tifffile.TiffFile(path) as tif:
+                    series = tif.series[0] if tif.series else None
+                    if series is None:
+                        return False
+                    actual_shape = tuple(int(s) for s in series.shape)
+                    actual_dtype = np.dtype(series.dtype)
+                    expected_dtype = np.dtype(np.uint32)
+                    return (
+                        actual_shape == expected_shape
+                        and actual_dtype == expected_dtype
+                    )
+            except Exception:
+                return False
+
+        if (
+            skip_overwrite_existing_valid_output
+            and _output_format.lower() in {"tif", "tiff"}
+            and os.path.isfile(output_path)
+            and _existing_tiff_is_valid(output_path)
+        ):
+            print(
+                "Skipping output write: existing TIFF appears complete and valid -> "
+                f"{output_path}"
+            )
+            return output_path
 
         os.makedirs(_output_folder, exist_ok=True)
         write_labels_with_source_metadata(
