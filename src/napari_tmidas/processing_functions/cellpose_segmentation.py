@@ -367,18 +367,154 @@ def cellpose_segmentation(
         f"source_path={_source_filepath}"
     )
 
+    original_source_filepath = _source_filepath
+
+    def _source_signature_id(path: Union[str, None] = None) -> str:
+        """Return a stable source identifier robust to mount-path aliases."""
+        value = _source_filepath if path is None else path
+        if not value:
+            return ""
+        return os.path.basename(os.path.normpath(str(value)))
+
+    def _source_signature_matches(saved_source: Union[str, None]) -> bool:
+        """Match sources across absolute path, realpath, and basename fallback."""
+        if not saved_source or not _source_filepath:
+            return False
+
+        current = str(_source_filepath)
+        saved = str(saved_source)
+
+        if current == saved:
+            return True
+
+        try:
+            if os.path.abspath(current) == os.path.abspath(saved):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if os.path.realpath(current) == os.path.realpath(saved):
+                return True
+        except Exception:
+            pass
+
+        return _source_signature_id(current) == _source_signature_id(saved)
+
+    def _run_signatures_compatible(
+        existing_signature_json: str, current_signature_json: str
+    ) -> bool:
+        """Allow resume when only source path prefix differs across mounts."""
+        if existing_signature_json == current_signature_json:
+            return True
+
+        try:
+            existing_signature = json.loads(existing_signature_json)
+            current_signature = json.loads(current_signature_json)
+        except Exception:
+            return False
+
+        if not isinstance(existing_signature, dict) or not isinstance(
+            current_signature, dict
+        ):
+            return False
+
+        existing_source = existing_signature.pop("source", None)
+        current_source = current_signature.pop("source", None)
+
+        if existing_signature != current_signature:
+            return False
+
+        return _source_signature_matches(
+            current_source if current_source is not None else existing_source
+        )
+
+    def _normalize_loaded_path(path: str, fallback: str = "") -> str:
+        """Return path if it exists, else try swapping /media/ <-> /run/media/.
+
+        Handles the case where a saved run_settings.json was written with a
+        different mount-path prefix (e.g. /media/... vs /run/media/...) than
+        the one currently active.  Falls back to *fallback* when neither
+        variant resolves.
+        """
+        if not path:
+            return fallback
+        if os.path.exists(path):
+            return path
+        swaps = [
+            ("/run/media/", "/media/"),
+            ("/media/", "/run/media/"),
+        ]
+        for old_prefix, new_prefix in swaps:
+            if path.startswith(old_prefix):
+                candidate = new_prefix + path[len(old_prefix):]
+                if os.path.exists(candidate):
+                    return candidate
+        # Neither variant exists; return the saved path as-is (caller decides)
+        return path
+
     def _direct_output_path() -> Union[str, None]:
-        if not (_output_folder and _output_suffix and _source_filepath):
+        source_for_output = original_source_filepath or _source_filepath
+        if not (_output_folder and _output_suffix and source_for_output):
             return None
 
         source_base = os.path.splitext(
-            os.path.basename(_source_filepath)
+            os.path.basename(source_for_output)
         )[0]
         output_ext = ".zarr" if _output_format == "zarr" else ".tif"
         return os.path.join(
             _output_folder,
             f"{source_base}{_output_suffix}{output_ext}",
         )
+
+    def _legacy_output_candidates() -> list:
+        """Find legacy output names for the same original source basename."""
+        source_for_output = original_source_filepath or _source_filepath
+        if not (_output_folder and _output_suffix and source_for_output):
+            return []
+
+        source_base = os.path.splitext(os.path.basename(source_for_output))[0]
+        output_ext = ".zarr" if _output_format == "zarr" else ".tif"
+        pattern = os.path.join(
+            _output_folder,
+            f"{source_base}*{_output_suffix}{output_ext}",
+        )
+        candidates = [
+            p
+            for p in glob.glob(pattern)
+            if os.path.abspath(p) != os.path.abspath(_direct_output_path() or "")
+        ]
+        return sorted(candidates, key=os.path.getmtime, reverse=True)
+
+    def _existing_output_is_valid(
+        path: str, expected_shape: Union[tuple, None] = None
+    ) -> bool:
+        """Check whether an existing output looks complete for safe reuse."""
+        output_format = str(_output_format).lower()
+
+        if output_format in {"tif", "tiff"}:
+            if not os.path.isfile(path):
+                return False
+            try:
+                with tifffile.TiffFile(path) as tif:
+                    series = tif.series[0] if tif.series else None
+                    if series is None:
+                        return False
+                    actual_shape = tuple(int(s) for s in series.shape)
+                    actual_dtype = np.dtype(series.dtype)
+                if expected_shape is not None:
+                    expected_shape = tuple(int(s) for s in expected_shape)
+                    if actual_shape != expected_shape:
+                        return False
+                return actual_dtype == np.dtype(np.uint32)
+            except Exception:
+                return False
+
+        if output_format == "zarr":
+            # For zarr outputs, existence is a practical completion signal.
+            return os.path.isdir(path)
+
+        return os.path.exists(path)
 
     def _write_interleaved_checkpoint_output(
         checkpoint: zarr.Array, checkpoint_path: str
@@ -387,39 +523,35 @@ def cellpose_segmentation(
         if not output_path:
             return None
 
-        def _existing_tiff_is_valid(path: str) -> bool:
-            try:
-                expected_shape = tuple(int(s) for s in checkpoint.shape)
-                with tifffile.TiffFile(path) as tif:
-                    series = tif.series[0] if tif.series else None
-                    if series is None:
-                        return False
-                    actual_shape = tuple(int(s) for s in series.shape)
-                    actual_dtype = np.dtype(series.dtype)
-                    expected_dtype = np.dtype(np.uint32)
-                    return (
-                        actual_shape == expected_shape
-                        and actual_dtype == expected_dtype
-                    )
-            except Exception:
-                return False
-
         if (
             skip_overwrite_existing_valid_output
-            and _output_format.lower() in {"tif", "tiff"}
-            and os.path.isfile(output_path)
-            and _existing_tiff_is_valid(output_path)
+            and _existing_output_is_valid(
+                output_path,
+                expected_shape=tuple(int(s) for s in checkpoint.shape),
+            )
         ):
             print(
-                "Skipping output write: existing TIFF appears complete and valid -> "
+                "Skipping output write: existing output appears complete and valid -> "
                 f"{output_path}"
             )
             return output_path
 
+        if skip_overwrite_existing_valid_output:
+            for legacy_output in _legacy_output_candidates():
+                if _existing_output_is_valid(
+                    legacy_output,
+                    expected_shape=tuple(int(s) for s in checkpoint.shape),
+                ):
+                    print(
+                        "Skipping output write: existing legacy output appears "
+                        f"complete and valid -> {legacy_output}"
+                    )
+                    return legacy_output
+
         os.makedirs(_output_folder, exist_ok=True)
         write_labels_with_source_metadata(
             labels=checkpoint,
-            source_path=_source_filepath,
+            source_path=original_source_filepath or _source_filepath,
             output_path=output_path,
             output_format=_output_format,
             dim_order=dim_order,
@@ -456,12 +588,10 @@ def cellpose_segmentation(
             auto_root = os.path.join(tmp_root, "cellpose_auto_zarr")
             os.makedirs(auto_root, exist_ok=True)
 
+            channel_tag = str(channel).replace(os.sep, "_")
             cache_payload = {
-                "source": source_abs,
-                "source_mtime": os.path.getmtime(source_abs),
-                "shape": tuple(int(s) for s in image.shape),
-                "dtype": str(getattr(image, "dtype", "unknown")),
-                "dim_order": str(dim_order),
+                "auto_zarr_cache_version": 3,
+                "source": _source_signature_id(source_abs),
                 "channel": str(channel),
             }
             cache_key = hashlib.sha1(
@@ -470,8 +600,51 @@ def cellpose_segmentation(
 
             source_base = os.path.splitext(os.path.basename(source_abs))[0]
             auto_zarr_path = os.path.join(
-                auto_root, f"{source_base}_cellpose_{cache_key}.zarr"
+                auto_root,
+                f"{source_base}_cellpose_ch{channel_tag}_{cache_key}.zarr",
             )
+
+            if not os.path.exists(auto_zarr_path):
+                expected_shape = tuple(int(s) for s in image.shape)
+                expected_dtype = str(getattr(image, "dtype", "unknown"))
+                legacy_glob = os.path.join(
+                    auto_root,
+                    f"{source_base}_cellpose*.zarr",
+                )
+                legacy_candidates = sorted(
+                    [
+                        p
+                        for p in glob.glob(legacy_glob)
+                        if os.path.isdir(p) and p != auto_zarr_path
+                    ],
+                    key=os.path.getmtime,
+                    reverse=True,
+                )
+
+                for legacy_path in legacy_candidates:
+                    try:
+                        legacy_root = zarr.open(legacy_path, mode="r")
+                        legacy_arr = (
+                            legacy_root["s0"]
+                            if hasattr(legacy_root, "__contains__")
+                            and "s0" in legacy_root
+                            else legacy_root
+                        )
+                        legacy_shape = tuple(int(s) for s in legacy_arr.shape)
+                        legacy_dtype = str(np.dtype(legacy_arr.dtype))
+                        if (
+                            legacy_shape == expected_shape
+                            and legacy_dtype == expected_dtype
+                        ):
+                            auto_zarr_path = legacy_path
+                            print(
+                                "Distributed segmentation: reusing compatible "
+                                "cached auto-converted zarr: "
+                                f"{auto_zarr_path}"
+                            )
+                            break
+                    except Exception:
+                        continue
 
             if not os.path.exists(auto_zarr_path):
                 axes = str(dim_order).upper() if dim_order else ""
@@ -1005,9 +1178,8 @@ def cellpose_segmentation(
                         if not isinstance(loaded_signature, dict):
                             loaded_signature = {}
 
-                        same_source = (
-                            os.path.abspath(_source_filepath)
-                            == loaded_signature.get("source")
+                        same_source = _source_signature_matches(
+                            loaded_signature.get("source")
                         )
                         same_channel = str(channel) == str(
                             loaded_signature.get("channel", channel)
@@ -1053,11 +1225,14 @@ def cellpose_segmentation(
                             diameter = float(
                                 loaded_signature.get("diameter", diameter)
                             )
-                            convpaint_model_path = str(
-                                loaded_signature.get(
-                                    "convpaint_model_path",
-                                    convpaint_model_path,
-                                )
+                            convpaint_model_path = _normalize_loaded_path(
+                                str(
+                                    loaded_signature.get(
+                                        "convpaint_model_path",
+                                        convpaint_model_path,
+                                    )
+                                ),
+                                fallback=convpaint_model_path,
                             )
                             convpaint_image_downsample = int(
                                 loaded_signature.get(
@@ -1126,7 +1301,7 @@ def cellpose_segmentation(
 
             # Cache ConvPaint masks on disk so reruns can reuse them.
             mask_cache_key_payload = {
-                "source": os.path.abspath(_source_filepath),
+                "source": _source_signature_id(_source_filepath),
                 "source_mtime": os.path.getmtime(_source_filepath),
                 "mask_cache_version": 3,
                 "channel": channel,
@@ -1166,13 +1341,41 @@ def cellpose_segmentation(
 
             slab_shape = tuple(int(s) for s in image.shape[1:])
             checkpoint_shape = (selected_count, *slab_shape)
+
+            preexisting_output = _direct_output_path()
+            if (
+                skip_overwrite_existing_valid_output
+                and preexisting_output
+                and _existing_output_is_valid(
+                    preexisting_output,
+                    expected_shape=checkpoint_shape,
+                )
+            ):
+                print(
+                    "Skipping interleaved processing: existing output appears "
+                    f"complete and valid -> {preexisting_output}"
+                )
+                return preexisting_output
+
+            if skip_overwrite_existing_valid_output:
+                for legacy_output in _legacy_output_candidates():
+                    if _existing_output_is_valid(
+                        legacy_output,
+                        expected_shape=checkpoint_shape,
+                    ):
+                        print(
+                            "Skipping interleaved processing: existing legacy output "
+                            f"appears complete and valid -> {legacy_output}"
+                        )
+                        return legacy_output
+
             z_chunk = max(1, min(16, slab_shape[0]))
             y_chunk = max(1, min(512, slab_shape[1]))
             x_chunk = max(1, min(512, slab_shape[2]))
             checkpoint_chunks = (1, z_chunk, y_chunk, x_chunk)
 
             run_signature = {
-                "source": os.path.abspath(_source_filepath),
+                "source": _source_signature_id(_source_filepath),
                 "channel": channel,
                 "distributed_blocksize_yx": int(distributed_blocksize_yx),
                 "flow_threshold": float(flow_threshold),
@@ -1258,7 +1461,9 @@ def cellpose_segmentation(
                     existing_sig = existing.attrs.get("run_signature", "")
                     if (
                         tuple(existing.shape) != checkpoint_shape
-                        or existing_sig != run_signature_json
+                        or not _run_signatures_compatible(
+                            existing_sig, run_signature_json
+                        )
                     ):
                         print(
                             "Interleaved checkpoint exists but is incompatible; "
@@ -1824,7 +2029,7 @@ def cellpose_segmentation(
             # Cache key intentionally excludes selected_timepoints so different
             # intervals can reuse already completed per-timepoint outputs.
             tp_cache_signature = {
-                "source": os.path.abspath(_source_filepath),
+                "source": _source_signature_id(_source_filepath),
                 "source_mtime": os.path.getmtime(_source_filepath),
                 "channel": channel,
                 "flow_threshold": float(flow_threshold),
