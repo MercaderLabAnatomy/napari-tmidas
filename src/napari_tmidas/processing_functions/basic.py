@@ -1202,7 +1202,10 @@ def merge_channels(
         return image
 
     channel_num = int(match.group(2))
-    base_name   = filename[: match.start()] + filename[match.end() :]
+    # Keep base_name for output naming (remove only '<channel_substring><num>').
+    base_name = filename[: match.start()] + filename[match.end() :]
+    filename_prefix = filename[: match.start()]
+    filename_ext = os.path.splitext(filename)[1].lower()
 
     # ------------------------------------------------------------------
     # Derive shape / dtype from file header when image was not loaded
@@ -1233,11 +1236,17 @@ def merge_channels(
 
     for file in all_files:
         file_match = pattern.search(file)
-        if file_match:
-            file_base = file[: file_match.start()] + file[file_match.end() :]
-            if file_base == base_name:
-                ch_num = int(file_match.group(2))
-                channel_files[ch_num] = os.path.join(folder_path, file)
+        if not file_match:
+            continue
+
+        file_prefix = file[: file_match.start()]
+        file_ext = os.path.splitext(file)[1].lower()
+
+        # Group files by everything before the channel marker plus extension,
+        # and allow channel-specific suffixes after the channel number.
+        if file_prefix == filename_prefix and file_ext == filename_ext:
+            ch_num = int(file_match.group(2))
+            channel_files[ch_num] = os.path.join(folder_path, file)
 
     sorted_channels = sorted(channel_files.keys())
     num_channels    = len(sorted_channels)
@@ -1444,7 +1453,8 @@ def _merge_channels_file_pre_filter(filepath: str, params: dict) -> bool:
         return False  # filename does not contain a channel marker — skip it
 
     channel_num = int(match.group(2))
-    base_name = filename[: match.start()] + filename[match.end() :]
+    filename_prefix = filename[: match.start()]
+    filename_ext = os.path.splitext(filename)[1].lower()
 
     try:
         all_files = os.listdir(folder_path)
@@ -1454,10 +1464,15 @@ def _merge_channels_file_pre_filter(filepath: str, params: dict) -> bool:
     channel_nums = []
     for f in all_files:
         m = pattern.search(f)
-        if m:
-            f_base = f[: m.start()] + f[m.end() :]
-            if f_base == base_name:
-                channel_nums.append(int(m.group(2)))
+        if not m:
+            continue
+
+        f_prefix = f[: m.start()]
+        f_ext = os.path.splitext(f)[1].lower()
+
+        # Keep grouping behavior aligned with merge_channels.
+        if f_prefix == filename_prefix and f_ext == filename_ext:
+            channel_nums.append(int(m.group(2)))
 
     if not channel_nums:
         return True  # cannot determine primary — let it through

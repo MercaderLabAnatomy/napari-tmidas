@@ -3,11 +3,13 @@ import numpy as np
 import pytest
 
 from napari_tmidas.processing_functions.basic import (
+    _merge_channels_file_pre_filter,
     filter_label_by_id,
     intersect_label_images,
     invert_binary_labels,
     keep_slice_range_by_area,
     labels_to_binary,
+    merge_channels,
     mirror_labels,
     split_tzyx_stack,
 )
@@ -532,3 +534,61 @@ class TestBasicProcessing:
         result = call_primary()
         expected = np.ones_like(label_a)
         np.testing.assert_array_equal(result, expected)
+
+    def test_merge_channels_pre_filter_accepts_varying_suffixes(self, tmp_path):
+        """Only the lowest channel should pass pre-filter even with channel-specific suffixes."""
+        files = [
+            "sample_channel_1_dapi.tif",
+            "sample_channel_2_gfp.tif",
+            "sample_channel_3_cy5.tif",
+        ]
+        for name in files:
+            (tmp_path / name).touch()
+
+        params = {"channel_substring": "_channel_"}
+        assert (
+            _merge_channels_file_pre_filter(
+                str(tmp_path / "sample_channel_1_dapi.tif"), params
+            )
+            is True
+        )
+        assert (
+            _merge_channels_file_pre_filter(
+                str(tmp_path / "sample_channel_2_gfp.tif"), params
+            )
+            is False
+        )
+        assert (
+            _merge_channels_file_pre_filter(
+                str(tmp_path / "sample_channel_3_cy5.tif"), params
+            )
+            is False
+        )
+
+    def test_merge_channels_merges_varying_suffixes(self, tmp_path):
+        """merge_channels should merge channels even when post-number suffixes vary."""
+        tifffile = pytest.importorskip("tifffile")
+
+        ch1 = np.array([[1, 2], [3, 4]], dtype=np.uint16)
+        ch2 = np.array([[10, 20], [30, 40]], dtype=np.uint16)
+        ch3 = np.array([[100, 200], [300, 400]], dtype=np.uint16)
+
+        p1 = tmp_path / "sample_channel_1_dapi.tif"
+        p2 = tmp_path / "sample_channel_2_gfp.tif"
+        p3 = tmp_path / "sample_channel_3_cy5.tif"
+
+        tifffile.imwrite(p1, ch1)
+        tifffile.imwrite(p2, ch2)
+        tifffile.imwrite(p3, ch3)
+
+        merged = merge_channels(
+            ch1,
+            channel_substring="_channel_",
+            _source_filepath=str(p1),
+        )
+
+        assert isinstance(merged, np.ndarray)
+        assert merged.shape == (3, 2, 2)
+        np.testing.assert_array_equal(merged[0], ch1)
+        np.testing.assert_array_equal(merged[1], ch2)
+        np.testing.assert_array_equal(merged[2], ch3)
