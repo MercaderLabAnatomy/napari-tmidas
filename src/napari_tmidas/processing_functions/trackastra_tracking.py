@@ -368,14 +368,14 @@ if mask.ndim not in [3, 4]:
 if mask.shape[0] < 2:
     raise ValueError(f'Need at least 2 timepoints, got {{mask.shape[0]}}')
 
-# Handle multichannel images (TCZYX) by selecting the specified channel
-# If channel is "all" but the image is multichannel, take the first channel
+# Handle multichannel images (TCZYX) by selecting the specified channel.
+# If no channel is specified, take the first channel for multichannel input.
 channel_param = "{channel}"
 if img.ndim == 5:
     # Input is TCZYX
     print(f'Input image is 5D {{img.shape}}, treating as TCZYX')
-    if channel_param == "all":
-        print('Channel="all" with multichannel image, taking first channel...')
+    if channel_param in ("", "all", "None"):
+        print('No channel specified for multichannel image, taking first channel...')
         img = img[:, :, 0, :, :]  # Take first channel -> TZYX
     else:
         try:
@@ -464,9 +464,8 @@ print(f'Saved tracked masks to: {output_path}')
         },
         "channel": {
             "type": str,
-            "default": "all",
-            "widget_type": "channel_selector",
-            "description": "Select which channel to process (automatically detected from multichannel images)",
+            "default": "",
+            "description": "Optional raw-image channel index for multichannel input. Leave empty to use the default first channel.",
         },
         "dimension_order": {
             "type": str,
@@ -485,7 +484,7 @@ def trackastra_tracking(
     image: np.ndarray,
     model: str = "ctc",
     mode: str = "greedy",
-    channel: str = "all",
+    channel: str = "",
     dimension_order: str = "Auto",
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
@@ -499,12 +498,12 @@ def trackastra_tracking(
     automatic cell tracking using TrackAstra deep learning framework.
 
     Supports both TIFF and zarr input files. For multichannel images (TCZYX),
-    automatically extracts the specified channel before tracking.
+    optionally extracts a user-specified raw-image channel before tracking.
 
     Expected input dimensions:
     - TYX: Time series of 2D label images
     - TZYX: Time series of 3D label images (will process each Z-slice separately)
-    - TCZYX: Multichannel time series (channel selection via 'channel' parameter)
+    - TCZYX: Multichannel time series (optional channel selection via 'channel' parameter)
 
     Input file formats:
     - TIFF (.tif, .tiff files)
@@ -519,7 +518,8 @@ def trackastra_tracking(
     mode : str
         Tracking mode: 'greedy', 'ilp', or 'greedy_nodiv' (default: "greedy")
     channel : str
-        Channel selection: "all" or specific channel number (default: "all")
+        Optional channel index for multichannel raw images. Leave empty to use
+        the default first channel when needed.
     dimension_order : str
         Dimension order hint for raw images (e.g., "TCZYX", "TZYX"). If "Auto",
         dimensions are auto-detected. This helps clarify channel detection when
@@ -572,13 +572,19 @@ def trackastra_tracking(
     script_path = temp_dir / "run_tracking.py"
     # Save the mask data
     # For label images, use the original path as mask_path
-    if label_pattern in os.path.basename(img_path):
+    basename = os.path.basename(img_path)
+    
+    # Check if this matches the configured label pattern
+    if label_pattern in basename:
         mask_path = img_path
         # Find corresponding raw image by removing the label pattern
-        raw_base = os.path.basename(img_path).replace(label_pattern, "")
-        raw_path = os.path.join(os.path.dirname(img_path), raw_base + ".tif")
+        raw_base = basename.replace(label_pattern, "")
+        if not raw_base.endswith(".tif"):
+            raw_base = raw_base + ".tif"
+        raw_path = os.path.join(os.path.dirname(img_path), raw_base)
         if not os.path.exists(raw_path):
             print(f"Warning: Could not find raw image for {img_path}")
+            print(f"  Tried removing '{label_pattern}' to get: {raw_base}")
             raw_path = img_path  # Fallback to using label as input
         else:
             # Reload the raw image instead of the label image that was passed in

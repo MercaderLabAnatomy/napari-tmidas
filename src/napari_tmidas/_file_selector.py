@@ -1841,6 +1841,7 @@ class ParameterWidget(QWidget):
         self.parameters = parameters
         self.param_widgets = {}
         self.function_name = function_name  # Store function name for label file handling
+        self.file_list = []  # Will be set when files are loaded
 
         # Use VBoxLayout to stack parameters vertically with descriptions
         main_layout = QVBoxLayout()
@@ -1932,8 +1933,12 @@ class ParameterWidget(QWidget):
                 if (
                     param_info.get("wide_input", False)
                     or "suffix" in param_name.lower()
+                    or "pattern" in param_name.lower()
                 ):
                     widget.setMinimumWidth(300)
+                # Connect label_pattern widget to trigger channel detection refresh
+                if param_name == "label_pattern" and "trackastra" in self.function_name.lower():
+                    widget.textChanged.connect(self._on_label_pattern_changed)
 
             input_layout.addWidget(widget)
             input_layout.addStretch()
@@ -2068,20 +2073,31 @@ class ParameterWidget(QWidget):
             # Special handling for TrackAstra with label files:
             # Try to reload the corresponding raw file for channel detection
             if "trackastra" in self.function_name.lower():
-                # Check if this is a label file
-                label_pattern_options = ["_labels.tif", "_label.tif", "_convpaint_labels"]
-                is_label_file = any(pattern in os.path.basename(first_file) for pattern in label_pattern_options)
+                # Get the label pattern from function parameters (primary source)
+                label_pattern = None
+                if self.parameters and "label_pattern" in self.parameters:
+                    label_pattern = self.parameters["label_pattern"].get("default")
                 
-                if is_label_file:
-                    print(f"  TrackastraTracking detected label file, looking for corresponding raw file...")
-                    # Try to find and load the corresponding raw file
-                    for pattern in label_pattern_options:
-                        if pattern in first_file:
-                            raw_file = first_file.replace(pattern, "").replace(".tif", "") + ".tif"
-                            if os.path.exists(raw_file):
-                                print(f"  Found raw file: {os.path.basename(raw_file)}")
-                                first_file = raw_file
-                                break
+                # Build list of patterns to try: parameter first, then common fallbacks
+                basename = os.path.basename(first_file)
+                patterns_to_try = []
+                if label_pattern:
+                    patterns_to_try.append(label_pattern)
+                # Add fallback patterns if configured pattern doesn't match
+                if not label_pattern or label_pattern not in basename:
+                    patterns_to_try.extend(["_labels.tif", "_label.tif"])
+                
+                # Try to detect and find raw file
+                for pattern in patterns_to_try:
+                    if pattern and pattern in basename:
+                        print(f"  TrackastraTracking detected label file (pattern: {pattern}), looking for corresponding raw file...")
+                        candidate = first_file.replace(pattern, "")
+                        if not candidate.endswith(".tif"):
+                            candidate = candidate + ".tif"
+                        if os.path.exists(candidate):
+                            print(f"  Found raw file: {os.path.basename(candidate)}")
+                            first_file = candidate
+                        break
 
             image_data = None
             if not (_HAS_TIFFFILE and first_file.lower().endswith((".tif", ".tiff"))):
@@ -2116,6 +2132,15 @@ class ParameterWidget(QWidget):
             prev_idx = channel_widget.findData(previous_data)
             if prev_idx >= 0:
                 channel_widget.setCurrentIndex(prev_idx)
+
+    def _on_label_pattern_changed(self, new_pattern: str):
+        """
+        Called when label_pattern text box changes.
+        Re-triggers channel detection with the new label pattern.
+        """
+        if self.file_list:
+            print(f"Label pattern changed to: {new_pattern}")
+            self.update_channel_selector(self.file_list)
 
 
 @magicgui(
@@ -2409,6 +2434,8 @@ class ProcessingWorker(QThread):
             # before passing to the processing function.  This handles 5D TCZYX
             # zarr data where C is axis 1.
             channel_param = (self.param_values or {}).get("channel", None)
+            if isinstance(channel_param, str) and not channel_param.strip():
+                channel_param = None
             if (
                 channel_param is not None
                 and channel_param != "all"
@@ -3335,6 +3362,7 @@ class FileResultsWidget(QWidget):
             self.parameters_widget.layout().addWidget(scroll)
             # Update channel selector if the function has a channel parameter
             if any(p.get("widget_type") == "channel_selector" for p in parameters.values()):
+                self.param_widget_instance.file_list = self.file_list
                 self.param_widget_instance.update_channel_selector(self.file_list)
             # Auto-load cached Cellpose interleaved settings into UI controls.
             self._maybe_apply_cached_cellpose_settings(function_name)
