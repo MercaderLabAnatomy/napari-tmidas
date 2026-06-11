@@ -1835,11 +1835,12 @@ class ParameterWidget(QWidget):
     # Signal to notify when use_cpu parameter changes
     use_cpu_changed = Signal(bool)
 
-    def __init__(self, parameters: Dict[str, Dict[str, Any]]):
+    def __init__(self, parameters: Dict[str, Dict[str, Any]], function_name: str = ""):
         super().__init__()
 
         self.parameters = parameters
         self.param_widgets = {}
+        self.function_name = function_name  # Store function name for label file handling
 
         # Use VBoxLayout to stack parameters vertically with descriptions
         main_layout = QVBoxLayout()
@@ -2046,6 +2047,8 @@ class ParameterWidget(QWidget):
         """
         Update the channel selector widget based on the loaded files.
         Detects channels in the first file and updates the dropdown.
+        For TrackAstra tracking with label files, automatically reloads the 
+        corresponding raw file for proper channel detection.
         """
         if not hasattr(self, "_channel_selector_widget"):
             return
@@ -2061,6 +2064,24 @@ class ParameterWidget(QWidget):
         try:
             first_file = file_list[0]
             print(f"Channel detection: Examining {os.path.basename(first_file)}")
+
+            # Special handling for TrackAstra with label files:
+            # Try to reload the corresponding raw file for channel detection
+            if "trackastra" in self.function_name.lower():
+                # Check if this is a label file
+                label_pattern_options = ["_labels.tif", "_label.tif", "_convpaint_labels"]
+                is_label_file = any(pattern in os.path.basename(first_file) for pattern in label_pattern_options)
+                
+                if is_label_file:
+                    print(f"  TrackastraTracking detected label file, looking for corresponding raw file...")
+                    # Try to find and load the corresponding raw file
+                    for pattern in label_pattern_options:
+                        if pattern in first_file:
+                            raw_file = first_file.replace(pattern, "").replace(".tif", "") + ".tif"
+                            if os.path.exists(raw_file):
+                                print(f"  Found raw file: {os.path.basename(raw_file)}")
+                                first_file = raw_file
+                                break
 
             image_data = None
             if not (_HAS_TIFFFILE and first_file.lower().endswith((".tif", ".tiff"))):
@@ -3298,7 +3319,7 @@ class FileResultsWidget(QWidget):
 
         # Create and add new parameters widget
         if parameters:
-            self.param_widget_instance = ParameterWidget(parameters)
+            self.param_widget_instance = ParameterWidget(parameters, function_name)
             # Connect use_cpu parameter to thread count widget
             self.param_widget_instance.use_cpu_changed.connect(
                 self._update_thread_count_for_gpu
