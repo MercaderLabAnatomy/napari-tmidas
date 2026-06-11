@@ -20,16 +20,87 @@ from skimage.io import imread
 from napari_tmidas._registry import BatchProcessingRegistry
 
 
+_SUPPORTED_IMAGE_SUFFIXES = (".tif", ".tiff", ".zarr")
+
+
+def _strip_known_image_suffix(name: str) -> str:
+    """Strip known image suffixes from a basename."""
+    lower_name = name.lower()
+    for suffix in _SUPPORTED_IMAGE_SUFFIXES:
+        if lower_name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _raw_candidates_from_label_name(label_name: str, label_pattern: str):
+    """Build possible raw basenames from a label basename and label pattern."""
+    if label_name.endswith(label_pattern):
+        raw_base = label_name[: -len(label_pattern)]
+    else:
+        raw_base = label_name.replace(label_pattern, "", 1)
+
+    if raw_base.lower().endswith(_SUPPORTED_IMAGE_SUFFIXES):
+        return raw_base, [raw_base]
+
+    return raw_base, [raw_base + suffix for suffix in _SUPPORTED_IMAGE_SUFFIXES]
+
+
+def _find_matching_raw_path(label_path: str, label_pattern: str):
+    """Find a raw image path (tif/tiff/zarr) corresponding to a label image path."""
+    label_name = os.path.basename(label_path)
+    raw_base, candidates = _raw_candidates_from_label_name(label_name, label_pattern)
+    label_dir = os.path.dirname(label_path)
+
+    for candidate in candidates:
+        candidate_path = os.path.join(label_dir, candidate)
+        if os.path.exists(candidate_path):
+            return raw_base, candidates, candidate_path
+
+    return raw_base, candidates, None
+
+
+def _load_zarr_array(path: str) -> np.ndarray:
+    """Load a zarr array/group as a NumPy array, with robust fallbacks."""
+    import zarr
+
+    try:
+        zobj = zarr.open(path, mode="r")
+    except Exception:
+        # Some datasets keep multiscale levels (e.g., 0, 1, 2, ...) without
+        # opening cleanly at the root. Fall back to level 0 if present.
+        level0 = os.path.join(path, "0")
+        if os.path.exists(level0):
+            zobj = zarr.open(level0, mode="r")
+        else:
+            raise
+
+    if hasattr(zobj, "shape"):
+        return np.asarray(zobj)
+
+    if not hasattr(zobj, "array_keys"):
+        # Some zarr-like objects are array-convertible without exposing group APIs.
+        return np.asarray(zobj)
+
+    array_keys = list(zobj.array_keys())
+    if "0" in array_keys:
+        return np.asarray(zobj["0"])
+    if array_keys:
+        return np.asarray(zobj[array_keys[0]])
+
+    raise ValueError(f"No arrays found in zarr group: {path}")
+
+
 class TrackAstraEnvManager:
     """Manages the TrackAstra conda environment."""
 
     ENV_NAME = "trackastra"
     REQUIRED_VERSIONS = {
-        "python": "3.10",
+        "python": "3.11",
         "gurobipy": "13.0.0",
         "ilpy": "0.5.1",
         "motile": "0.4.0",
         "trackastra": "0.5.3",
+        "zarr": "3.0.0",
     }
 
     @staticmethod
@@ -83,6 +154,7 @@ class TrackAstraEnvManager:
             found_norm = found_norm + (0,) * (len(required_tuple) - len(found_norm))
         return found_norm >= required_tuple
 
+
     @staticmethod
     def get_env_status():
         """Return package/version status for the TrackAstra environment."""
@@ -97,7 +169,7 @@ status = {
     "packages": {},
 }
 
-for name in ["gurobipy", "ilpy", "motile", "trackastra"]:
+for name in ["gurobipy", "ilpy", "motile", "trackastra", "zarr"]:
     spec = importlib.util.find_spec(name)
     if spec is None:
         status["packages"][name] = {"present": False, "version": None}
@@ -151,7 +223,7 @@ print(json.dumps(status))
             )
 
         packages = status.get("packages", {})
-        for pkg in ["gurobipy", "ilpy", "motile", "trackastra"]:
+        for pkg in ["gurobipy", "ilpy", "motile", "trackastra", "zarr"]:
             info = packages.get(pkg, {})
             if not info.get("present"):
                 reasons.append(f"Missing package: {pkg}")
@@ -197,6 +269,7 @@ print(json.dumps(status))
                 "--upgrade",
                 "trackastra[ilp]",
                 "motile",
+                "zarr>=3",
             ]
             subprocess.run(pip_cmd, check=True)
 
@@ -216,13 +289,13 @@ print(json.dumps(status))
         print("Creating TrackAstra conda environment...")
         conda_cmd = TrackAstraEnvManager.get_conda_cmd()
 
-        # Create environment with Python 3.10 (required for TrackAstra)
+        # Create environment with Python 3.11+ (required for zarr>=3; TrackAstra supports 3.10-3.13)
         env_create_cmd = [
             conda_cmd,
             "create",
             "-n",
             TrackAstraEnvManager.ENV_NAME,
-            "python=3.10",
+            "python=3.11",
             "--no-default-packages",
             "-y",
         ]
@@ -252,6 +325,7 @@ print(json.dumps(status))
             pip_packages = [
                 "trackastra[ilp]",
                 "motile",
+                "zarr>=3",
             ]
 
             pip_cmd = [
@@ -287,10 +361,34 @@ print(json.dumps(status))
             for reason in reasons:
                 print(f" - {reason}")
 
-            if not TrackAstraEnvManager.repair_env():
-                return False
+            # If the Python version itself is wrong the only fix is a full
+            # env rebuild — pip installs cannot change the interpreter.
+            python_version = (status or {}).get("python", "")
+            python_ok = TrackAstraEnvManager._version_at_least(
+                python_version, TrackAstraEnvManager.REQUIRED_VERSIONS["python"]
+            )
+            if not python_ok:
+                print(
+                    f"Python {python_version} < required "
+                    f"{TrackAstraEnvManager.REQUIRED_VERSIONS['python']}; "
+                    "recreating environment..."
+                )
+                conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+                try:
+                    subprocess.run(
+                        [conda_cmd, "env", "remove", "-n", TrackAstraEnvManager.ENV_NAME, "-y"],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    print(f"Error removing old environment: {e}")
+                    return False
+                if not TrackAstraEnvManager.create_env():
+                    return False
+            else:
+                if not TrackAstraEnvManager.repair_env():
+                    return False
 
-            # Recheck after attempted repair.
+            # Recheck after attempted repair/recreate.
             status = TrackAstraEnvManager.get_env_status()
             needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
             if needs_repair:
@@ -303,7 +401,15 @@ print(json.dumps(status))
         return True
 
 
-def create_trackastra_script(img_path, mask_path, model, mode, output_path, channel="all"):
+def create_trackastra_script(
+    img_path,
+    mask_path,
+    model,
+    mode,
+    output_path,
+    channel="all",
+    dimension_order="Auto",
+):
     """Create a Python script to run TrackAstra in the dedicated environment."""
     
     # Determine if inputs are zarr files
@@ -314,15 +420,86 @@ def create_trackastra_script(img_path, mask_path, model, mode, output_path, chan
     if img_is_zarr:
         img_load_code = f"""
 import zarr
+import os
 print('Loading zarr image: {img_path}')
-img_zarr = zarr.open('{img_path}', mode='r')
-if hasattr(img_zarr, 'shape'):
-    img = np.asarray(img_zarr)
-else:
-    # Multi-array zarr group, get first array
-    arrays = list(img_zarr.array_keys())
-    print(f'Available arrays: {{arrays}}')
-    img = np.asarray(img_zarr[arrays[0]])
+def _zarr_group_to_array(zgroup):
+    if hasattr(zgroup, 'shape'):
+        return np.asarray(zgroup)
+
+    if hasattr(zgroup, 'array_keys'):
+        array_keys = list(zgroup.array_keys())
+        if '0' in array_keys:
+            return np.asarray(zgroup['0'])
+        if array_keys:
+            return np.asarray(zgroup[array_keys[0]])
+
+    if hasattr(zgroup, 'group_keys'):
+        subgroup_keys = sorted(list(zgroup.group_keys()), key=lambda k: (k != '0', k))
+        for key in subgroup_keys:
+            try:
+                arr = _zarr_group_to_array(zgroup[key])
+                if arr is not None:
+                    return arr
+            except Exception:
+                continue
+
+    return None
+
+def _load_zarr_any(path):
+    attempts = []
+
+    def _open_with_kind(kind, location):
+        if kind == 'open':
+            return zarr.open(location, mode='r')
+        if kind == 'open_array':
+            return zarr.open_array(store=location, mode='r')
+        if kind == 'open_group':
+            return zarr.open_group(store=location, mode='r')
+        raise ValueError(f'Unknown zarr opener kind: {{kind}}')
+
+    for kind in ('open', 'open_array', 'open_group'):
+        try:
+            obj = _open_with_kind(kind, path)
+            arr = _zarr_group_to_array(obj)
+            if arr is not None:
+                return arr
+        except Exception as exc:
+            attempts.append(f"{{kind}}({{path}}): {{exc}}")
+
+    level0 = os.path.join(path, '0')
+    for kind in ('open', 'open_array', 'open_group'):
+        try:
+            obj = _open_with_kind(kind, level0)
+            arr = _zarr_group_to_array(obj)
+            if arr is not None:
+                print(f'Loaded zarr via level 0 fallback: {{level0}}')
+                return arr
+        except Exception as exc:
+            attempts.append(f"{{kind}}({{level0}}): {{exc}}")
+
+    # Last resort: look for a direct child directory named "0".
+    try:
+        for child in sorted(os.listdir(path)):
+            child_path = os.path.join(path, child)
+            child_level0 = os.path.join(child_path, '0')
+            if os.path.isdir(child_level0):
+                for kind in ('open', 'open_array', 'open_group'):
+                    try:
+                        obj = _open_with_kind(kind, child_level0)
+                        arr = _zarr_group_to_array(obj)
+                        if arr is not None:
+                            print(f'Loaded zarr via nested level 0 fallback: {{child_level0}}')
+                            return arr
+                    except Exception as exc:
+                        attempts.append(f"{{kind}}({{child_level0}}): {{exc}}")
+    except Exception as exc:
+        attempts.append(f"os.listdir({{path}}): {{exc}}")
+
+    raise RuntimeError(
+        'Unable to load zarr image. Attempts:\\n' + '\\n'.join(attempts)
+    )
+
+img = _load_zarr_any('{img_path}')
 """
     else:
         img_load_code = f"img = imread('{img_path}')"
@@ -331,15 +508,85 @@ else:
     if mask_is_zarr:
         mask_load_code = f"""
 import zarr
+import os
 print('Loading zarr mask: {mask_path}')
-mask_zarr = zarr.open('{mask_path}', mode='r')
-if hasattr(mask_zarr, 'shape'):
-    mask = np.asarray(mask_zarr)
-else:
-    # Multi-array zarr group, get first array
-    arrays = list(mask_zarr.array_keys())
-    print(f'Available arrays: {{arrays}}')
-    mask = np.asarray(mask_zarr[arrays[0]])
+def _zarr_group_to_array(zgroup):
+    if hasattr(zgroup, 'shape'):
+        return np.asarray(zgroup)
+
+    if hasattr(zgroup, 'array_keys'):
+        array_keys = list(zgroup.array_keys())
+        if '0' in array_keys:
+            return np.asarray(zgroup['0'])
+        if array_keys:
+            return np.asarray(zgroup[array_keys[0]])
+
+    if hasattr(zgroup, 'group_keys'):
+        subgroup_keys = sorted(list(zgroup.group_keys()), key=lambda k: (k != '0', k))
+        for key in subgroup_keys:
+            try:
+                arr = _zarr_group_to_array(zgroup[key])
+                if arr is not None:
+                    return arr
+            except Exception:
+                continue
+
+    return None
+
+def _load_zarr_any(path):
+    attempts = []
+
+    def _open_with_kind(kind, location):
+        if kind == 'open':
+            return zarr.open(location, mode='r')
+        if kind == 'open_array':
+            return zarr.open_array(store=location, mode='r')
+        if kind == 'open_group':
+            return zarr.open_group(store=location, mode='r')
+        raise ValueError(f'Unknown zarr opener kind: {{kind}}')
+
+    for kind in ('open', 'open_array', 'open_group'):
+        try:
+            obj = _open_with_kind(kind, path)
+            arr = _zarr_group_to_array(obj)
+            if arr is not None:
+                return arr
+        except Exception as exc:
+            attempts.append(f"{{kind}}({{path}}): {{exc}}")
+
+    level0 = os.path.join(path, '0')
+    for kind in ('open', 'open_array', 'open_group'):
+        try:
+            obj = _open_with_kind(kind, level0)
+            arr = _zarr_group_to_array(obj)
+            if arr is not None:
+                print(f'Loaded zarr via level 0 fallback: {{level0}}')
+                return arr
+        except Exception as exc:
+            attempts.append(f"{{kind}}({{level0}}): {{exc}}")
+
+    try:
+        for child in sorted(os.listdir(path)):
+            child_path = os.path.join(path, child)
+            child_level0 = os.path.join(child_path, '0')
+            if os.path.isdir(child_level0):
+                for kind in ('open', 'open_array', 'open_group'):
+                    try:
+                        obj = _open_with_kind(kind, child_level0)
+                        arr = _zarr_group_to_array(obj)
+                        if arr is not None:
+                            print(f'Loaded zarr via nested level 0 fallback: {{child_level0}}')
+                            return arr
+                    except Exception as exc:
+                        attempts.append(f"{{kind}}({{child_level0}}): {{exc}}")
+    except Exception as exc:
+        attempts.append(f"os.listdir({{path}}): {{exc}}")
+
+    raise RuntimeError(
+        'Unable to load zarr mask. Attempts:\\n' + '\\n'.join(attempts)
+    )
+
+mask = _load_zarr_any('{mask_path}')
 """
     else:
         mask_load_code = f"mask = imread('{mask_path}')"
@@ -368,37 +615,71 @@ if mask.ndim not in [3, 4]:
 if mask.shape[0] < 2:
     raise ValueError(f'Need at least 2 timepoints, got {{mask.shape[0]}}')
 
-# Handle multichannel images (TCZYX) by selecting the specified channel.
-# If no channel is specified, take the first channel for multichannel input.
+# Handle multichannel images by selecting a channel on the axis that makes
+# image and mask shapes compatible.
 channel_param = "{channel}"
-if img.ndim == 5:
-    # Input is TCZYX
-    print(f'Input image is 5D {{img.shape}}, treating as TCZYX')
+dimension_order_param = "{dimension_order}"
+if img.ndim == mask.ndim + 1:
+    # Find candidate channel axes whose removal makes img shape match mask shape.
+    candidate_axes = [
+        ax for ax in range(1, img.ndim)
+        if img.shape[:ax] + img.shape[ax + 1:] == mask.shape
+    ]
+    requested_axis = None
+    if dimension_order_param and str(dimension_order_param).upper() not in ("AUTO", "NONE"):
+        axes = str(dimension_order_param).upper()
+        if len(axes) == img.ndim and "C" in axes:
+            requested_axis = axes.index("C")
+            print(f'Using dimension_order={{axes}} requested channel axis {{requested_axis}}')
+        else:
+            print(
+                f'Ignoring dimension_order={{axes}} for img.ndim={{img.ndim}}; '
+                'expected one C and matching length'
+            )
+
+    if requested_axis is not None and requested_axis in candidate_axes:
+        channel_axis = requested_axis
+        print(f'Using requested channel axis {{channel_axis}} validated by mask shape')
+    elif candidate_axes:
+        channel_axis = candidate_axes[0]
+        print(f'Inferred channel axis {{channel_axis}} from mask shape compatibility')
+    else:
+        # Default convention for 5D is TCZYX -> channel axis 1.
+        channel_axis = 1 if img.ndim == 5 else img.ndim - 1
+        print(
+            f'Could not infer channel axis from shapes {{img.shape}} and {{mask.shape}}; '
+            f'using fallback axis {{channel_axis}}'
+        )
+
+    n_channels = img.shape[channel_axis]
     if channel_param in ("", "all", "None"):
+        ch_idx = 0
         print('No channel specified for multichannel image, taking first channel...')
-        img = img[:, :, 0, :, :]  # Take first channel -> TZYX
     else:
         try:
             ch_idx = int(channel_param)
-            print(f'Extracting channel {{ch_idx}}...')
-            img = img[:, :, ch_idx, :, :]  # Take specified channel -> TZYX
-        except (ValueError, IndexError):
+        except ValueError:
             print(f'Invalid channel {{channel_param}}, taking first channel...')
-            img = img[:, :, 0, :, :]
+            ch_idx = 0
+
+    if ch_idx < 0 or ch_idx >= n_channels:
+        print(f'Channel index {{ch_idx}} out of bounds for {{n_channels}} channels; using 0')
+        ch_idx = 0
+
+    print(f'Extracting channel {{ch_idx}} on axis {{channel_axis}}...')
+    img = np.take(img, ch_idx, axis=channel_axis)
     print(f'Image shape after channel selection: {{img.shape}}')
-elif img.ndim == 4 and mask.ndim == 4:
-    # Both are 4D, check if dimensions match
+elif img.ndim == mask.ndim:
     if img.shape != mask.shape:
-        print(f'Warning: img and mask shapes differ: {{img.shape}} vs {{mask.shape}}')
-        # If img is TCZYX and mask is TZYX, take first channel
-        if img.shape[0] == mask.shape[0] and img.shape[1] == mask.shape[1] and img.shape[3] == mask.shape[2]:
-            print('Detected img as TCZYX, taking first channel...')
-            img = img[:, :, 0, :, :]
-elif img.ndim == 3 and mask.ndim == 3:
-    # Both are 3D TYX, this is fine
-    pass
+        raise ValueError(
+            f'Image and mask shapes must match when dimensions are equal: '
+            f'img={{img.shape}}, mask={{mask.shape}}'
+        )
 else:
-    print(f'Image ndim: {{img.ndim}}, Mask ndim: {{mask.ndim}}')
+    raise ValueError(
+        f'Unexpected dimensionality relationship: img={{img.shape}} (ndim={{img.ndim}}), '
+        f'mask={{mask.shape}} (ndim={{mask.ndim}})'
+    )
 
 print(f'Final shapes - Img: {{img.shape}}, Mask: {{mask.shape}}')
 
@@ -578,27 +859,21 @@ def trackastra_tracking(
     if label_pattern in basename:
         mask_path = img_path
         # Find corresponding raw image by removing the label pattern
-        raw_base = basename.replace(label_pattern, "")
-        if not raw_base.endswith(".tif"):
-            raw_base = raw_base + ".tif"
-        raw_path = os.path.join(os.path.dirname(img_path), raw_base)
-        if not os.path.exists(raw_path):
+        raw_base, raw_candidates, raw_path = _find_matching_raw_path(
+            img_path, label_pattern
+        )
+        if raw_path is None:
             print(f"Warning: Could not find raw image for {img_path}")
-            print(f"  Tried removing '{label_pattern}' to get: {raw_base}")
+            print(
+                f"  Tried removing '{label_pattern}' to get base '{raw_base}' and checking: {raw_candidates}"
+            )
             raw_path = img_path  # Fallback to using label as input
         else:
-            # Reload the raw image instead of the label image that was passed in
-            # This ensures channel detection/extraction happens on the correct file
-            print(f"Processing label file: reloading raw image for channel handling")
-            try:
-                image = imread(raw_path)
-                print(f"Raw image reloaded: shape={image.shape}, dtype={image.dtype}")
-            except Exception as e:
-                print(f"Warning: failed to reload raw image ({e}), using original image")
+            print("Processing label file: using matched raw-label pair for tracking")
     else:
         # For raw images, find the corresponding label image
         raw_path = img_path
-        base_name = os.path.basename(img_path).replace(".tif", "")
+        base_name = _strip_known_image_suffix(os.path.basename(img_path))
         mask_path = os.path.join(
             os.path.dirname(img_path), base_name + label_pattern
         )
@@ -620,7 +895,13 @@ def trackastra_tracking(
     output_path = output_dir / output_filename
 
     script_content = create_trackastra_script(
-        str(raw_path), str(mask_path), model, mode, str(output_path), channel
+        str(raw_path),
+        str(mask_path),
+        model,
+        mode,
+        str(output_path),
+        channel,
+        dimension_order,
     )
 
     with open(script_path, "w") as f:
@@ -644,6 +925,8 @@ def trackastra_tracking(
         print(result.stdout)
         print(result.stderr)
         print("Returning original image unchanged.")
+        if script_path.exists():
+            os.remove(script_path)
         return image
 
     print(result.stdout)
@@ -652,8 +935,11 @@ def trackastra_tracking(
     # second suffixed copy based on the current input filename.
     if output_path.exists():
         print(f"Tracking completed. Output saved at: {output_path}")
-        os.remove(script_path)
+        if script_path.exists():
+            os.remove(script_path)
         return str(output_path)
     else:
         print("TrackAstra did not produce output. Returning unchanged.")
+        if script_path.exists():
+            os.remove(script_path)
         return image
