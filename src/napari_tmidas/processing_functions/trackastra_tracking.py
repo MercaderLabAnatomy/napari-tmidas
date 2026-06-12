@@ -116,13 +116,13 @@ class TrackAstraEnvManager:
                 "Neither conda nor mamba found. Please install Anaconda/Miniconda/Miniforge."
             )
 
-    @staticmethod
-    def check_env_exists():
-        conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+    @classmethod
+    def check_env_exists(cls):
+        conda_cmd = cls.get_conda_cmd()
         try:
             # Try running python --version in the env
             result = subprocess.run(
-                [conda_cmd, "run", "-n", TrackAstraEnvManager.ENV_NAME, "python", "--version"],
+                [conda_cmd, "run", "-n", cls.ENV_NAME, "python", "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -141,10 +141,10 @@ class TrackAstraEnvManager:
             return tuple()
         return tuple(int(n) for n in nums)
 
-    @staticmethod
-    def _version_at_least(found, required):
-        found_tuple = TrackAstraEnvManager._version_tuple(found)
-        required_tuple = TrackAstraEnvManager._version_tuple(required)
+    @classmethod
+    def _version_at_least(cls, found, required):
+        found_tuple = cls._version_tuple(found)
+        required_tuple = cls._version_tuple(required)
         if not found_tuple or not required_tuple:
             return False
 
@@ -155,10 +155,10 @@ class TrackAstraEnvManager:
         return found_norm >= required_tuple
 
 
-    @staticmethod
-    def get_env_status():
+    @classmethod
+    def get_env_status(cls):
         """Return package/version status for the TrackAstra environment."""
-        conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+        conda_cmd = cls.get_conda_cmd()
         check_script = r'''
 import importlib.util
 import json
@@ -190,7 +190,7 @@ print(json.dumps(status))
                     conda_cmd,
                     "run",
                     "-n",
-                    TrackAstraEnvManager.ENV_NAME,
+                    cls.ENV_NAME,
                     "python",
                     "-c",
                     check_script,
@@ -206,8 +206,8 @@ print(json.dumps(status))
         except Exception as e:
             return {"error": str(e)}
 
-    @staticmethod
-    def env_needs_repair(status):
+    @classmethod
+    def env_needs_repair(cls, status):
         """Determine whether TrackAstra env should be repaired/upgraded."""
         if not status or "error" in status:
             return True, ["Could not determine environment status"]
@@ -215,11 +215,9 @@ print(json.dumps(status))
         reasons = []
 
         python_version = status.get("python")
-        if not TrackAstraEnvManager._version_at_least(
-            python_version, TrackAstraEnvManager.REQUIRED_VERSIONS["python"]
-        ):
+        if not cls._version_at_least(python_version, cls.REQUIRED_VERSIONS["python"]):
             reasons.append(
-                f"Python {python_version} < required {TrackAstraEnvManager.REQUIRED_VERSIONS['python']}"
+                f"Python {python_version} < required {cls.REQUIRED_VERSIONS['python']}"
             )
 
         packages = status.get("packages", {})
@@ -229,24 +227,24 @@ print(json.dumps(status))
                 reasons.append(f"Missing package: {pkg}")
                 continue
             found = info.get("version")
-            required = TrackAstraEnvManager.REQUIRED_VERSIONS[pkg]
-            if not TrackAstraEnvManager._version_at_least(found, required):
+            required = cls.REQUIRED_VERSIONS[pkg]
+            if not cls._version_at_least(found, required):
                 reasons.append(f"{pkg} version {found} < required {required}")
 
         return (len(reasons) > 0), reasons
 
-    @staticmethod
-    def repair_env():
+    @classmethod
+    def repair_env(cls):
         """Repair/upgrade TrackAstra environment using upstream ILP recipe."""
         print("Repairing TrackAstra environment to required package versions...")
-        conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+        conda_cmd = cls.get_conda_cmd()
         try:
             # Keep solver stack aligned with TrackAstra ILP requirements.
             solver_cmd = [
                 conda_cmd,
                 "install",
                 "-n",
-                TrackAstraEnvManager.ENV_NAME,
+                cls.ENV_NAME,
                 "-c",
                 "conda-forge",
                 "-c",
@@ -263,7 +261,7 @@ print(json.dumps(status))
                 conda_cmd,
                 "run",
                 "-n",
-                TrackAstraEnvManager.ENV_NAME,
+                cls.ENV_NAME,
                 "pip",
                 "install",
                 "--upgrade",
@@ -279,22 +277,22 @@ print(json.dumps(status))
             print(f"Error repairing TrackAstra environment: {e}")
             return False
 
-    @staticmethod
-    def create_env():
+    @classmethod
+    def create_env(cls):
         """Create the TrackAstra conda environment if it doesn't exist."""
-        if TrackAstraEnvManager.check_env_exists():
+        if cls.check_env_exists():
             print("TrackAstra environment already exists.")
             return True
 
         print("Creating TrackAstra conda environment...")
-        conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+        conda_cmd = cls.get_conda_cmd()
 
         # Create environment with Python 3.11+ (required for zarr>=3; TrackAstra supports 3.10-3.13)
         env_create_cmd = [
             conda_cmd,
             "create",
             "-n",
-            TrackAstraEnvManager.ENV_NAME,
+            cls.ENV_NAME,
             "python=3.11",
             "--no-default-packages",
             "-y",
@@ -308,7 +306,7 @@ print(json.dumps(status))
                 conda_cmd,
                 "install",
                 "-n",
-                TrackAstraEnvManager.ENV_NAME,
+                cls.ENV_NAME,
                 "-c",
                 "conda-forge",
                 "-c",
@@ -332,7 +330,7 @@ print(json.dumps(status))
                 conda_cmd,
                 "run",
                 "-n",
-                TrackAstraEnvManager.ENV_NAME,
+                cls.ENV_NAME,
                 "pip",
                 "install",
             ] + pip_packages
@@ -346,16 +344,16 @@ print(json.dumps(status))
             print(f"Error creating TrackAstra environment: {e}")
             return False
 
-    @staticmethod
-    def ensure_env_ready():
+    @classmethod
+    def ensure_env_ready(cls):
         """Ensure environment exists and required package versions are present."""
-        if not TrackAstraEnvManager.check_env_exists():
+        if not cls.check_env_exists():
             print("TrackAstra environment not found. Creating it now...")
-            if not TrackAstraEnvManager.create_env():
+            if not cls.create_env():
                 return False
 
-        status = TrackAstraEnvManager.get_env_status()
-        needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
+        status = cls.get_env_status()
+        needs_repair, reasons = cls.env_needs_repair(status)
         if needs_repair:
             print("TrackAstra environment drift detected:")
             for reason in reasons:
@@ -364,33 +362,31 @@ print(json.dumps(status))
             # If the Python version itself is wrong the only fix is a full
             # env rebuild — pip installs cannot change the interpreter.
             python_version = (status or {}).get("python", "")
-            python_ok = TrackAstraEnvManager._version_at_least(
-                python_version, TrackAstraEnvManager.REQUIRED_VERSIONS["python"]
-            )
+            python_ok = cls._version_at_least(python_version, cls.REQUIRED_VERSIONS["python"])
             if not python_ok:
                 print(
                     f"Python {python_version} < required "
-                    f"{TrackAstraEnvManager.REQUIRED_VERSIONS['python']}; "
+                    f"{cls.REQUIRED_VERSIONS['python']}; "
                     "recreating environment..."
                 )
-                conda_cmd = TrackAstraEnvManager.get_conda_cmd()
+                conda_cmd = cls.get_conda_cmd()
                 try:
                     subprocess.run(
-                        [conda_cmd, "env", "remove", "-n", TrackAstraEnvManager.ENV_NAME, "-y"],
+                        [conda_cmd, "env", "remove", "-n", cls.ENV_NAME, "-y"],
                         check=True,
                     )
                 except subprocess.CalledProcessError as e:
                     print(f"Error removing old environment: {e}")
                     return False
-                if not TrackAstraEnvManager.create_env():
+                if not cls.create_env():
                     return False
             else:
-                if not TrackAstraEnvManager.repair_env():
+                if not cls.repair_env():
                     return False
 
             # Recheck after attempted repair/recreate.
-            status = TrackAstraEnvManager.get_env_status()
-            needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
+            status = cls.get_env_status()
+            needs_repair, reasons = cls.env_needs_repair(status)
             if needs_repair:
                 print("TrackAstra environment is still not healthy after repair:")
                 for reason in reasons:
