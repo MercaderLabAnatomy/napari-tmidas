@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
 [![Supported Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://python.org)
 [![Downloads](https://static.pepy.tech/badge/napari-tmidas)](https://pepy.tech/project/napari-tmidas)
-[![GitHub stars](https://img.shields.io/github/stars/MercaderLabAnatomy/napari-tmidas?style=social)](https://github.com/MercaderLabAnatomy/napari-tmidas/)
+[![GitHub stars](https://badgen.net/github/stars/MercaderLabAnatomy/napari-tmidas)](https://github.com/MercaderLabAnatomy/napari-tmidas/stargazers)
 [![DOI](https://zenodo.org/badge/943353883.svg)](https://doi.org/10.5281/zenodo.17988815)
 [![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
 
