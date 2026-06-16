@@ -3,7 +3,7 @@
 
 ## Overview
 
-Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** for batch microscopy workflows in napari-tmidas.
+Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** for batch microscopy image processing workflows in napari-tmidas.
 
 ## Features
 
