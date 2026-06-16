@@ -130,6 +130,23 @@ except ImportError:
     imread = None
     _HAS_SKIMAGE = False
 
+
+def _channel_detection_verbose_enabled() -> bool:
+    """Return True when verbose channel-detection logging is enabled."""
+    return os.getenv("TMIDAS_VERBOSE_CHANNEL_DETECTION", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _channel_detection_log(message: str, verbose_only: bool = False) -> None:
+    """Emit channel-detection logs, with optional verbosity gating."""
+    if verbose_only and not _channel_detection_verbose_enabled():
+        return
+    print(message)
+
 # Create stub base classes when dependencies are missing
 if not _HAS_QTPY:
     # Create minimal stubs to allow class definitions
@@ -428,7 +445,10 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
         attrs = _read_zarr_root_attrs(zarr_path, root=root)
         multiscales = _get_ome_multiscales(attrs)
         if not multiscales:
-            print(f"Channel detection: No multiscales metadata in {zarr_path}")
+            _channel_detection_log(
+                f"Channel detection: No multiscales metadata in {zarr_path}",
+                verbose_only=True,
+            )
             # Fall back to inspecting the raw array shape
             arr = _resolve_first_array(root) if root is not None else None
 
@@ -438,7 +458,10 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
 
         ms = multiscales[0]
         axes = ms.get("axes", [])
-        print(f"Channel detection: OME axes = {axes}")
+        _channel_detection_log(
+            f"Channel detection: OME axes = {axes}",
+            verbose_only=True,
+        )
 
         # Find the channel axis
         channel_axis = None
@@ -450,7 +473,10 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
                 break
 
         if channel_axis is None:
-            print("Channel detection: No channel axis found in OME axes metadata")
+            _channel_detection_log(
+                "Channel detection: No channel axis found in OME axes metadata",
+                verbose_only=True,
+            )
             # Try shape heuristics on the first dataset array
             datasets = ms.get("datasets", [])
             if datasets and root is not None:
@@ -468,11 +494,14 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
         path = _resolve_dataset_path(root, path)
         arr = root[path]
         num_channels = arr.shape[channel_axis]
-        print(f"Channel detection: zarr metadata → {num_channels} channels at axis {channel_axis}")
+        _channel_detection_log(
+            f"Channel detection: zarr metadata -> {num_channels} channels at axis {channel_axis}",
+            verbose_only=True,
+        )
         return (num_channels, channel_axis)
 
     except Exception as e:
-        print(f"Channel detection: zarr metadata read failed: {e}")
+        _channel_detection_log(f"Channel detection: zarr metadata read failed: {e}")
         import traceback
         traceback.print_exc()
         return (1, None)
@@ -609,14 +638,18 @@ def detect_channels_from_tiff_path(
             axes = str(getattr(series, "axes", "") or "").upper()
             shape = tuple(getattr(series, "shape", ()) or ())
 
-            print(f"Channel detection: TIFF axes = {axes or '?'}")
+            _channel_detection_log(
+                f"Channel detection: TIFF axes = {axes or '?'}",
+                verbose_only=True,
+            )
             if axes and len(axes) == len(shape):
                 channel_axis = axes.find("C")
                 if channel_axis >= 0:
                     num_channels = shape[channel_axis]
-                    print(
+                    _channel_detection_log(
                         "Channel detection: TIFF metadata "
-                        f"→ {num_channels} channels at axis {channel_axis}"
+                        f"-> {num_channels} channels at axis {channel_axis}",
+                        verbose_only=True,
                     )
                     return (num_channels, channel_axis)
 
@@ -703,6 +736,7 @@ def resolve_cellpose_dim_order(
     dimension_order_hint: str = "Auto",
 ) -> str:
     """Resolve Cellpose dim_order as a channel-free spatial/time axes string."""
+    valid_axes = set("TZYX")
     num_channels, channel_axis = detect_channels_for_file(filepath, image_data)
     if channel_param in (None, "all") and num_channels > 1 and channel_axis is not None:
         raise ValueError(
@@ -716,8 +750,15 @@ def resolve_cellpose_dim_order(
         axes = detect_axes_for_file(filepath, image_data) or ""
 
     normalized = axes.replace("C", "")
-    if normalized:
+    if normalized and set(normalized).issubset(valid_axes):
         return normalized
+
+    if normalized and not set(normalized).issubset(valid_axes):
+        _channel_detection_log(
+            "Cellpose dim_order: ignoring unsupported metadata axes "
+            f"'{axes}' and falling back to shape-based inference",
+            verbose_only=True,
+        )
 
     if image_data is not None and hasattr(image_data, "ndim"):
         fallback = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TZYX"}
@@ -730,7 +771,10 @@ def resolve_cellpose_dim_order(
 
 def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
     """Heuristic channel detection from array shape alone."""
-    print(f"Channel detection: shape heuristic on {shape}")
+    _channel_detection_log(
+        f"Channel detection: shape heuristic on {shape}",
+        verbose_only=True,
+    )
     # Prefer axis 1 for common time-series layouts such as TCYX and TCZYX,
     # where axis 0 is usually time and axis 1 is channels.
     if len(shape) >= 4 and 2 <= shape[1] <= 16 and shape[0] > shape[1]:
@@ -750,7 +794,10 @@ def _detect_channels_from_shape(shape) -> Tuple[int, Optional[int]]:
         return (shape[1], 1)
     if len(shape) >= 5 and 2 <= shape[1] <= 16:
         return (shape[1], 1)
-    print(f"Channel detection: No channel dimension found in shape {shape}")
+    _channel_detection_log(
+        f"Channel detection: No channel dimension found in shape {shape}",
+        verbose_only=True,
+    )
     return (1, None)
 
 
@@ -1855,7 +1902,8 @@ class ParameterWidget(QWidget):
             max_value = param_info.get("max")
             step_value = param_info.get("step")
             description = param_info.get("description", "")
-            options = param_info.get("options")  # For dropdown parameters
+            # Support both legacy `options` and common `choices` keys.
+            options = param_info.get("options") or param_info.get("choices")
             widget_type = param_info.get("widget_type")  # For special widgets
 
             # Create a container for this parameter
@@ -2068,7 +2116,10 @@ class ParameterWidget(QWidget):
 
         try:
             first_file = file_list[0]
-            print(f"Channel detection: Examining {os.path.basename(first_file)}")
+            _channel_detection_log(
+                f"Channel detection: Examining {os.path.basename(first_file)}",
+                verbose_only=True,
+            )
 
             # Special handling for TrackAstra with label files:
             # Try to reload the corresponding raw file for channel detection
@@ -2090,12 +2141,19 @@ class ParameterWidget(QWidget):
                 # Try to detect and find raw file
                 for pattern in patterns_to_try:
                     if pattern and pattern in basename:
-                        print(f"  TrackastraTracking detected label file (pattern: {pattern}), looking for corresponding raw file...")
+                        _channel_detection_log(
+                            "  TrackastraTracking detected label file "
+                            f"(pattern: {pattern}), looking for corresponding raw file...",
+                            verbose_only=True,
+                        )
                         candidate = first_file.replace(pattern, "")
                         if not candidate.endswith(".tif"):
                             candidate = candidate + ".tif"
                         if os.path.exists(candidate):
-                            print(f"  Found raw file: {os.path.basename(candidate)}")
+                            _channel_detection_log(
+                                f"  Found raw file: {os.path.basename(candidate)}",
+                                verbose_only=True,
+                            )
                             first_file = candidate
                         break
 
@@ -2103,24 +2161,37 @@ class ParameterWidget(QWidget):
             if not (_HAS_TIFFFILE and first_file.lower().endswith((".tif", ".tiff"))):
                 image_data = load_image_file(first_file)
                 if isinstance(image_data, list):
-                    print(f"Channel detection: Got {len(image_data)} layers from loader")
+                    _channel_detection_log(
+                        f"Channel detection: Got {len(image_data)} layers from loader",
+                        verbose_only=True,
+                    )
                     for i, item in enumerate(image_data):
                         if len(item) == 3:
                             d, kw, lt = item
-                            print(f"  Layer {i}: type={lt}, shape={getattr(d, 'shape', '?')}, kwargs_keys={list(kw.keys()) if isinstance(kw, dict) else '?'}")
+                            _channel_detection_log(
+                                f"  Layer {i}: type={lt}, shape={getattr(d, 'shape', '?')}, "
+                                f"kwargs_keys={list(kw.keys()) if isinstance(kw, dict) else '?'}",
+                                verbose_only=True,
+                            )
                 elif hasattr(image_data, "shape"):
-                    print(f"Channel detection: Image shape={image_data.shape}")
+                    _channel_detection_log(
+                        f"Channel detection: Image shape={image_data.shape}",
+                        verbose_only=True,
+                    )
 
             num_channels, channel_axis = detect_channels_for_file(first_file, image_data)
 
-            print(f"Channel detection: result → {num_channels} channels, axis={channel_axis}")
+            _channel_detection_log(
+                f"Channel detection: {os.path.basename(first_file)} -> {num_channels} channel(s)"
+            )
 
             if num_channels > 1:
                 for i in range(num_channels):
                     channel_widget.addItem(f"Channel {i}", str(i))
-                print(f"✓ Added {num_channels} channel options")
-            else:
-                print("✓ Single channel, no extra options added")
+                _channel_detection_log(
+                    f"Channel selector: added {num_channels} channel options",
+                    verbose_only=True,
+                )
 
         except Exception as e:
             print(f"✗ Channel detection failed: {e}")
@@ -2477,11 +2548,17 @@ class ProcessingWorker(QThread):
             }
 
             if getattr(self.processing_func, "__name__", "") == "cellpose_segmentation":
+                dim_order_hint = str(
+                    processing_params.get(
+                        "dimension_order",
+                        processing_params.get("dim_order", "Auto"),
+                    )
+                )
                 processing_params["dim_order"] = resolve_cellpose_dim_order(
                     filepath,
                     image,
                     channel_param,
-                    str(processing_params.get("dimension_order", "Auto")),
+                    dim_order_hint,
                 )
 
             # Filter parameters based on function signature

@@ -5,6 +5,7 @@ Updated to support Cellpose 4 (Cellpose-SAM) installation.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,106 @@ from napari_tmidas._env_manager import BaseEnvironmentManager
 # Global variable to track running processes for cancellation
 _running_processes = []
 _process_lock = threading.Lock()
+MIN_CELLPOSE_VERSION = "4.2.1.1"
+
+
+_NOISY_CELLPOSE_PREFIXES = (
+    "[GUI INFO] : WRITING LOG OUTPUT TO",
+    "RUNNING BLOCK:",
+    "cellpose version:",
+    "platform:",
+    "python version:",
+    "torch version:",
+    "=== Cellpose Environment Info ===",
+)
+
+
+def _should_emit_cellpose_log_line(line: str) -> bool:
+    """Return False for repetitive Cellpose worker logs that clutter terminal output."""
+    text = str(line or "").strip()
+    if not text:
+        return False
+    if text.startswith(_NOISY_CELLPOSE_PREFIXES):
+        return False
+    return True
+
+
+def _transform_cellpose_log_line(
+    line: str, progress_state: dict
+) -> tuple[bool, str | None]:
+    """Convert noisy distributed worker lines into concise progress updates.
+
+    Returns (handled, rendered_line). If handled is True, caller should not
+    process the original raw line further.
+    """
+    text = str(line or "").strip()
+    if not text:
+        return True, None
+
+    if text.startswith("DISTRIBUTED_PROGRESS_TOTAL="):
+        try:
+            total = int(text.split("=", 1)[1].strip())
+        except Exception:
+            total = 0
+        progress_state["total"] = max(0, total)
+        progress_state["done"] = 0
+        if total > 0:
+            return True, f"Distributed Cellpose progress: 0/{total} blocks (0.0%)"
+        return True, None
+
+    if text.startswith("RUNNING BLOCK:"):
+        progress_state["done"] = int(progress_state.get("done", 0)) + 1
+        total = int(progress_state.get("total", 0) or 0)
+        if total > 0:
+            pct = min(100.0, 100.0 * progress_state["done"] / total)
+            return (
+                True,
+                "Distributed Cellpose progress: "
+                f"{progress_state['done']}/{total} blocks ({pct:.1f}%)",
+            )
+        return (
+            True,
+            f"Distributed Cellpose progress: {progress_state['done']} blocks processed",
+        )
+
+    if text.startswith("CELLPOSE_PROGRESS="):
+        try:
+            value = int(float(text.split("=", 1)[1].strip()))
+        except Exception:
+            return True, None
+        value = max(0, min(100, value))
+        last = int(progress_state.get("cellpose_last_pct", -1))
+        if value == last:
+            return True, None
+        progress_state["cellpose_last_pct"] = value
+        return True, f"Cellpose progress: {value}%"
+
+    return False, None
+
+
+def _version_tuple(version: str):
+    """Convert a version string like v4.2.1.1 to a comparable integer tuple."""
+    if not version:
+        return tuple()
+
+    cleaned = str(version).strip().lower()
+    if cleaned.startswith("v"):
+        cleaned = cleaned[1:]
+    parts = re.findall(r"\d+", cleaned)
+    return tuple(int(p) for p in parts)
+
+
+def _is_version_at_least(version: str, minimum: str) -> bool:
+    """Return True when version >= minimum using numeric component comparison."""
+    current = _version_tuple(version)
+    required = _version_tuple(minimum)
+    if not current or not required:
+        return False
+
+    n = max(len(current), len(required))
+    current_padded = current + (0,) * (n - len(current))
+    required_padded = required + (0,) * (n - len(required))
+    return current_padded >= required_padded
 
 
 def cancel_all_processes():
@@ -147,6 +248,22 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             except subprocess.CalledProcessError as e:
                 print(f"✗ Failed to install {package}: {e}")
                 raise
+
+        # Optional dependency required by Cellpose Dino foundation models.
+        # Keep env creation robust when GitHub is unavailable; runtime checks
+        # will provide a clear error if a cpdino model is selected.
+        dinov3_dep = "git+https://github.com/facebookresearch/dinov3"
+        print(f"Installing optional dependency for cpdino models: {dinov3_dep}...")
+        try:
+            subprocess.check_call(
+                [env_python, "-m", "pip", "install", dinov3_dep]
+            )
+            print("✓ dinov3 installed successfully")
+        except subprocess.CalledProcessError as e:
+            print(
+                "Warning: Failed to install optional dinov3 dependency "
+                f"for cpdino models: {e}"
+            )
 
         # Verify installations
         print("Verifying installations...")
@@ -276,6 +393,101 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         print("Force reinstalling packages in cellpose environment...")
         self._install_dependencies(env_python)
 
+    def get_cellpose_version_in_env(self):
+        """Return installed cellpose version in dedicated env, or None if unavailable."""
+        if not self.is_env_created():
+            return None
+
+        env_python = self.get_env_python_path()
+        try:
+            result = subprocess.run(
+                [
+                    env_python,
+                    "-c",
+                    "import cellpose; print(getattr(cellpose, '__version__', ''))",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            version = result.stdout.strip()
+            if version:
+                return version
+        except subprocess.CalledProcessError:
+            pass
+
+        # Fallback: if importing cellpose fails, use pip metadata.
+        try:
+            show_result = subprocess.run(
+                [env_python, "-m", "pip", "show", "cellpose"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if show_result.returncode == 0 and show_result.stdout:
+                for line in show_result.stdout.splitlines():
+                    if line.lower().startswith("version:"):
+                        parsed = line.split(":", 1)[1].strip()
+                        if parsed:
+                            return parsed
+        except Exception:
+            pass
+
+        return None
+
+    def ensure_minimum_cellpose_version(
+        self, minimum_version: str = MIN_CELLPOSE_VERSION
+    ) -> None:
+        """Ensure dedicated env has required Cellpose version, recreating env if outdated."""
+        current_version = self.get_cellpose_version_in_env()
+        if _is_version_at_least(current_version or "", minimum_version):
+            print(
+                "Cellpose version check passed: "
+                f"{current_version} >= {minimum_version}"
+            )
+            return
+
+        print(
+            "Cellpose version is below minimum requirement "
+            f"({current_version!r} < {minimum_version}); "
+            "recreating dedicated cellpose environment..."
+        )
+
+        # BaseEnvironmentManager.create_env removes any existing env dir first.
+        self.create_env()
+
+        reinstalled_version = self.get_cellpose_version_in_env()
+        if not _is_version_at_least(reinstalled_version or "", minimum_version):
+            env_python = self.get_env_python_path()
+            debug_lines = []
+            try:
+                dbg = subprocess.run(
+                    [env_python, "-m", "pip", "show", "cellpose"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                debug_lines.append("pip show cellpose output:")
+                debug_lines.append((dbg.stdout or "").strip() or "<empty>")
+                if dbg.stderr:
+                    debug_lines.append("pip show cellpose stderr:")
+                    debug_lines.append(dbg.stderr.strip())
+            except Exception as exc:
+                debug_lines.append(f"pip show probe failed: {exc}")
+
+            debug_blob = "\n".join(debug_lines)
+            raise RuntimeError(
+                "Reinstalled cellpose environment but version is still below "
+                f"required minimum {minimum_version}. "
+                f"Detected version: {reinstalled_version!r}.\n"
+                f"{debug_blob}"
+            )
+
+        print(
+            "Cellpose environment upgraded successfully: "
+            f"{reinstalled_version} >= {minimum_version}"
+        )
+
 
 # Global instance for backward compatibility
 manager = CellposeEnvironmentManager()
@@ -329,6 +541,9 @@ def run_cellpose_in_env(func_name, args_dict):
         print("Missing packages detected. Reinstalling...")
         manager.reinstall_packages()
 
+    # Enforce minimum supported Cellpose release for every processing run.
+    manager.ensure_minimum_cellpose_version(MIN_CELLPOSE_VERSION)
+
     args_dict = dict(args_dict)
 
     # Check for zarr optimization
@@ -378,6 +593,7 @@ def run_zarr_processing(zarr_path, args_dict):
         script = f"""
 import numpy as np
 import sys
+import inspect
 from cellpose import models, core
 import tifffile
 import zarr
@@ -441,21 +657,47 @@ def _get_writable_tmp_dir():
         )
     return _tmp_root
 
+
+class _ProgressPrinter:
+    # Minimal progress interface compatible with Cellpose eval(progress=...).
+
+    def __init__(self):
+        self._last = None
+
+    def setValue(self, value):
+        try:
+            ivalue = int(float(value))
+        except Exception:
+            return
+        ivalue = max(0, min(100, ivalue))
+        if ivalue != self._last:
+            self._last = ivalue
+            print(f"CELLPOSE_PROGRESS={{ivalue}}", flush=True)
+            sys.stdout.flush()
+
 USE_DISTRIBUTED = {args_dict.get('use_distributed_segmentation', False)}
 BLOCKSIZE = {args_dict.get('distributed_blocksize_yx', args_dict.get('distributed_blocksize', 256))}
 BLOCKSIZE_Z = {args_dict.get('distributed_blocksize_z', args_dict.get('distributed_blocksize', 256))}
 MASK_PATH = {repr(args_dict.get('distributed_mask_path', None))}
 MASK_ZARR_PATH = {repr(args_dict.get('distributed_mask_zarr_path', None))}
 TIMEPOINT_INDEX = {repr(args_dict.get('timepoint_index', None))}
+_DISTRIBUTED_OVERLAP = 60
 
 if USE_DISTRIBUTED:
     _patch_zarr_open_for_cellpose_distributed()
 
 _distributed_eval_fn = None
+_distributed_eval_supports_overlap = False
 if USE_DISTRIBUTED:
     try:
         from cellpose.contrib.distributed_segmentation import distributed_eval as _distributed_eval_fn
         print(f"distributed_eval loaded (blocksize={{BLOCKSIZE}})")
+        try:
+            _distributed_eval_supports_overlap = (
+                "overlap" in inspect.signature(_distributed_eval_fn).parameters
+            )
+        except Exception:
+            _distributed_eval_supports_overlap = False
     except ImportError as _e:
         print(f"WARNING: distributed_eval not available ({{_e}}), falling back to in-memory processing")
 sys.stdout.flush()
@@ -465,7 +707,7 @@ _EVAL_KWARGS = {{
     'flow_threshold': {args_dict.get('flow_threshold', 0.4)},
     'cellprob_threshold': {args_dict.get('cellprob_threshold', 0.0)},
     'do_3D': {args_dict.get('do_3D', False)},
-    'z_axis': 0,
+    'z_axis': {repr(args_dict.get('z_axis', None))},
     'normalize': {args_dict.get('normalize', {'tile_norm_blocksize': 128})},
     'batch_size': {args_dict.get('batch_size', 32)},
     'flow3D_smooth': {args_dict.get('flow3D_smooth', 0)},
@@ -478,6 +720,20 @@ if _ANISOTROPY and _ANISOTROPY != 1.0:
     _EVAL_KWARGS['anisotropy'] = _ANISOTROPY
 
 _MODEL_KWARGS = {{'gpu': {args_dict.get('use_gpu', True)}}}
+_MODEL_TYPE = {repr(args_dict.get('model_type', 'cpsam_v2'))}
+
+if _MODEL_TYPE in ('cpdino', 'cpdino-vitb'):
+    try:
+        import importlib.util as _importlib_util
+
+        if _importlib_util.find_spec('dinov3') is None:
+            raise ModuleNotFoundError('dinov3')
+    except Exception as _dinov3_exc:
+        raise RuntimeError(
+            f"Cellpose model '{{_MODEL_TYPE}}' requires the 'dinov3' package. "
+            "Install it with: python -m pip install git+https://github.com/facebookresearch/dinov3"
+        ) from _dinov3_exc
+
 _DASK_LOCAL_DIR = _get_writable_tmp_dir()
 _TMP_BASE_DIR = _DASK_LOCAL_DIR
 _CLUSTER_KWARGS = {{
@@ -535,7 +791,27 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
     tmp_out = _tempfile.mkdtemp(dir=_TMP_BASE_DIR, suffix='.zarr')
     try:
         _blocksize_z = min(BLOCKSIZE_Z, slab_zarr.shape[0]) if slab_zarr.ndim >= 3 else BLOCKSIZE_Z
+        def _estimate_axis_blocks(length, block, overlap):
+            if length <= 0 or block <= 0:
+                return 0
+            if block >= length:
+                return 1
+            stride = max(1, int(block) - int(overlap))
+            return int(np.ceil((int(length) - int(block)) / float(stride))) + 1
+
+        _bz = max(1, int(_blocksize_z))
+        _by = max(1, int(BLOCKSIZE))
+        _bx = max(1, int(BLOCKSIZE))
+        _oz = min(_DISTRIBUTED_OVERLAP, max(0, _bz - 1))
+        _oy = min(_DISTRIBUTED_OVERLAP, max(0, _by - 1))
+        _ox = min(_DISTRIBUTED_OVERLAP, max(0, _bx - 1))
+        _nz = _estimate_axis_blocks(int(slab_zarr.shape[0]), _bz, _oz)
+        _ny = _estimate_axis_blocks(int(slab_zarr.shape[1]), _by, _oy)
+        _nx = _estimate_axis_blocks(int(slab_zarr.shape[2]), _bx, _ox)
+        _total_blocks = max(1, int(_nz * _ny * _nx))
+
         print(f"\\nDistributed_eval {{name}}: shape={{slab_zarr.shape}}, blocksize=(z={{_blocksize_z}}, yx={{BLOCKSIZE}})")
+        print(f"DISTRIBUTED_PROGRESS_TOTAL={{_total_blocks}}")
         sys.stdout.flush()
         try:
             if slab_mask is not None and slab_mask.shape != slab_zarr.shape:
@@ -544,7 +820,7 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
                     f"slab shape {{slab_zarr.shape}} for {{name}}; ignoring mask"
                 )
                 slab_mask = None
-            segments, boxes = _distributed_eval_fn(
+            _distributed_kwargs = dict(
                 input_zarr=slab_zarr,
                 blocksize=(_blocksize_z, BLOCKSIZE, BLOCKSIZE),
                 write_path=tmp_out,
@@ -554,6 +830,10 @@ def run_distributed_on_slab(slab_zarr, name="", slab_mask=None):
                 cluster_kwargs=_CLUSTER_KWARGS,
                 temporary_directory=_TMP_BASE_DIR,
             )
+            if _distributed_eval_supports_overlap:
+                _distributed_kwargs["overlap"] = _DISTRIBUTED_OVERLAP
+
+            segments, boxes = _distributed_eval_fn(**_distributed_kwargs)
         except ValueError as exc:
             # Cellpose 4 distributed_eval can fail on empty/background-only slabs
             # when its merge step reduces over an empty label set.
@@ -691,12 +971,16 @@ def process_volume(image, name=""):
 
     print("Creating Cellpose model...")
     sys.stdout.flush()
-    model = models.CellposeModel(gpu=actual_use_gpu)
+    model = models.CellposeModel(
+        gpu=actual_use_gpu,
+        model_type=_MODEL_TYPE,
+    )
     print(f"Model created (GPU={{model.gpu}})")
     sys.stdout.flush()
 
     print("Running segmentation...")
     sys.stdout.flush()
+    progress = _ProgressPrinter()
     masks, flows, styles = model.eval(
         image,
         flow_threshold={args_dict.get('flow_threshold', 0.4)},
@@ -707,7 +991,8 @@ def process_volume(image, name=""):
         flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
         anisotropy={args_dict.get('anisotropy', None)},
         z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None,
-        channel_axis={args_dict.get('channel_axis', None)}
+        channel_axis={args_dict.get('channel_axis', None)},
+        progress=progress,
     )
     print(f"Found {{np.max(masks)}} objects in {{name}}")
     sys.stdout.flush()
@@ -1003,23 +1288,37 @@ if __name__ == "__main__":
             # Run with REAL-TIME output (don't capture, let it stream)
             env_python = get_env_python_path()
             print("=== Starting Cellpose Processing ===")
+            progress_state = {"total": 0, "done": 0}
 
             # Keep cellpose/dask scratch creation under input-folder/tmp.
             subprocess_cwd = tmp_root
 
-            # Use Popen for real-time progress and cancellation support
+            # Stream output and suppress repetitive worker chatter.
             process = subprocess.Popen(
                 [env_python, script_file.name],
                 cwd=subprocess_cwd,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
             )
 
             # Track the process for cancellation
             _add_process(process)
 
             try:
+                if process.stdout is not None:
+                    for raw_line in process.stdout:
+                        handled, rendered = _transform_cellpose_log_line(
+                            raw_line, progress_state
+                        )
+                        if handled:
+                            if rendered:
+                                print(rendered, flush=True)
+                            continue
+                        if _should_emit_cellpose_log_line(raw_line):
+                            print(raw_line.rstrip("\n"), flush=True)
+
                 # Wait for completion
                 returncode = process.wait()
 
@@ -1070,17 +1369,34 @@ import numpy as np
 from cellpose import models, core
 import tifffile
 
+
+class _ProgressPrinter:
+    def __init__(self):
+        self._last = None
+
+    def setValue(self, value):
+        try:
+            ivalue = int(float(value))
+        except Exception:
+            return
+        ivalue = max(0, min(100, ivalue))
+        if ivalue != self._last:
+            self._last = ivalue
+            print(f"CELLPOSE_PROGRESS={{ivalue}}")
+
 # Load image
 image = tifffile.imread('{input_file.name}')
 
 # Create and run model (exactly like original working code)
 model = models.CellposeModel(
-    gpu={args_dict.get('use_gpu', True)})
+    gpu={args_dict.get('use_gpu', True)},
+    model_type={repr(args_dict.get('model_type', 'cpsam_v2'))})
 
 # Prepare normalization parameters (Cellpose 4)
 normalize = {args_dict.get('normalize', {'tile_norm_blocksize': 128})}
 
 # Perform segmentation with Cellpose 4 parameters
+progress = _ProgressPrinter()
 masks, flows, styles = model.eval(
     image,
     channels={args_dict.get('channels', [0, 0])},
@@ -1092,7 +1408,8 @@ masks, flows, styles = model.eval(
     flow3D_smooth={args_dict.get('flow3D_smooth', 0)},
     anisotropy={args_dict.get('anisotropy', None)},
     z_axis={args_dict.get('z_axis', 0)} if {args_dict.get('do_3D', False)} else None,
-    channel_axis={args_dict.get('channel_axis', None)}
+    channel_axis={args_dict.get('channel_axis', None)},
+    progress=progress,
 )
 
 # Save results
@@ -1109,24 +1426,38 @@ tifffile.imwrite('{output_file.name}', masks)
 
         # Use Popen for cancellation support
         process = subprocess.Popen(
-            [env_python, script_file.name],
+            [env_python, "-u", script_file.name],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
         )
 
         # Track the process for cancellation
         _add_process(process)
 
         try:
-            # Wait for completion and get output
-            stdout, stderr = process.communicate()
-            print("Stdout:", stdout)
+            progress_state = {"total": 0, "done": 0, "cellpose_last_pct": -1}
+
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    handled, rendered = _transform_cellpose_log_line(
+                        raw_line, progress_state
+                    )
+                    if handled:
+                        if rendered:
+                            print(rendered, flush=True)
+                        continue
+                    if _should_emit_cellpose_log_line(raw_line):
+                        print(raw_line.rstrip("\n"), flush=True)
+
+            returncode = process.wait()
 
             # Check for errors
-            if process.returncode != 0:
-                print("Stderr:", stderr)
-                raise RuntimeError(f"Cellpose segmentation failed: {stderr}")
+            if returncode != 0:
+                raise RuntimeError(
+                    f"Cellpose segmentation failed with return code {returncode}"
+                )
 
         finally:
             # Remove from tracking regardless of outcome

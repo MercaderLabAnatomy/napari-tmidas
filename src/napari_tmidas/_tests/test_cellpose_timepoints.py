@@ -1,9 +1,13 @@
 import importlib
 import json
 import sys
+import glob
 
 import numpy as np
 import pytest
+import zarr
+
+from napari_tmidas._registry import BatchProcessingRegistry
 
 
 cellpose_mod = importlib.import_module(
@@ -38,6 +42,33 @@ def test_tyx_timepoint_interval_non_zarr(monkeypatch):
     assert result.shape == (2, 16, 16)
     assert len(calls) == 2
     assert [c["image"].shape for c in calls] == [(16, 16), (16, 16)]
+    assert all(c.get("model_type") == "cpsam_v2" for c in calls)
+
+
+def test_explicit_model_type_is_forwarded(monkeypatch):
+    """Explicit model_type should be forwarded to Cellpose runner args."""
+    calls = []
+
+    def fake_run_cellpose_in_env(command, args):
+        assert command == "eval"
+        calls.append(dict(args))
+        return np.zeros(args["image"].shape, dtype=np.uint32)
+
+    monkeypatch.setattr(cellpose_mod, "is_env_created", lambda: True)
+    monkeypatch.setattr(cellpose_mod, "create_cellpose_env", lambda: None)
+    monkeypatch.setattr(
+        cellpose_mod, "run_cellpose_in_env", fake_run_cellpose_in_env
+    )
+
+    image = np.random.rand(16, 16).astype(np.float32)
+    _ = cellpose_mod.cellpose_segmentation(
+        image,
+        dim_order="YX",
+        model_type="cpdino-vitb",
+    )
+
+    assert len(calls) == 1
+    assert calls[0].get("model_type") == "cpdino-vitb"
 
 
 def test_tyx_timepoint_interval_zarr_direct(tmp_path, monkeypatch):
@@ -225,3 +256,76 @@ def test_direct_zarr_output_preserves_source_multiscales_lightweight(
         out_multiscales = out_attrs["ome"].get("multiscales", [])
     assert out_multiscales
     assert len(out_multiscales[0].get("datasets", [])) == 2
+
+
+def test_cellpose_model_type_parameter_uses_dropdown_options():
+    """Cellpose model_type should expose dropdown options in registry metadata."""
+    info = BatchProcessingRegistry.get_function_info("Cellpose-SAM Segmentation")
+    params = info["parameters"]
+    model_param = params["model_type"]
+
+    assert model_param["default"] == "cpsam_v2"
+    assert "options" in model_param
+    assert model_param["options"] == cellpose_mod.SUPPORTED_CELLPOSE_MODELS
+
+
+def test_interleaved_run_signature_includes_model_type(tmp_path, monkeypatch):
+    """Interleaved cache signature should include model_type to avoid stale reuse."""
+    zarr_path = tmp_path / "source.zarr"
+    arr = zarr.open(str(zarr_path), mode="w", shape=(1, 2, 8, 8), dtype=np.float32)
+    arr[:] = np.random.rand(1, 2, 8, 8).astype(np.float32)
+
+    convpaint_calls = []
+
+    def fake_convpaint_predict(image, **kwargs):
+        convpaint_calls.append(kwargs)
+        return np.ones_like(image, dtype=np.uint8)
+
+    def fake_run_cellpose_in_env(command, args):
+        assert command == "eval"
+        shape = (8, 8)
+        if args.get("do_3D"):
+            shape = (8, 8, 8)
+        if args.get("timepoint_index") is not None:
+            shape = (2, 8, 8)
+        if args.get("persist_output_zarr_path"):
+            out = zarr.open(
+                args["persist_output_zarr_path"],
+                mode="w",
+                shape=shape,
+                dtype=np.uint32,
+            )
+            out[:] = 0
+        return np.zeros(shape, dtype=np.uint32)
+
+    monkeypatch.setattr(cellpose_mod, "is_env_created", lambda: True)
+    monkeypatch.setattr(cellpose_mod, "create_cellpose_env", lambda: None)
+    monkeypatch.setattr(cellpose_mod, "run_cellpose_in_env", fake_run_cellpose_in_env)
+    monkeypatch.setitem(sys.modules, "napari_tmidas.processing_functions.convpaint_prediction", type(sys)("napari_tmidas.processing_functions.convpaint_prediction"))
+    sys.modules["napari_tmidas.processing_functions.convpaint_prediction"].convpaint_predict = fake_convpaint_predict
+
+    image = np.random.rand(1, 2, 8, 8).astype(np.float32)
+    _ = cellpose_mod.cellpose_segmentation(
+        image,
+        channel="0",
+        dim_order="TZYX",
+        model_type="cpdino-vitb",
+        use_distributed_segmentation=True,
+        use_convpaint_auto_mask=True,
+        convpaint_model_path="/tmp/fake.pkl",
+        _source_filepath=str(zarr_path),
+    )
+
+    settings_glob = str(
+        tmp_path
+        / "tmp"
+        / "cellpose_timepoint_cache"
+        / "source_interleaved_ch0_*"
+        / "run_settings.json"
+    )
+    settings_files = glob.glob(settings_glob)
+    assert settings_files
+
+    with open(settings_files[0], encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["run_signature"]["model_type"] == "cpdino-vitb"

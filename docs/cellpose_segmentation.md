@@ -8,6 +8,7 @@ Automatic instance segmentation using **Cellpose 4 (Cellpose-SAM)** for batch mi
 ## Features
 
 - **Cellpose 4 Support**: Uses Cellpose-SAM with strong generalization.
+- **Foundation Model Selection**: Supports `cpsam_v2` (default), `cpsam`, `cpdino`, and `cpdino-vitb`.
 - **2D/3D/Time-Series Support**: Works with `YX`, `ZYX`, `TZYX`, and multichannel variants.
 - **Automatic Environment Management**: Uses dedicated Cellpose environment when needed.
 - **GPU Acceleration**: Uses GPU when available.
@@ -27,6 +28,9 @@ If Cellpose is not detected, napari-tmidas will:
 1. Create `~/.napari-tmidas/envs/cellpose-env`
 2. Install Cellpose and dependencies
 3. Run Cellpose jobs in that environment
+
+When available, napari-tmidas also installs `dinov3` in the Cellpose environment so
+`cpdino` and `cpdino-vitb` can be selected.
 
 ### Environment Selection Behavior
 
@@ -79,6 +83,21 @@ End timepoint index (0-based, inclusive). `-1` means last timepoint.
 ### `timepoint_step` (int, default: `1`)
 
 Process every Nth timepoint.
+
+### `model_type` (string, default: `"cpsam_v2"`)
+
+Cellpose model variant to run.
+
+- `cpsam_v2`: recommended default (updated Cellpose-SAM model)
+- `cpsam`: legacy Cellpose-SAM model
+- `cpdino`: Cellpose Dino model
+- `cpdino-vitb`: smaller Dino ViT-B model
+
+`cpdino` variants require `dinov3`:
+
+```bash
+python -m pip install git+https://github.com/facebookresearch/dinov3
+```
 
 ### `diameter` (float, default: `0.0`, range: `0.0-200.0`)
 

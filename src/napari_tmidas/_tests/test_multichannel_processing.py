@@ -137,6 +137,28 @@ class TestChannelDetection:
                 str(path), image, channel_param="all", dimension_order_hint="Auto"
             )
 
+    def test_resolve_cellpose_dim_order_tiff_qyx_falls_back_to_zyx(self, tmp_path):
+        """Unknown TIFF axes (QYX) should fall back to shape-based ZYX for 3D stacks."""
+        image = np.random.randint(0, 255, size=(57, 32, 32), dtype=np.uint8)
+        path = tmp_path / "cellpose_qyx.tif"
+        tifffile.imwrite(path, image)
+
+        dim_order = resolve_cellpose_dim_order(
+            str(path), image, channel_param="all", dimension_order_hint="QYX"
+        )
+        assert dim_order == "ZYX"
+
+    def test_resolve_cellpose_dim_order_explicit_hint_takes_precedence(self, tmp_path):
+        """User-provided dimension_order hint should override ambiguous metadata."""
+        image = np.random.randint(0, 255, size=(57, 32, 32), dtype=np.uint8)
+        path = tmp_path / "cellpose_explicit_hint.tif"
+        tifffile.imwrite(path, image)
+
+        dim_order = resolve_cellpose_dim_order(
+            str(path), image, channel_param="all", dimension_order_hint="ZYX"
+        )
+        assert dim_order == "ZYX"
+
     def test_no_channel_dimension_3d(self):
         """Test 3D image without channel dimension (ZYX)"""
         image = np.random.rand(50, 100, 100)

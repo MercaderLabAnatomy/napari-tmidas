@@ -53,6 +53,14 @@ from napari_tmidas.processing_functions.ome_output_utils import (
 )
 
 
+SUPPORTED_CELLPOSE_MODELS = [
+    "cpsam_v2",
+    "cpsam",
+    "cpdino",
+    "cpdino-vitb",
+]
+
+
 def transpose_dimensions(img, dim_order):
     """
     Transpose image dimensions to match expected Cellpose input.
@@ -114,8 +122,9 @@ def transpose_dimensions(img, dim_order):
         },
         "dim_order": {
             "type": str,
-            "default": "YX",
-            "description": "Dimension order of the input (e.g., 'YX', 'ZYX', 'TZYX')",
+            "default": "Auto",
+            "options": ["Auto", "YX", "ZYX", "TYX", "TZYX"],
+            "description": "Dimension order of the input. Use Auto to infer from file metadata/shape.",
         },
         "timepoint_start": {
             "type": int,
@@ -137,6 +146,13 @@ def transpose_dimensions(img, dim_order):
             "min": 1,
             "max": 100,
             "description": "Take every Nth timepoint (1 = all, 2 = every other, etc.).",
+        },
+        "model_type": {
+            "type": str,
+            "default": "cpsam_v2",
+            "options": SUPPORTED_CELLPOSE_MODELS,
+            "choices": SUPPORTED_CELLPOSE_MODELS,
+            "description": "Cellpose foundation model to use. cpsam_v2 is the recommended default. cpdino variants require dinov3 in the Cellpose environment.",
         },
         # "channel_1": {
         #     "type": int,
@@ -291,6 +307,7 @@ def cellpose_segmentation(
     dim_order: str = "YX",
     channel_1: int = 0,
     channel_2: int = 0,
+    model_type: str = "cpsam_v2",
     flow_threshold: float = 0.4,
     cellprob_threshold: float = 0.0,
     anisotropy: Union[float, None] = None,
@@ -363,9 +380,19 @@ def cellpose_segmentation(
 
     print(
         "Cellpose runtime options: "
+        f"model_type={model_type}, "
         f"distributed_requested={use_distributed_segmentation}, "
         f"source_path={_source_filepath}"
     )
+
+    if not isinstance(model_type, str):
+        raise ValueError("model_type must be a string")
+    model_type = model_type.strip()
+    if model_type not in SUPPORTED_CELLPOSE_MODELS:
+        raise ValueError(
+            "Unsupported model_type "
+            f"'{model_type}'. Supported values: {SUPPORTED_CELLPOSE_MODELS}"
+        )
 
     original_source_filepath = _source_filepath
 
@@ -1184,8 +1211,12 @@ def cellpose_segmentation(
                         same_channel = str(channel) == str(
                             loaded_signature.get("channel", channel)
                         )
+                        loaded_model_type = str(
+                            loaded_signature.get("model_type", model_type)
+                        )
+                        same_model_type = loaded_model_type == str(model_type)
 
-                        if same_source and same_channel:
+                        if same_source and same_channel and same_model_type:
                             distributed_blocksize_yx = int(
                                 loaded_signature.get(
                                     "distributed_blocksize_yx",
@@ -1285,7 +1316,7 @@ def cellpose_segmentation(
                             )
                         else:
                             print(
-                                "Ignoring cached run settings due to source/channel mismatch: "
+                                "Ignoring cached run settings due to source/channel/model mismatch: "
                                 f"{latest_settings}"
                             )
                     except Exception as exc:
@@ -1377,6 +1408,7 @@ def cellpose_segmentation(
             run_signature = {
                 "source": _source_signature_id(_source_filepath),
                 "channel": channel,
+                "model_type": str(model_type),
                 "distributed_blocksize_yx": int(distributed_blocksize_yx),
                 "flow_threshold": float(flow_threshold),
                 "cellprob_threshold": float(cellprob_threshold),
@@ -1734,6 +1766,7 @@ def cellpose_segmentation(
                     "zarr_key": None,
                     "timepoint_index": t,
                     "channel": channel,
+                    "model_type": model_type,
                     "channels": channels,
                     "flow_threshold": flow_threshold,
                     "cellprob_threshold": cellprob_threshold,
@@ -1988,6 +2021,7 @@ def cellpose_segmentation(
             "zarr_path": _source_filepath,
             "zarr_key": None,  # Could be enhanced to support specific keys
             "channel": channel,  # Pass channel selection for filtering
+            "model_type": model_type,
             "channels": channels,
             "flow_threshold": flow_threshold,
             "cellprob_threshold": cellprob_threshold,
@@ -2032,6 +2066,7 @@ def cellpose_segmentation(
                 "source": _source_signature_id(_source_filepath),
                 "source_mtime": os.path.getmtime(_source_filepath),
                 "channel": channel,
+                "model_type": model_type,
                 "flow_threshold": float(flow_threshold),
                 "cellprob_threshold": float(cellprob_threshold),
                 "flow3D_smooth": int(flow3D_smooth),
@@ -2090,6 +2125,7 @@ def cellpose_segmentation(
         is_3d = "Z" in dim_order
         args = {
             "image": image,
+            "model_type": model_type,
             "channels": channels,
             "flow_threshold": flow_threshold,
             "cellprob_threshold": cellprob_threshold,
