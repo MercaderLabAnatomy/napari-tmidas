@@ -226,10 +226,11 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
   - Decrease `flow_threshold` (stricter flow error tolerance)
   - For 3D data, try increasing `flow3D_smooth` to smooth flow fields
 
-### Handle Anisotropy Carefully
+### Anisotropy
 
-- Verify Z spacing versus XY pixel size
-- Set `anisotropy` accordingly for 3D data
+- Leave at default `1.0` for most cases
+- Only adjust if you encounter Z-axis segmentation artifacts
+- Changing anisotropy from the default can sometimes cause problems, so verify carefully before adjusting
 
 ### Manage Memory
 
