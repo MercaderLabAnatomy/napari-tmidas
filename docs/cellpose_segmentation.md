@@ -108,7 +108,7 @@ Optional object diameter in pixels.
 
 ### `flow_threshold` (float, default: `0.4`, range: `0.1-0.9`)
 
-Flow threshold for detection sensitivity.
+Maximum allowed flow error per mask. For 2D, increase for more ROIs and decrease to reject ill-shaped masks. In Cellpose 3D mode, this parameter is ignored by Cellpose.
 
 ### `cellprob_threshold` (float, default: `0.0`, range: `-6.0 to 6.0`)
 
@@ -120,7 +120,7 @@ Rescaling factor for 3D anisotropy: `anisotropy = z-step / xy-pixel-size`.
 
 ### `flow3D_smooth` (int, default: `0`, range: `0-10`)
 
-Gaussian smoothing for 3D flow fields.
+Gaussian smoothing for 3D flow fields. Useful when 3D masks are fragmented or show ring-like artifacts.
 
 ### `tile_norm_blocksize` (int, default: `128`, range: `32-512`)
 
@@ -219,12 +219,14 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 
 ### Tune Sensitivity
 
-- Too many false positives: increase `flow_threshold`
-- Missing cells: decrease `flow_threshold`
-- Over-splitting cells: 
-  - Increase `cellprob_threshold` (stricter probability threshold)
-  - Decrease `flow_threshold` (stricter flow error tolerance)
-  - For 3D data, try increasing `flow3D_smooth` to smooth flow fields
+- 2D data:
+  - Missing cells (too few ROIs): increase `flow_threshold` and/or decrease `cellprob_threshold`
+  - Too many dim/background ROIs: increase `cellprob_threshold`
+  - Too many ill-shaped or fragmented ROIs: decrease `flow_threshold`
+- 3D data:
+  - Cellpose ignores `flow_threshold` in 3D mode
+  - If masks are fragmented or ring-like, increase `flow3D_smooth`
+  - Use post-filtering by object size to remove small false positives
 
 ### Anisotropy
 
