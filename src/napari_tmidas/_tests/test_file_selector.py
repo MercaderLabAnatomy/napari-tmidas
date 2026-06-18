@@ -5,7 +5,11 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from napari_tmidas._file_selector import ProcessingWorker, file_selector
+from napari_tmidas._file_selector import (
+    FileResultsWidget,
+    ProcessingWorker,
+    file_selector,
+)
 from napari_tmidas._registry import BatchProcessingRegistry
 
 
@@ -88,3 +92,33 @@ class TestFileSelector:
         # Test the widget can be called
         result = file_selector(viewer_mock, "/tmp", ".tif")
         assert isinstance(result, list)
+
+    def test_thread_controls_hidden_when_locked(self):
+        """Thread controls should be hidden when the thread count is fixed."""
+        dummy = Mock()
+        dummy._thread_locked_by_function = True
+        dummy._thread_locked_by_gpu = False
+        dummy.thread_count_label = Mock()
+        dummy.thread_count = Mock()
+
+        FileResultsWidget._refresh_thread_count_visibility(dummy)
+
+        dummy.thread_count_label.setVisible.assert_called_once_with(False)
+        dummy.thread_count.setVisible.assert_called_once_with(False)
+        dummy.thread_count.setValue.assert_called_once_with(1)
+        dummy.thread_count.setEnabled.assert_called_once_with(False)
+
+    def test_thread_controls_visible_when_unlocked(self):
+        """Thread controls should be visible and enabled when user-adjustable."""
+        dummy = Mock()
+        dummy._thread_locked_by_function = False
+        dummy._thread_locked_by_gpu = False
+        dummy.thread_count_label = Mock()
+        dummy.thread_count = Mock()
+
+        FileResultsWidget._refresh_thread_count_visibility(dummy)
+
+        dummy.thread_count_label.setVisible.assert_called_once_with(True)
+        dummy.thread_count.setVisible.assert_called_once_with(True)
+        dummy.thread_count.setEnabled.assert_called_once_with(True)
+        dummy.thread_count.setValue.assert_not_called()

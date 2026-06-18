@@ -3315,8 +3315,8 @@ class FileResultsWidget(QWidget):
 
         # Thread count selector
         thread_layout = QHBoxLayout()
-        thread_label = QLabel("Number of threads:")
-        thread_layout.addWidget(thread_label)
+        self.thread_count_label = QLabel("Number of threads:")
+        thread_layout.addWidget(self.thread_count_label)
 
         self.thread_count = QSpinBox()
         self.thread_count.setMinimum(1)
@@ -3327,6 +3327,10 @@ class FileResultsWidget(QWidget):
             max(1, (os.cpu_count() or 4) // 2)
         )  # Default to half of available CPU cores
         thread_layout.addWidget(self.thread_count)
+
+        # Track thread-control locks from function constraints and GPU mode.
+        self._thread_locked_by_function = False
+        self._thread_locked_by_gpu = False
 
         output_layout.addLayout(thread_layout)
 
@@ -3389,8 +3393,8 @@ class FileResultsWidget(QWidget):
 
         # Disable threading controls for folder functions
         if is_folder_function:
+            self._thread_locked_by_function = True
             self.thread_count.setValue(1)
-            self.thread_count.setEnabled(False)
             # More specific tooltip for ultrack
             if "ultrack" in function_name.lower():
                 self.thread_count.setToolTip(
@@ -3416,12 +3420,15 @@ class FileResultsWidget(QWidget):
             )
         else:
             # Re-enable threading controls for normal functions
-            self.thread_count.setEnabled(True)
+            self._thread_locked_by_function = False
             self.thread_count.setToolTip(
                 "Number of threads to use for parallel processing"
             )
             self.function_description.setStyleSheet("")  # Reset styling
             self.function_description.setText(description)
+
+        # Default to no GPU lock unless use_cpu parameter updates it.
+        self._thread_locked_by_gpu = False
 
         # Get parameters
         parameters = function_info.get("parameters", {})
@@ -3467,6 +3474,8 @@ class FileResultsWidget(QWidget):
             if "use_cpu" in parameters:
                 use_cpu_value = parameters["use_cpu"].get("default", False)
                 self._update_thread_count_for_gpu(use_cpu_value)
+            else:
+                self._refresh_thread_count_visibility()
         else:
             self._param_scroll_area = None
             # Create empty widget if no parameters
@@ -3476,6 +3485,7 @@ class FileResultsWidget(QWidget):
             self.parameters_widget.layout().addWidget(
                 self.param_widget_instance
             )
+            self._refresh_thread_count_visibility()
 
     def _maybe_apply_cached_cellpose_settings(self, function_name: str):
         """Populate Cellpose parameters from the most recent cached run settings."""
@@ -3551,18 +3561,31 @@ class FileResultsWidget(QWidget):
         When GPU is used (use_cpu=False), limit to single thread.
         """
         if use_cpu:
-            # CPU mode: enable thread count selection
-            self.thread_count.setEnabled(True)
+            # CPU mode: allow thread count selection unless function lock applies.
+            self._thread_locked_by_gpu = False
             self.thread_count.setToolTip(
                 "Number of threads to use for parallel processing"
             )
         else:
             # GPU mode: limit to single thread
+            self._thread_locked_by_gpu = True
             self.thread_count.setValue(1)
-            self.thread_count.setEnabled(False)
             self.thread_count.setToolTip(
                 "GPU processing requires single thread (automatically set to 1)"
             )
+        self._refresh_thread_count_visibility()
+
+    def _refresh_thread_count_visibility(self):
+        """Show thread controls only when the value is user-adjustable."""
+        thread_locked = self._thread_locked_by_function or self._thread_locked_by_gpu
+        self.thread_count_label.setVisible(not thread_locked)
+        self.thread_count.setVisible(not thread_locked)
+
+        if thread_locked:
+            self.thread_count.setValue(1)
+            self.thread_count.setEnabled(False)
+        else:
+            self.thread_count.setEnabled(True)
 
     def start_batch_processing(self):
         """
