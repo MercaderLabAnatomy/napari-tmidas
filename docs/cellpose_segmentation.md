@@ -134,9 +134,18 @@ Number of slices/images processed together.
 
 Enable distributed blockwise Cellpose for large zarr datasets, including large 3D volumes and large 2D planes such as whole-slide-style images.
 
-### `distributed_blocksize` (int, default: `256`, range: `64-1024`)
+### `distributed_blocksize_yx` (int, default: `256`, range: `64-1024`)
 
 Distributed block edge size (voxels).
+
+### `distributed_n_workers` (int, default: `1`, range: `1-16`)
+
+Number of distributed workers used by Cellpose block processing.
+
+- `1`: single-worker distributed mode (typically one GPU active)
+- `2+`: enables concurrent block workers; napari-tmidas assigns one CUDA device per worker in round-robin order when GPUs are available
+
+Note: Cellpose distributed execution is block-level parallelism. It does not split one block across multiple GPUs.
 
 ### `use_convpaint_auto_mask` (bool, default: `False`)
 
@@ -223,6 +232,7 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 
 - Reduce `batch_size` if memory is tight
 - Use `use_distributed_segmentation` for large zarr volumes or very large 2D zarr planes
+- Increase `distributed_n_workers` to leverage multiple GPUs with distributed mode (one worker per GPU is the usual starting point)
 - In distributed mode, non-zarr inputs are auto-converted to temporary zarr (v3 by default)
 
 ### Mixed TCZYX and TZCYX Inputs

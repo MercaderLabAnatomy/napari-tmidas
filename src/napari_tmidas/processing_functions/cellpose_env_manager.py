@@ -569,6 +569,12 @@ def run_zarr_processing(zarr_path, args_dict):
             "Please adjust folder permissions."
         )
 
+    try:
+        distributed_n_workers = int(args_dict.get("distributed_n_workers", 1))
+    except (TypeError, ValueError):
+        distributed_n_workers = 1
+    distributed_n_workers = max(1, distributed_n_workers)
+
     # If the caller provides a stable zarr output path (e.g. per-timepoint cache),
     # write directly there. Otherwise create a temporary zarr dir that we delete
     # after reading the result back.
@@ -598,6 +604,8 @@ from cellpose import models, core
 import tifffile
 import zarr
 import os as _os
+import torch
+import distributed
 
 # Force output to flush immediately for real-time progress
 import sys
@@ -722,6 +730,116 @@ if _ANISOTROPY and _ANISOTROPY != 1.0:
 _MODEL_KWARGS = {{'gpu': {args_dict.get('use_gpu', True)}}}
 _MODEL_TYPE = {repr(args_dict.get('model_type', 'cpsam_v2'))}
 
+_WORKER_GPU_AFFINITY = {{}}
+
+
+def _parse_worker_index(worker_name: str) -> int:
+    text = str(worker_name or "")
+    digits = ""
+    for ch in reversed(text):
+        if ch.isdigit():
+            digits = ch + digits
+        elif digits:
+            break
+    if digits:
+        try:
+            return int(digits)
+        except Exception:
+            pass
+    return abs(hash(text))
+
+
+def _assign_worker_gpu(model_kwargs: dict):
+    # Assign one CUDA device per worker process when possible.
+    if not bool(model_kwargs.get('gpu', False)):
+        return
+    if not torch.cuda.is_available():
+        return
+
+    ngpu = int(torch.cuda.device_count())
+    if ngpu <= 0:
+        return
+
+    try:
+        worker = distributed.get_worker()
+        worker_name = str(getattr(worker, 'name', 'unknown'))
+    except Exception:
+        worker_name = 'main'
+
+    if worker_name in _WORKER_GPU_AFFINITY:
+        gpu_id = int(_WORKER_GPU_AFFINITY[worker_name])
+    else:
+        worker_index = _parse_worker_index(worker_name)
+        gpu_id = int(worker_index % ngpu)
+        _WORKER_GPU_AFFINITY[worker_name] = gpu_id
+        print(
+            f"GPU affinity: worker={{worker_name}} assigned cuda:{{gpu_id}} "
+            f"(available={{ngpu}})",
+            flush=True,
+        )
+
+    try:
+        torch.cuda.set_device(gpu_id)
+    except Exception as _gpu_exc:
+        print(
+            f"Warning: failed to set torch CUDA device cuda:{{gpu_id}} "
+            f"for worker={{worker_name}} ({{_gpu_exc}})",
+            flush=True,
+        )
+        return
+
+    model_kwargs['device'] = torch.device(f'cuda:{{gpu_id}}')
+    model_kwargs['gpu'] = True
+
+
+def _patch_read_preprocess_for_gpu_affinity():
+    # Patch Cellpose distributed worker function to apply GPU affinity.
+    if not USE_DISTRIBUTED:
+        return
+    if not bool(_MODEL_KWARGS.get('gpu', False)):
+        return
+
+    try:
+        from cellpose.contrib import distributed_segmentation as _cpds
+    except Exception as _patch_exc:
+        print(
+            f"Warning: could not import distributed_segmentation for GPU affinity patch ({{_patch_exc}})",
+            flush=True,
+        )
+        return
+
+    if not hasattr(_cpds, 'read_preprocess_and_segment'):
+        return
+    if getattr(_cpds.read_preprocess_and_segment, '__name__', '') == '_tmidas_read_preprocess_and_segment':
+        return
+
+    _orig_read_preprocess = _cpds.read_preprocess_and_segment
+
+    def _tmidas_read_preprocess_and_segment(
+        input_zarr,
+        crop,
+        preprocessing_steps,
+        model_kwargs,
+        eval_kwargs,
+        worker_logs_directory,
+    ):
+        patched_model_kwargs = dict(model_kwargs)
+        _assign_worker_gpu(patched_model_kwargs)
+        return _orig_read_preprocess(
+            input_zarr,
+            crop,
+            preprocessing_steps,
+            patched_model_kwargs,
+            eval_kwargs,
+            worker_logs_directory,
+        )
+
+    _cpds.read_preprocess_and_segment = _tmidas_read_preprocess_and_segment
+    print("Applied worker-level GPU affinity patch for distributed Cellpose", flush=True)
+
+
+_patch_read_preprocess_for_gpu_affinity()
+
 if _MODEL_TYPE in ('cpdino', 'cpdino-vitb'):
     try:
         import importlib.util as _importlib_util
@@ -737,7 +855,7 @@ if _MODEL_TYPE in ('cpdino', 'cpdino-vitb'):
 _DASK_LOCAL_DIR = _get_writable_tmp_dir()
 _TMP_BASE_DIR = _DASK_LOCAL_DIR
 _CLUSTER_KWARGS = {{
-    'n_workers': 1,
+    'n_workers': {distributed_n_workers},
     'ncpus': 4,
     'memory_limit': '32GB',
     'threads_per_worker': 1,
@@ -748,6 +866,7 @@ _CLUSTER_KWARGS = {{
 }}
 print(f"Dask local_directory: {{_DASK_LOCAL_DIR}}")
 print(f"Temporary artifacts base dir: {{_TMP_BASE_DIR}}")
+print(f"Distributed worker count: {{_CLUSTER_KWARGS['n_workers']}}")
 sys.stdout.flush()
 
 _DISTRIBUTED_MASK = None

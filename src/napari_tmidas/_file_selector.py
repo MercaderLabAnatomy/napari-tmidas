@@ -147,6 +147,23 @@ def _channel_detection_log(message: str, verbose_only: bool = False) -> None:
         return
     print(message)
 
+
+def _enhance_processing_error_message(error_msg: str) -> str:
+    """Add user-facing diagnostics for common subprocess failure signatures."""
+    message = str(error_msg)
+    lower = message.lower()
+
+    # In subprocess-based Cellpose runs, return code -9 means SIGKILL.
+    # The most common cause is host/GPU out-of-memory during model eval.
+    if "cellpose failed with return code -9" in lower or "return code -9" in lower:
+        return (
+            f"{message} | Likely cause: process was killed (SIGKILL), usually due to "
+            "out-of-memory (RAM or VRAM). Try distributed mode, smaller batch size, "
+            "or smaller block size."
+        )
+
+    return message
+
 # Create stub base classes when dependencies are missing
 if not _HAS_QTPY:
     # Create minimal stubs to allow class definitions
@@ -3134,6 +3151,9 @@ class ProcessingWorker(QThread):
         except Exception as e:
             # Log the error and re-raise to be caught by the executor
             print(f"Error processing {filepath}: {e}")
+            enhanced_error = _enhance_processing_error_message(str(e))
+            if enhanced_error != str(e):
+                print(f"Diagnostic: {enhanced_error}")
             import traceback
 
             traceback.print_exc()
@@ -3730,8 +3750,9 @@ class FileResultsWidget(QWidget):
 
     def processing_error(self, filepath, error_msg):
         """Handle processing errors"""
-        print(f"Error processing {filepath}: {error_msg}")
-        self.viewer.status = f"Error processing {filepath}: {error_msg}"
+        enhanced_error = _enhance_processing_error_message(error_msg)
+        print(f"Error processing {filepath}: {enhanced_error}")
+        self.viewer.status = f"Error processing {filepath}: {enhanced_error}"
 
     def cancel_processing(self):
         """Cancel the current processing operation"""

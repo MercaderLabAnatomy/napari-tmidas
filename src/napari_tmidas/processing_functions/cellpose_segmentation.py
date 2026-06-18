@@ -229,6 +229,13 @@ def transpose_dimensions(img, dim_order):
             "max": 1024,
             "description": "YX block edge length (voxels) for distributed segmentation. The Z block size is set automatically to the full Z extent of each slab, so the block grid is always 1 layer deep in Z. Only used when use_distributed_segmentation=True.",
         },
+        "distributed_n_workers": {
+            "type": int,
+            "default": 1,
+            "min": 1,
+            "max": 16,
+            "description": "Number of distributed workers for Cellpose block processing. Each worker can use one GPU, depending on your CUDA visibility and Dask worker-to-device assignment. Increase for multi-GPU workstations.",
+        },
         "use_convpaint_auto_mask": {
             "type": bool,
             "default": False,
@@ -317,6 +324,7 @@ def cellpose_segmentation(
     diameter: float = 0.0,
     use_distributed_segmentation: bool = False,
     distributed_blocksize_yx: int = 256,
+    distributed_n_workers: int = 1,
     use_convpaint_auto_mask: bool = False,
     convpaint_model_path: str = "",
     convpaint_image_downsample: int = 4,
@@ -382,8 +390,15 @@ def cellpose_segmentation(
         "Cellpose runtime options: "
         f"model_type={model_type}, "
         f"distributed_requested={use_distributed_segmentation}, "
+        f"distributed_n_workers={int(distributed_n_workers)}, "
         f"source_path={_source_filepath}"
     )
+
+    try:
+        distributed_n_workers = int(distributed_n_workers)
+    except (TypeError, ValueError):
+        distributed_n_workers = 1
+    distributed_n_workers = max(1, distributed_n_workers)
 
     if not isinstance(model_type, str):
         raise ValueError("model_type must be a string")
@@ -1126,6 +1141,7 @@ def cellpose_segmentation(
                 diameter=diameter,
                 use_distributed_segmentation=use_distributed_segmentation,
                 distributed_blocksize_yx=distributed_blocksize_yx,
+                distributed_n_workers=distributed_n_workers,
                 use_convpaint_auto_mask=use_convpaint_auto_mask,
                 convpaint_model_path=convpaint_model_path,
                 convpaint_image_downsample=convpaint_image_downsample,
@@ -1221,6 +1237,12 @@ def cellpose_segmentation(
                                 loaded_signature.get(
                                     "distributed_blocksize_yx",
                                     distributed_blocksize_yx,
+                                )
+                            )
+                            distributed_n_workers = int(
+                                loaded_signature.get(
+                                    "distributed_n_workers",
+                                    distributed_n_workers,
                                 )
                             )
                             flow_threshold = float(
@@ -1410,6 +1432,7 @@ def cellpose_segmentation(
                 "channel": channel,
                 "model_type": str(model_type),
                 "distributed_blocksize_yx": int(distributed_blocksize_yx),
+                "distributed_n_workers": int(distributed_n_workers),
                 "flow_threshold": float(flow_threshold),
                 "cellprob_threshold": float(cellprob_threshold),
                 "anisotropy": (
@@ -1781,6 +1804,7 @@ def cellpose_segmentation(
                     "channel_axis": None,
                     "use_distributed_segmentation": run_distributed_for_slab,
                     "distributed_blocksize_yx": current_distributed_blocksize,
+                    "distributed_n_workers": int(distributed_n_workers),
                     "distributed_blocksize_z": int(slab_shape[0]),
                     "distributed_mask_path": (
                         slab_mask_path if use_slab_mask else None
@@ -2009,7 +2033,8 @@ def cellpose_segmentation(
         if use_distributed_segmentation:
             print(
                 "Distributed segmentation requested: enabled "
-                f"(blocksize={distributed_blocksize_yx})"
+                f"(blocksize={distributed_blocksize_yx}, "
+                f"workers={distributed_n_workers})"
             )
             print(
                 "Status: preparing blockwise Cellpose processing. "
@@ -2036,6 +2061,7 @@ def cellpose_segmentation(
             "channel_axis": None,  # No channel axis for single-channel grayscale images
             "use_distributed_segmentation": use_distributed_segmentation,
             "distributed_blocksize_yx": distributed_blocksize_yx,
+            "distributed_n_workers": int(distributed_n_workers),
             "distributed_blocksize_z": int(image.shape[dim_order.index("Z")]) if "Z" in dim_order else int(distributed_blocksize_yx),
             "distributed_mask_path": generated_mask_path,
             "distributed_mask_zarr_path": generated_mask_zarr_path,
@@ -2076,6 +2102,7 @@ def cellpose_segmentation(
                 "diameter": float(diameter),
                 "use_distributed_segmentation": bool(use_distributed_segmentation),
                 "distributed_blocksize_yx": int(distributed_blocksize_yx),
+                "distributed_n_workers": int(distributed_n_workers),
                 "use_convpaint_auto_mask": bool(use_convpaint_auto_mask),
                 "convpaint_model_path": convpaint_model_path,
                 "convpaint_image_downsample": int(convpaint_image_downsample),
