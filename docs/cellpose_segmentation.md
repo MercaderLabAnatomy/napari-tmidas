@@ -221,7 +221,10 @@ Z-batching for ConvPaint mask generation (`0` disables batching).
 
 - Too many false positives: increase `flow_threshold`
 - Missing cells: decrease `flow_threshold`
-- Over-splitting: increase `cellprob_threshold`
+- Over-splitting cells: 
+  - Increase `cellprob_threshold` (stricter probability threshold)
+  - Decrease `flow_threshold` (stricter flow error tolerance)
+  - For 3D data, try increasing `flow3D_smooth` to smooth flow fields
 
 ### Handle Anisotropy Carefully
 
