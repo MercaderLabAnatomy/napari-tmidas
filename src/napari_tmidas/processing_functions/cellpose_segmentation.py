@@ -15,6 +15,7 @@ import os
 import shutil
 import time
 import glob
+import re
 from contextlib import suppress
 from tempfile import NamedTemporaryFile
 from typing import Union
@@ -497,16 +498,23 @@ def cellpose_segmentation(
 
     def _direct_output_path() -> Union[str, None]:
         source_for_output = original_source_filepath or _source_filepath
-        if not (_output_folder and _output_suffix and source_for_output):
+        if not source_for_output:
             return None
+
+        # Fallbacks keep output writing automatic even when the widget omits
+        # explicit destination fields (for example in resumed interleaved runs).
+        effective_output_folder = _output_folder or os.path.dirname(
+            os.path.abspath(source_for_output)
+        )
+        effective_output_suffix = _output_suffix or "_cp_labels"
 
         source_base = os.path.splitext(
             os.path.basename(source_for_output)
         )[0]
         output_ext = ".zarr" if _output_format == "zarr" else ".tif"
         return os.path.join(
-            _output_folder,
-            f"{source_base}{_output_suffix}{output_ext}",
+            effective_output_folder,
+            f"{source_base}{effective_output_suffix}{output_ext}",
         )
 
     def _legacy_output_candidates() -> list:
@@ -558,8 +566,96 @@ def cellpose_segmentation(
 
         return os.path.exists(path)
 
+    def _recover_tiff_from_cached_timepoint_zarr(
+        slab_output_root: str,
+        output_path: str,
+        selected_timepoints: Union[list, None] = None,
+    ) -> str:
+        if not slab_output_root or not os.path.isdir(slab_output_root):
+            raise RuntimeError(
+                "No slab cache directory is available for fallback recovery"
+            )
+
+        timepoint_pattern = re.compile(r"^t(\d+)_labels\.zarr$")
+        discovered = {}
+        for name in os.listdir(slab_output_root):
+            match = timepoint_pattern.match(name)
+            if not match:
+                continue
+            t_index = int(match.group(1))
+            discovered[t_index] = os.path.join(slab_output_root, name)
+
+        if not discovered:
+            raise RuntimeError(
+                "No cached timepoint zarr slabs found for fallback recovery"
+            )
+
+        if selected_timepoints:
+            ordered_t = [int(v) for v in selected_timepoints if int(v) in discovered]
+            if len(ordered_t) != len(selected_timepoints):
+                missing = sorted(set(int(v) for v in selected_timepoints) - set(ordered_t))
+                raise RuntimeError(
+                    "Missing cached slabs for selected timepoints: "
+                    f"{missing}"
+                )
+        else:
+            ordered_t = sorted(discovered.keys())
+
+        first_obj = zarr.open(discovered[ordered_t[0]], mode="r")
+        first_arr = first_obj if hasattr(first_obj, "shape") else first_obj["0"]
+        slab_shape = tuple(int(s) for s in first_arr.shape)
+        if len(slab_shape) not in (2, 3):
+            raise RuntimeError(
+                "Fallback recovery currently supports cached slabs with 2D or 3D shapes; "
+                f"got {slab_shape}"
+            )
+
+        output_shape = (len(ordered_t), *slab_shape)
+        output_dtype = np.uint32
+
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(output_dir, exist_ok=True)
+        tmp_output_path = os.path.join(
+            output_dir,
+            f".{os.path.basename(output_path)}.recover-tmp-{os.getpid()}-{time.time_ns()}",
+        )
+
+        def _iter_planes():
+            for t in ordered_t:
+                slab_obj = zarr.open(discovered[t], mode="r")
+                slab_arr = slab_obj if hasattr(slab_obj, "shape") else slab_obj["0"]
+                slab_arr_shape = tuple(int(s) for s in slab_arr.shape)
+                if slab_arr_shape != slab_shape:
+                    raise RuntimeError(
+                        f"Cached slab shape mismatch at t={t}: {slab_arr_shape} vs {slab_shape}"
+                    )
+
+                if len(slab_shape) == 2:
+                    yield np.asarray(slab_arr, dtype=output_dtype)
+                else:
+                    for z_idx in range(slab_shape[0]):
+                        yield np.asarray(slab_arr[z_idx], dtype=output_dtype)
+
+        axes = "TYX" if len(slab_shape) == 2 else "TZYX"
+        tifffile.imwrite(
+            tmp_output_path,
+            data=_iter_planes(),
+            shape=output_shape,
+            dtype=output_dtype,
+            ome=True,
+            metadata={"axes": axes},
+            compression="zlib",
+            photometric="minisblack",
+            bigtiff=True,
+        )
+        os.replace(tmp_output_path, output_path)
+        return output_path
+
     def _write_interleaved_checkpoint_output(
-        checkpoint: zarr.Array, checkpoint_path: str
+        checkpoint: zarr.Array,
+        checkpoint_path: str,
+        slab_output_root: Union[str, None] = None,
+        selected_timepoints: Union[list, None] = None,
     ) -> Union[str, None]:
         output_path = _direct_output_path()
         if not output_path:
@@ -591,14 +687,32 @@ def cellpose_segmentation(
                     return legacy_output
 
         os.makedirs(_output_folder, exist_ok=True)
-        write_labels_with_source_metadata(
-            labels=checkpoint,
-            source_path=original_source_filepath or _source_filepath,
-            output_path=output_path,
-            output_format=_output_format,
-            dim_order=dim_order,
-        )
-        print(f"Saved interleaved output to: {output_path}")
+        try:
+            write_labels_with_source_metadata(
+                labels=checkpoint,
+                source_path=original_source_filepath or _source_filepath,
+                output_path=output_path,
+                output_format=_output_format,
+                dim_order=dim_order,
+            )
+            print(f"Saved interleaved output to: {output_path}")
+        except Exception as exc:
+            output_format = str(_output_format or "tiff").lower()
+            can_recover_tiff = output_format in {"tif", "tiff"}
+            if not can_recover_tiff:
+                raise
+
+            print(
+                "Warning: final interleaved output write failed; "
+                "attempting immediate fallback recovery from cached slabs "
+                f"({exc})"
+            )
+            recovered = _recover_tiff_from_cached_timepoint_zarr(
+                slab_output_root=slab_output_root,
+                output_path=output_path,
+                selected_timepoints=selected_timepoints,
+            )
+            print(f"Recovered interleaved output from cached slabs to: {recovered}")
         return output_path
 
     # Prefer direct zarr processing when a source zarr path is available.
@@ -2002,7 +2116,10 @@ def cellpose_segmentation(
                 )
 
             direct_output = _write_interleaved_checkpoint_output(
-                checkpoint, checkpoint_path
+                checkpoint,
+                checkpoint_path,
+                slab_output_root=slab_output_root,
+                selected_timepoints=selected_timepoints,
             )
             if direct_output:
                 return direct_output
