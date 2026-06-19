@@ -69,9 +69,10 @@ def write_labels_with_source_metadata(
         src_n_levels = max(int(len(src_datasets)), 1)
 
         axes = str(dim_order or "YX").lower()
-        if len(axes) != getattr(labels, "ndim", np.asarray(labels).ndim):
+        labels_ndim = labels.ndim if hasattr(labels, "ndim") else np.asarray(labels).ndim
+        if len(axes) != labels_ndim:
             fallback = {2: "yx", 3: "zyx", 4: "tzyx", 5: "tczyx"}
-            axes = fallback.get(getattr(labels, "ndim", np.asarray(labels).ndim), "yx")
+            axes = fallback.get(labels_ndim, "yx")
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         if os.path.exists(output_path):
@@ -91,8 +92,8 @@ def write_labels_with_source_metadata(
             compute=True,
             storage_options={
                 "chunks": tuple(
-                    (1 if i < getattr(labels, "ndim", np.asarray(labels).ndim) - 2 else max(1, min(512, int(s))))
-                    for i, s in enumerate(getattr(labels, "shape", np.asarray(labels).shape))
+                    (1 if i < labels_ndim - 2 else max(1, min(512, int(s))))
+                    for i, s in enumerate(labels.shape if hasattr(labels, "shape") else np.asarray(labels).shape)
                 )
             },
         )
@@ -150,7 +151,7 @@ def write_labels_with_source_metadata(
 
     # OME-TIFF path
     labels_shape = tuple(
-        int(s) for s in getattr(labels, "shape", np.asarray(labels).shape)
+        int(s) for s in (labels.shape if hasattr(labels, "shape") else np.asarray(labels).shape)
     )
     labels_ndim = len(labels_shape)
     size_bytes = int(np.prod(labels_shape, dtype=np.int64)) * np.dtype(labels_dtype).itemsize
@@ -168,23 +169,25 @@ def write_labels_with_source_metadata(
     )
 
     try:
-        # Stream slab-by-slab for large array-like inputs to avoid materializing
-        # the full volume in memory prior to TIFF serialization.
-        can_stream = (
-            not isinstance(labels, np.ndarray)
-            and hasattr(labels, "shape")
-            and labels_ndim > 2
-        )
-
-        if can_stream:
-            # tifffile expects page-wise data chunks for multidimensional OME
-            # writes; yield YX planes in C order across all leading indices.
+        if isinstance(labels, np.ndarray):
+            tifffile.imwrite(
+                tmp_output_path,
+                np.asarray(labels, dtype=labels_dtype),
+                dtype=labels_dtype,
+                ome=True,
+                metadata={"axes": axes},
+                compression="zlib",
+                photometric="minisblack",
+                bigtiff=use_bigtiff,
+            )
+        else:
+            # For array-like backends (e.g. zarr.Array) stream YX planes via a
+            # generator so the full volume is never materialized in RAM.
             def _iter_planes():
                 lead_shape = labels_shape[:-2]
                 if not lead_shape:
                     yield np.asarray(labels, dtype=labels_dtype)
                     return
-
                 for lead_idx in np.ndindex(*lead_shape):
                     yield np.asarray(labels[lead_idx], dtype=labels_dtype)
 
@@ -197,17 +200,6 @@ def write_labels_with_source_metadata(
                 metadata={"axes": axes},
                 compression="zlib",
                 photometric="minisblack",
-                bigtiff=use_bigtiff,
-            )
-        else:
-            arr = np.asarray(labels, dtype=labels_dtype)
-            tifffile.imwrite(
-                tmp_output_path,
-                arr,
-                dtype=labels_dtype,
-                ome=True,
-                metadata={"axes": axes},
-                compression="zlib",
                 bigtiff=use_bigtiff,
             )
 

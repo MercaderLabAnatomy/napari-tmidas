@@ -42,7 +42,7 @@ contributions:
   readers:
     - command: napari-tmidas.get_reader
       accepts_directories: false
-      filename_patterns: ['*.npy']
+      filename_patterns: ['*.npy', '*.tif', '*.tiff']
   writers:
     - command: napari-tmidas.write_multiple
       layer_types: ['image*','labels*']

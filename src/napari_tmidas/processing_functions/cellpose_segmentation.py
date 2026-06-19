@@ -619,28 +619,51 @@ def cellpose_segmentation(
             output_dir,
             f".{os.path.basename(output_path)}.recover-tmp-{os.getpid()}-{time.time_ns()}",
         )
+        tmp_stack_path = os.path.join(
+            output_dir,
+            f".{os.path.basename(output_path)}.recover-stack-{os.getpid()}-{time.time_ns()}.zarr",
+        )
 
-        def _iter_planes():
-            for t in ordered_t:
-                slab_obj = zarr.open(discovered[t], mode="r")
-                slab_arr = slab_obj if hasattr(slab_obj, "shape") else slab_obj["0"]
-                slab_arr_shape = tuple(int(s) for s in slab_arr.shape)
-                if slab_arr_shape != slab_shape:
-                    raise RuntimeError(
-                        f"Cached slab shape mismatch at t={t}: {slab_arr_shape} vs {slab_shape}"
-                    )
+        # Build a temporary stacked zarr array first, then let tifffile write
+        # from that array-like object. This preserves TZYX shape while keeping
+        # peak RAM bounded to one slab.
+        t_chunk = 1
+        if len(slab_shape) == 2:
+            checkpoint_chunks = (
+                t_chunk,
+                max(1, min(1024, slab_shape[0])),
+                max(1, min(1024, slab_shape[1])),
+            )
+        else:
+            checkpoint_chunks = (
+                t_chunk,
+                max(1, min(32, slab_shape[0])),
+                max(1, min(512, slab_shape[1])),
+                max(1, min(512, slab_shape[2])),
+            )
 
-                if len(slab_shape) == 2:
-                    yield np.asarray(slab_arr, dtype=output_dtype)
-                else:
-                    for z_idx in range(slab_shape[0]):
-                        yield np.asarray(slab_arr[z_idx], dtype=output_dtype)
+        recover_stack = zarr.open_array(
+            tmp_stack_path,
+            mode="w",
+            shape=output_shape,
+            chunks=checkpoint_chunks,
+            dtype=output_dtype,
+        )
+
+        for out_idx, t in enumerate(ordered_t):
+            slab_obj = zarr.open(discovered[t], mode="r")
+            slab_arr = slab_obj if hasattr(slab_obj, "shape") else slab_obj["0"]
+            slab_arr_shape = tuple(int(s) for s in slab_arr.shape)
+            if slab_arr_shape != slab_shape:
+                raise RuntimeError(
+                    f"Cached slab shape mismatch at t={t}: {slab_arr_shape} vs {slab_shape}"
+                )
+            recover_stack[out_idx] = np.asarray(slab_arr, dtype=output_dtype)
 
         axes = "TYX" if len(slab_shape) == 2 else "TZYX"
         tifffile.imwrite(
             tmp_output_path,
-            data=_iter_planes(),
-            shape=output_shape,
+            recover_stack,
             dtype=output_dtype,
             ome=True,
             metadata={"axes": axes},
@@ -649,6 +672,7 @@ def cellpose_segmentation(
             bigtiff=True,
         )
         os.replace(tmp_output_path, output_path)
+        shutil.rmtree(tmp_stack_path, ignore_errors=True)
         return output_path
 
     def _write_interleaved_checkpoint_output(
@@ -686,7 +710,8 @@ def cellpose_segmentation(
                     )
                     return legacy_output
 
-        os.makedirs(_output_folder, exist_ok=True)
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(output_dir, exist_ok=True)
         try:
             write_labels_with_source_metadata(
                 labels=checkpoint,
