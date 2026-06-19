@@ -5,6 +5,7 @@ import glob
 
 import numpy as np
 import pytest
+import tifffile
 import zarr
 
 from napari_tmidas._registry import BatchProcessingRegistry
@@ -100,7 +101,10 @@ def test_tyx_timepoint_interval_zarr_direct(tmp_path, monkeypatch):
         _source_filepath=str(zarr_path),
     )
 
-    assert result.shape == (3, 16, 16)
+    # zarr-direct mode saves to a TIFF and returns the output path
+    assert isinstance(result, str)
+    result_data = tifffile.imread(result)
+    assert result_data.shape == (3, 16, 16)
     assert [c.get("timepoint_index") for c in calls] == [0, 2, 4]
     assert all(c.get("zarr_path") == str(zarr_path) for c in calls)
 
@@ -135,7 +139,10 @@ def test_distributed_kept_for_non_z_time_series(tmp_path, monkeypatch):
         _source_filepath=str(zarr_path),
     )
 
-    assert result.shape == (3, 16, 16)
+    # zarr-direct mode saves to a TIFF and returns the output path
+    assert isinstance(result, str)
+    result_data = tifffile.imread(result)
+    assert result_data.shape == (3, 16, 16)
     assert len(calls) == 3
     assert all(
         c.get("use_distributed_segmentation") is True for c in calls
