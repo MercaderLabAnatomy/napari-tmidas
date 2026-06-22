@@ -294,9 +294,11 @@ print(json.dumps(status))
             "-n",
             cls.ENV_NAME,
             "python=3.11",
-            "--no-default-packages",
             "-y",
         ]
+        # `--no-default-packages` is a conda-only flag; mamba rejects it.
+        if os.path.basename(conda_cmd) == "conda":
+            env_create_cmd.insert(-1, "--no-default-packages")
 
         try:
             subprocess.run(env_create_cmd, check=True)
@@ -406,199 +408,117 @@ def create_trackastra_script(
     channel="all",
     dimension_order="Auto",
 ):
-    """Create a Python script to run TrackAstra in the dedicated environment."""
-    
-    # Determine if inputs are zarr files
-    img_is_zarr = str(img_path).lower().endswith(".zarr")
-    mask_is_zarr = str(mask_path).lower().endswith(".zarr")
-    
-    # Build image loading code based on file type
-    if img_is_zarr:
-        img_load_code = f"""
-import zarr
-import os
-print('Loading zarr image: {img_path}')
-def _zarr_group_to_array(zgroup):
-    if hasattr(zgroup, 'shape'):
-        return np.asarray(zgroup)
+    """Create a Python script to run TrackAstra in the dedicated environment.
 
-    if hasattr(zgroup, 'array_keys'):
-        array_keys = list(zgroup.array_keys())
-        if '0' in array_keys:
-            return np.asarray(zgroup['0'])
-        if array_keys:
-            return np.asarray(zgroup[array_keys[0]])
+    The generated script loads images/masks as lazy dask arrays (one task per
+    TIFF page, or ``da.from_zarr`` for zarr) so Trackastra streams feature
+    extraction frame-by-frame, and writes the tracked output one frame at a
+    time. This keeps peak RAM at a few frames instead of the whole TZYX volume.
+    """
 
-    if hasattr(zgroup, 'group_keys'):
-        subgroup_keys = sorted(list(zgroup.group_keys()), key=lambda k: (k != '0', k))
-        for key in subgroup_keys:
-            try:
-                arr = _zarr_group_to_array(zgroup[key])
-                if arr is not None:
-                    return arr
-            except Exception:
-                continue
+    # img/mask loads use a single embedded lazy loader (see _LAZY_LOADERS).
+    img_load_code = f"img = _lazy_load({str(img_path)!r})"
+    mask_load_code = f"mask = _lazy_load({str(mask_path)!r})"
 
-    return None
-
-def _load_zarr_any(path):
-    attempts = []
-
-    def _open_with_kind(kind, location):
-        if kind == 'open':
-            return zarr.open(location, mode='r')
-        if kind == 'open_array':
-            return zarr.open_array(store=location, mode='r')
-        if kind == 'open_group':
-            return zarr.open_group(store=location, mode='r')
-        raise ValueError(f'Unknown zarr opener kind: {{kind}}')
-
-    for kind in ('open', 'open_array', 'open_group'):
-        try:
-            obj = _open_with_kind(kind, path)
-            arr = _zarr_group_to_array(obj)
-            if arr is not None:
-                return arr
-        except Exception as exc:
-            attempts.append(f"{{kind}}({{path}}): {{exc}}")
-
-    level0 = os.path.join(path, '0')
-    for kind in ('open', 'open_array', 'open_group'):
-        try:
-            obj = _open_with_kind(kind, level0)
-            arr = _zarr_group_to_array(obj)
-            if arr is not None:
-                print(f'Loaded zarr via level 0 fallback: {{level0}}')
-                return arr
-        except Exception as exc:
-            attempts.append(f"{{kind}}({{level0}}): {{exc}}")
-
-    # Last resort: look for a direct child directory named "0".
-    try:
-        for child in sorted(os.listdir(path)):
-            child_path = os.path.join(path, child)
-            child_level0 = os.path.join(child_path, '0')
-            if os.path.isdir(child_level0):
-                for kind in ('open', 'open_array', 'open_group'):
-                    try:
-                        obj = _open_with_kind(kind, child_level0)
-                        arr = _zarr_group_to_array(obj)
-                        if arr is not None:
-                            print(f'Loaded zarr via nested level 0 fallback: {{child_level0}}')
-                            return arr
-                    except Exception as exc:
-                        attempts.append(f"{{kind}}({{child_level0}}): {{exc}}")
-    except Exception as exc:
-        attempts.append(f"os.listdir({{path}}): {{exc}}")
-
-    raise RuntimeError(
-        'Unable to load zarr image. Attempts:\\n' + '\\n'.join(attempts)
-    )
-
-img = _load_zarr_any('{img_path}')
-"""
-    else:
-        img_load_code = f"img = imread('{img_path}')"
-    
-    # Build mask loading code based on file type
-    if mask_is_zarr:
-        mask_load_code = f"""
-import zarr
-import os
-print('Loading zarr mask: {mask_path}')
-def _zarr_group_to_array(zgroup):
-    if hasattr(zgroup, 'shape'):
-        return np.asarray(zgroup)
-
-    if hasattr(zgroup, 'array_keys'):
-        array_keys = list(zgroup.array_keys())
-        if '0' in array_keys:
-            return np.asarray(zgroup['0'])
-        if array_keys:
-            return np.asarray(zgroup[array_keys[0]])
-
-    if hasattr(zgroup, 'group_keys'):
-        subgroup_keys = sorted(list(zgroup.group_keys()), key=lambda k: (k != '0', k))
-        for key in subgroup_keys:
-            try:
-                arr = _zarr_group_to_array(zgroup[key])
-                if arr is not None:
-                    return arr
-            except Exception:
-                continue
-
-    return None
-
-def _load_zarr_any(path):
-    attempts = []
-
-    def _open_with_kind(kind, location):
-        if kind == 'open':
-            return zarr.open(location, mode='r')
-        if kind == 'open_array':
-            return zarr.open_array(store=location, mode='r')
-        if kind == 'open_group':
-            return zarr.open_group(store=location, mode='r')
-        raise ValueError(f'Unknown zarr opener kind: {{kind}}')
-
-    for kind in ('open', 'open_array', 'open_group'):
-        try:
-            obj = _open_with_kind(kind, path)
-            arr = _zarr_group_to_array(obj)
-            if arr is not None:
-                return arr
-        except Exception as exc:
-            attempts.append(f"{{kind}}({{path}}): {{exc}}")
-
-    level0 = os.path.join(path, '0')
-    for kind in ('open', 'open_array', 'open_group'):
-        try:
-            obj = _open_with_kind(kind, level0)
-            arr = _zarr_group_to_array(obj)
-            if arr is not None:
-                print(f'Loaded zarr via level 0 fallback: {{level0}}')
-                return arr
-        except Exception as exc:
-            attempts.append(f"{{kind}}({{level0}}): {{exc}}")
-
-    try:
-        for child in sorted(os.listdir(path)):
-            child_path = os.path.join(path, child)
-            child_level0 = os.path.join(child_path, '0')
-            if os.path.isdir(child_level0):
-                for kind in ('open', 'open_array', 'open_group'):
-                    try:
-                        obj = _open_with_kind(kind, child_level0)
-                        arr = _zarr_group_to_array(obj)
-                        if arr is not None:
-                            print(f'Loaded zarr via nested level 0 fallback: {{child_level0}}')
-                            return arr
-                    except Exception as exc:
-                        attempts.append(f"{{kind}}({{child_level0}}): {{exc}}")
-    except Exception as exc:
-        attempts.append(f"os.listdir({{path}}): {{exc}}")
-
-    raise RuntimeError(
-        'Unable to load zarr mask. Attempts:\\n' + '\\n'.join(attempts)
-    )
-
-mask = _load_zarr_any('{mask_path}')
-"""
-    else:
-        mask_load_code = f"mask = imread('{mask_path}')"
-    
     script_content = f"""
+import os
 import sys
 import numpy as np
-from skimage.io import imread
+import dask.array as da
+from dask import delayed
+import tifffile
 from tifffile import imwrite
 import torch
 from trackastra.model import Trackastra
-from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
+from trackastra.tracking import graph_to_ctc
 
 
-# Load images
-print('Loading images...')
+# ----- Lazy loaders: stream frames instead of loading the whole volume -----
+def _lazy_load_tiff(path):
+    with tifffile.TiffFile(path) as tf:
+        series = tf.series[0]
+        shape = tuple(int(s) for s in series.shape)
+        dtype = series.dtype
+        n_pages = len(series.pages)
+
+    # 2D images or single-page files: tiny, just read directly.
+    if n_pages <= 1 or len(shape) <= 2:
+        return da.from_array(tifffile.imread(path))
+
+    page_shape = shape[-2:]
+
+    def _read_page(fpath, idx):
+        with tifffile.TiffFile(fpath) as _tf:
+            return _tf.series[0].pages[idx].asarray()
+
+    dask_pages = [
+        da.from_delayed(delayed(_read_page)(path, i), shape=page_shape, dtype=dtype)
+        for i in range(n_pages)
+    ]
+    return da.stack(dask_pages).reshape(shape)
+
+
+def _zarr_resolve(path):
+    import zarr
+
+    def _node_to_array(zobj):
+        if hasattr(zobj, 'shape'):
+            return zobj
+        if hasattr(zobj, 'array_keys'):
+            keys = list(zobj.array_keys())
+            if '0' in keys:
+                return zobj['0']
+            if keys:
+                return zobj[keys[0]]
+        if hasattr(zobj, 'group_keys'):
+            for key in sorted(zobj.group_keys(), key=lambda k: (k != '0', k)):
+                try:
+                    arr = _node_to_array(zobj[key])
+                    if arr is not None:
+                        return arr
+                except Exception:
+                    continue
+        return None
+
+    candidates = [path, os.path.join(path, '0')]
+    try:
+        for child in sorted(os.listdir(path)):
+            candidates.append(os.path.join(path, child, '0'))
+    except Exception:
+        pass
+
+    openers = (
+        lambda p: zarr.open(p, mode='r'),
+        lambda p: zarr.open_group(store=p, mode='r'),
+        lambda p: zarr.open_array(store=p, mode='r'),
+    )
+    attempts = []
+    for loc in candidates:
+        for opener in openers:
+            try:
+                arr = _node_to_array(opener(loc))
+                if arr is not None:
+                    return arr
+            except Exception as exc:
+                attempts.append(f'{{loc}}: {{exc}}')
+    raise RuntimeError('Unable to open zarr array. Attempts:\\n' + '\\n'.join(attempts))
+
+
+def _lazy_load(path):
+    if str(path).lower().endswith('.zarr'):
+        return da.from_zarr(_zarr_resolve(path))
+    return _lazy_load_tiff(path)
+
+
+def _take_axis(arr, idx, axis):
+    # np.take does not dispatch to dask; build an explicit slice instead.
+    sl = [slice(None)] * arr.ndim
+    sl[axis] = idx
+    return arr[tuple(sl)]
+
+
+# Load images lazily (dask arrays)
+print('Lazily loading images...')
 {img_load_code}
 {mask_load_code}
 print(f'Img shape: {{img.shape}}, Mask shape: {{mask.shape}}')
@@ -663,7 +583,7 @@ if img.ndim == mask.ndim + 1:
         ch_idx = 0
 
     print(f'Extracting channel {{ch_idx}} on axis {{channel_axis}}...')
-    img = np.take(img, ch_idx, axis=channel_axis)
+    img = _take_axis(img, ch_idx, channel_axis)
     print(f'Image shape after channel selection: {{img.shape}}')
 elif img.ndim == mask.ndim:
     if img.shape != mask.shape:
@@ -683,8 +603,8 @@ model = Trackastra.from_pretrained('{model}', device="automatic")
 try:
     track_result = model.track(img, mask, mode='{mode}')
 except Exception as exc:
-    if '{mode}' == 'ilp':
-        print(f'Warning: TrackAstra ILP mode failed ({{exc}}). Retrying with greedy mode...')
+    if '{mode}' != 'greedy':
+        print(f'Warning: TrackAstra {mode} mode failed ({{exc}}). Retrying with greedy mode...')
         track_result = model.track(img, mask, mode='greedy')
     else:
         raise
@@ -692,7 +612,6 @@ except Exception as exc:
 # Trackastra API compatibility:
 # - newer versions may return (track_graph, masks_tracked)
 # - older versions return only track_graph
-# Always run graph_to_ctc to enforce consistent track-based relabeling.
 if isinstance(track_result, tuple):
     if len(track_result) < 1:
         raise RuntimeError('Unexpected empty tuple returned by Trackastra.track().')
@@ -705,19 +624,103 @@ if not hasattr(track_graph, 'nodes'):
         f'Unexpected Trackastra.track() return type for graph: {{type(track_graph)}}'
     )
 
-_, masks_tracked = graph_to_ctc(track_graph, mask, outdir=None)
+out_shape = tuple(int(s) for s in mask.shape)
+n_timepoints = out_shape[0]
+out_dtype = np.uint32
+bytes_total = int(np.prod(out_shape, dtype=np.int64)) * np.dtype(out_dtype).itemsize
+use_bigtiff = bytes_total > 2 * 1024**3
 
-same_as_input = np.array_equal(mask, masks_tracked)
-in_ids = np.unique(mask)
-out_ids = np.unique(masks_tracked)
-print(
-    f'Relabel check: identical_to_input={{same_as_input}}, '
-    f'unique_ids_in={{len(in_ids)}}, unique_ids_out={{len(out_ids)}}'
-)
 
-# Save the tracked masks
-imwrite('{output_path}', masks_tracked.astype(np.uint32), compression='zlib')
-print(f'Saved tracked masks to: {output_path}')
+def _best_tiff_compression():
+    # zstd is faster and compresses label data well; needs imagecodecs.
+    try:
+        import imagecodecs
+        if imagecodecs.ZSTD.available:
+            return 'zstd'
+    except Exception:
+        pass
+    return 'zlib'
+
+
+tiff_compression = _best_tiff_compression()
+print(f'Using TIFF compression: {{tiff_compression}}')
+
+
+# Build a per-frame relabel map identical to graph_to_ctc, then stream output.
+# graph_to_ctc allocates the whole TZYX output in RAM (np.zeros_like stack);
+# replicating only its label assignment lets us write frame-by-frame instead.
+frame_relabel = None
+try:
+    try:
+        from trackastra.tracking.utils import ctc_tracklets
+    except Exception:
+        from trackastra.tracking import ctc_tracklets
+
+    tracklets = ctc_tracklets(track_graph, frame_attribute='time')
+    frame_relabel = {{}}
+    for i, _tracklet in enumerate(sorted(tracklets)):
+        label = i + 1
+        for _n in _tracklet.nodes:
+            node = track_graph.nodes[_n]
+            t = int(node['time'])
+            lab = int(node['label'])
+            frame_relabel.setdefault(t, {{}})[lab] = label
+    print(f'Built streaming relabel map for {{len(frame_relabel)}} frames '
+          f'({{sum(len(v) for v in frame_relabel.values())}} objects).')
+except Exception as exc:
+    print(f'Streaming relabel unavailable ({{exc}}); falling back to in-memory graph_to_ctc.')
+    frame_relabel = None
+
+
+if frame_relabel is not None:
+    def _relabel_frame(t):
+        # Relabel one timepoint slab (Z,Y,X) or (Y,X) via a small lookup table.
+        frame = np.asarray(mask[t])
+        relmap = frame_relabel.get(t)
+        if not relmap:
+            return np.zeros(frame.shape, dtype=out_dtype)
+        maxl = int(frame.max())
+        lut = np.zeros(maxl + 1, dtype=out_dtype)
+        for orig, new in relmap.items():
+            if 0 <= orig <= maxl:
+                lut[orig] = new
+        return lut[frame].astype(out_dtype, copy=False)
+
+    def _iter_relabeled_pages():
+        # tifffile pulls one (Y,X) page per iteration for a TZYX `shape`, so we
+        # flatten each timepoint's leading axes (e.g. Z) into individual pages.
+        for t in range(n_timepoints):
+            relabeled = _relabel_frame(t)
+            if relabeled.ndim <= 2:
+                yield relabeled
+            else:
+                for page in relabeled.reshape((-1,) + relabeled.shape[-2:]):
+                    yield page
+
+    imwrite(
+        '{output_path}',
+        data=_iter_relabeled_pages(),
+        shape=out_shape,
+        dtype=out_dtype,
+        compression=tiff_compression,
+        photometric='minisblack',
+        bigtiff=use_bigtiff,
+    )
+    print(f'Saved tracked masks (streamed) to: {output_path}')
+else:
+    # Fallback: original in-memory path (materializes the full mask + output).
+    mask_np = np.asarray(mask)
+    _, masks_tracked = graph_to_ctc(track_graph, mask_np, outdir=None)
+    in_ids = np.unique(mask_np)
+    out_ids = np.unique(masks_tracked)
+    print(f'Relabel check: unique_ids_in={{len(in_ids)}}, unique_ids_out={{len(out_ids)}}')
+    imwrite(
+        '{output_path}',
+        masks_tracked.astype(out_dtype),
+        compression=tiff_compression,
+        bigtiff=use_bigtiff,
+    )
+    print(f'Saved tracked masks to: {output_path}')
 
 """
 
@@ -809,20 +812,38 @@ def trackastra_tracking(
     np.ndarray
         Tracked label image with consistent IDs across time
     """
-    print(f"Input shape: {image.shape}, dtype: {image.dtype}")
+    # When the worker honours `skip_load` (see below) the array is never loaded
+    # into RAM and `image` is None; the subprocess validates dimensions from the
+    # file itself. Only run the in-memory checks when an array is present.
+    if image is not None:
+        print(f"Input shape: {image.shape}, dtype: {image.dtype}")
 
-    # Validate input
-    if image.ndim < 3:
-        print(
-            "Input is not a time series (needs at least 3 dimensions). Returning unchanged."
-        )
-        return image
+        # Validate input
+        if image.ndim < 3:
+            print(
+                "Input is not a time series (needs at least 3 dimensions). Returning unchanged."
+            )
+            return image
 
-    if image.shape[0] < 2:
+        if image.shape[0] < 2:
+            print(
+                "Input has only one timepoint. Need at least 2 for tracking. Returning unchanged."
+            )
+            return image
+    else:
+        print("Input array not loaded (skip_load); reading dimensions from file.")
+
+    # Normalize the tracking mode up front so an invalid value does not waste a
+    # full (multi-minute) feature-extraction run before failing in the subprocess.
+    valid_modes = ("greedy", "ilp", "greedy_nodiv")
+    if mode not in valid_modes:
+        # Tolerate the common 'lip' typo for 'ilp'; otherwise fall back to greedy.
+        corrected = "ilp" if mode == "lip" else "greedy"
         print(
-            "Input has only one timepoint. Need at least 2 for tracking. Returning unchanged."
+            f"Warning: invalid tracking mode '{mode}'. "
+            f"Using '{corrected}' instead (valid: {', '.join(valid_modes)})."
         )
-        return image
+        mode = corrected
 
     # Ensure TrackAstra environment exists and has compatible package versions.
     if not TrackAstraEnvManager.ensure_env_ready():
@@ -939,3 +960,14 @@ def trackastra_tracking(
         if script_path.exists():
             os.remove(script_path)
         return image
+
+
+# TrackAstra reads its inputs directly from `_source_filepath` inside a
+# dedicated subprocess and ignores the in-memory array passed by the worker.
+# `skip_load` tells the napari widget's ProcessingWorker
+# (_file_selector.ProcessingWorker) to pass image=None and never allocate the
+# full TZYX volume. `_loads_from_path` is the equivalent hint for the secondary
+# _processing_worker.ProcessingWorker (lazy dask load there). Either way the
+# parent process avoids materializing the ~tens-of-GB array just to discard it.
+trackastra_tracking.skip_load = True
+trackastra_tracking._loads_from_path = True

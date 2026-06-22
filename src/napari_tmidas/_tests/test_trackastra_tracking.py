@@ -141,10 +141,129 @@ def test_create_trackastra_script_uses_mask_aware_channel_axis_selection():
     assert "candidate_axes" in script
     assert "dimension_order_param" in script
     assert "requested_axis" in script
-    assert "_load_zarr_any" in script
-    assert "_open_with_kind" in script
-    assert "Attempts:\\n" in script
-    assert "np.take(img, ch_idx, axis=channel_axis)" in script
+    # Channel selection now uses a dask-safe slice helper instead of np.take.
+    assert "_take_axis(img, ch_idx, channel_axis)" in script
+
+
+def test_create_trackastra_script_uses_lazy_dask_loaders():
+    """Generated script must stream input via dask, not full imread/np.asarray."""
+    script = trackastra_mod.create_trackastra_script(
+        "raw.tif", "mask_labels.tif", "ctc", "greedy", "out_tracked.tif",
+        channel="", dimension_order="Auto",
+    )
+    # Valid Python.
+    compile(script, "gen.py", "exec")
+    # Lazy, per-page dask loading rather than eager imread of the whole volume.
+    assert "import dask.array as da" in script
+    assert "_lazy_load" in script
+    assert "da.from_delayed" in script
+    assert "da.from_zarr" in script
+    # The whole-volume eager load must be gone.
+    assert "mask = imread(" not in script
+    assert "img = imread(" not in script
+
+
+def test_create_trackastra_script_streams_output_relabel():
+    """Output must be written frame-by-frame, bypassing graph_to_ctc's full alloc."""
+    script = trackastra_mod.create_trackastra_script(
+        "raw.tif", "mask_labels.tif", "ctc", "greedy", "out_tracked.tif",
+        channel="", dimension_order="Auto",
+    )
+    # Replicates graph_to_ctc label assignment for identical IDs...
+    assert "ctc_tracklets" in script
+    assert "frame_relabel" in script
+    # ...and streams pages into the output TIFF with a generator + shape/dtype.
+    assert "data=_iter_relabeled_pages()" in script
+    assert "shape=out_shape" in script
+    assert "bigtiff=use_bigtiff" in script
+    # Per-page yielding (flatten leading axes) so 4D TZYX writes correctly.
+    assert "reshape((-1,) + relabeled.shape[-2:])" in script
+    # Keeps a graph_to_ctc fallback for older/odd trackastra versions.
+    assert "graph_to_ctc" in script
+
+
+def test_trackastra_marked_as_path_loading():
+    """Workers must know Trackastra reads from disk so they skip the eager load."""
+    # skip_load is honoured by the napari widget worker (image=None, no alloc).
+    assert getattr(trackastra_mod.trackastra_tracking, "skip_load", False) is True
+    # _loads_from_path is the equivalent hint for the secondary worker.
+    assert getattr(trackastra_mod.trackastra_tracking, "_loads_from_path", False) is True
+
+
+def test_trackastra_normalizes_invalid_mode(tmp_path, monkeypatch):
+    """Invalid modes are corrected before the (expensive) subprocess runs."""
+    label_tif = tmp_path / "movie_labels.tif"
+    label_tif.write_text("", encoding="utf-8")
+
+    captured = {}
+
+    def fake_create_trackastra_script(
+        img_path, mask_path, model, mode, output_path, channel, dimension_order
+    ):
+        captured["mode"] = mode
+        return "print('mock')\n"
+
+    monkeypatch.setattr(
+        trackastra_mod.TrackAstraEnvManager, "ensure_env_ready", lambda: True
+    )
+    monkeypatch.setattr(
+        trackastra_mod.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
+    )
+    monkeypatch.setattr(
+        trackastra_mod, "create_trackastra_script", fake_create_trackastra_script
+    )
+
+    class _Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        trackastra_mod.subprocess, "run", lambda *a, **k: _Completed()
+    )
+
+    # 'lip' is the common typo for 'ilp'.
+    trackastra_mod.trackastra_tracking(
+        None,
+        mode="lip",
+        label_pattern="_labels.tif",
+        _source_filepath=str(label_tif),
+        _output_folder=str(tmp_path),
+        _output_suffix="_tracked",
+    )
+    assert captured["mode"] == "ilp"
+
+    # Any other unknown mode falls back to greedy.
+    trackastra_mod.trackastra_tracking(
+        None,
+        mode="bogus",
+        label_pattern="_labels.tif",
+        _source_filepath=str(label_tif),
+        _output_folder=str(tmp_path),
+        _output_suffix="_tracked",
+    )
+    assert captured["mode"] == "greedy"
+
+
+def test_trackastra_tolerates_skip_load_none_image(tmp_path, monkeypatch):
+    """With skip_load, image is None; the function must not crash on validation."""
+    label_tif = tmp_path / "movie_labels.tif"
+    label_tif.write_text("", encoding="utf-8")
+
+    # Env not ready → returns early (None) without touching `image.shape`.
+    monkeypatch.setattr(
+        trackastra_mod.TrackAstraEnvManager, "ensure_env_ready", lambda: False
+    )
+
+    result = trackastra_mod.trackastra_tracking(
+        None,
+        label_pattern="_labels.tif",
+        _source_filepath=str(label_tif),
+        _output_folder=str(tmp_path),
+        _output_suffix="_tracked",
+    )
+    # No crash; returns the (None) input unchanged when env is unavailable.
+    assert result is None
 
 
 def test_trackastra_env_requires_zarr_for_py311():

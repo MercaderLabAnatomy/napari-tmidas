@@ -127,8 +127,15 @@ class ProcessingWorker(QThread):
     def process_file(self, filepath):
         """Process a single file with support for large TIFF and Zarr files"""
         try:
-            # Load the image using the unified loader
-            image_data = load_image_file(filepath)
+            # Path-based functions (e.g. Trackastra) read the input themselves
+            # from `_source_filepath` and ignore the array we pass. For those,
+            # load lazily so we never materialize the whole volume into RAM
+            # just to discard it.
+            if getattr(self.processing_func, "_loads_from_path", False):
+                image_data = load_image_file_lazy(filepath)
+            else:
+                # Load the image using the unified loader
+                image_data = load_image_file(filepath)
 
             # Handle multi-layer data from OME-Zarr
             is_multi_layer = isinstance(image_data, list)
@@ -441,6 +448,50 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
         return np.load(filepath)
 
 
+def _best_tiff_compression() -> str:
+    """Prefer zstd (faster, strong ratio on label data); fall back to zlib.
+
+    zstd needs ``imagecodecs``; if it is unavailable we use zlib, which tifffile
+    supports out of the box and every reader (incl. napari) can decode.
+    """
+    try:
+        import imagecodecs
+
+        if imagecodecs.ZSTD.available:
+            return "zstd"
+    except Exception:
+        pass
+    return "zlib"
+
+
+def load_image_file_lazy(filepath: str) -> Union[np.ndarray, List, Any]:
+    """
+    Lazily load an image as a dask array, avoiding full materialization.
+
+    Used for path-based processing functions (marked with ``_loads_from_path``)
+    that read the input file themselves and only need shape/ndim/dtype metadata
+    from the array handed to them. Falls back to the eager loader if a lazy
+    reader is unavailable for this file type.
+    """
+    lower = filepath.lower()
+    try:
+        if lower.endswith((".tif", ".tiff")):
+            from napari_tmidas._reader import tiff_reader_function
+
+            results = tiff_reader_function(filepath)
+            if results:
+                # tiff_reader_function returns [(array, kwargs, layer_type)].
+                return results[0][0]
+        elif lower.endswith(".zarr") and _HAS_DASK:
+            from napari_tmidas._file_selector import load_zarr_basic
+
+            return load_zarr_basic(filepath)
+    except Exception as exc:
+        print(f"Lazy load failed for {filepath} ({exc}); falling back to eager load.")
+
+    return load_image_file(filepath)
+
+
 def is_label_image(image: np.ndarray) -> bool:
     """
     Determine if an image should be treated as a label image based on its dtype.
@@ -494,6 +545,8 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
         # Use image's dtype
         save_dtype = image.dtype
 
+    compression = _best_tiff_compression()
+
     # Stream dask arrays per leading-axis slab to avoid full materialization.
     if _is_dask_array(image):
         if image.ndim <= 2:
@@ -501,23 +554,33 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
             tifffile.imwrite(
                 filepath,
                 arr,
-                compression="zlib",
+                compression=compression,
                 bigtiff=use_bigtiff,
             )
             return
 
         expected_shape = tuple(int(x) for x in image.shape)
 
-        def _iter_slabs():
+        def _iter_pages():
+            # tifffile pulls one (Y,X) page per iteration, so for >3D arrays
+            # (e.g. TZYX) we must flatten each leading-axis slab's remaining
+            # leading dims into individual pages. We still compute one slab at a
+            # time (one dask task per leading index) to keep reads contiguous
+            # and memory bounded to a single slab.
             for i in range(expected_shape[0]):
-                yield np.asarray(image[i].compute(), dtype=save_dtype)
+                slab = np.asarray(image[i].compute(), dtype=save_dtype)
+                if slab.ndim <= 2:
+                    yield slab
+                else:
+                    for page in slab.reshape((-1,) + slab.shape[-2:]):
+                        yield page
 
         tifffile.imwrite(
             filepath,
-            data=_iter_slabs(),
+            data=_iter_pages(),
             shape=expected_shape,
             dtype=save_dtype,
-            compression="zlib",
+            compression=compression,
             photometric="minisblack",
             bigtiff=use_bigtiff,
         )
@@ -526,6 +589,6 @@ def save_image_file(image: np.ndarray, filepath: str, dtype=None):
     tifffile.imwrite(
         filepath,
         np.asarray(image, dtype=save_dtype),
-        compression="zlib",
+        compression=compression,
         bigtiff=use_bigtiff,
     )

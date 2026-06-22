@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import tifffile
 
-from napari_tmidas._processing_worker import ProcessingWorker, save_image_file
+from napari_tmidas._processing_worker import (
+    ProcessingWorker,
+    load_image_file_lazy,
+    save_image_file,
+)
 
 
 class TestProcessingWorker:
@@ -157,3 +161,78 @@ class TestProcessingWorker:
         saved = tifffile.imread(out_path)
         assert saved.shape == (4, 32, 32)
         assert saved.dtype == np.float32
+
+    def test_best_tiff_compression_falls_back_to_zlib(self, monkeypatch):
+        """zstd when imagecodecs is present, zlib otherwise."""
+        import builtins
+
+        from napari_tmidas import _processing_worker as pw
+
+        assert pw._best_tiff_compression() in ("zstd", "zlib")
+
+        real_import = builtins.__import__
+
+        def no_imagecodecs(name, *args, **kwargs):
+            if name == "imagecodecs":
+                raise ImportError("simulated: imagecodecs missing")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_imagecodecs)
+        assert pw._best_tiff_compression() == "zlib"
+
+    def test_save_image_file_dask_streaming_4d_tzyx(self):
+        """4D TZYX dask arrays must stream page-by-page (regression: reshape error)."""
+        da = pytest.importorskip("dask.array")
+
+        arr_np = np.arange(2 * 3 * 8 * 8, dtype=np.uint32).reshape(2, 3, 8, 8)
+        arr = da.from_array(arr_np, chunks=(1, 1, 8, 8))
+        out_path = f"{self.temp_dir}/dask_tzyx.tif"
+
+        save_image_file(arr, out_path, np.uint32)
+
+        saved = tifffile.imread(out_path)
+        assert saved.shape == (2, 3, 8, 8)
+        assert saved.dtype == np.uint32
+        np.testing.assert_array_equal(saved, arr_np)
+
+    def test_load_image_file_lazy_returns_dask_for_tiff(self):
+        """Large multi-page TIFFs must load lazily (dask), not fully into RAM."""
+        da = pytest.importorskip("dask.array")
+
+        arr = np.arange(5 * 16 * 16, dtype=np.uint32).reshape(5, 16, 16)
+        path = f"{self.temp_dir}/movie_labels.tif"
+        tifffile.imwrite(path, arr, photometric="minisblack")
+
+        lazy = load_image_file_lazy(path)
+
+        assert isinstance(lazy, da.Array)
+        assert lazy.shape == (5, 16, 16)
+        # Lazy handle still yields correct data when materialized.
+        np.testing.assert_array_equal(np.asarray(lazy), arr)
+
+    def test_path_loading_function_skips_eager_load(self):
+        """A function marked _loads_from_path must trigger the lazy loader."""
+        arr = np.zeros((2, 8, 8), dtype=np.uint32)
+        path = f"{self.temp_dir}/movie_labels.tif"
+        tifffile.imwrite(path, arr)
+
+        def fake_func(image, **kwargs):
+            # Path-based functions return an output path string.
+            return path
+
+        fake_func._loads_from_path = True
+
+        worker = ProcessingWorker(
+            [path], fake_func, {}, self.temp_dir, ".tif", "_tracked.tif"
+        )
+
+        with patch(
+            "napari_tmidas._processing_worker.load_image_file_lazy"
+        ) as lazy_loader, patch(
+            "napari_tmidas._processing_worker.load_image_file"
+        ) as eager_loader:
+            lazy_loader.return_value = arr
+            worker.process_file(path)
+
+        lazy_loader.assert_called_once_with(path)
+        eager_loader.assert_not_called()
