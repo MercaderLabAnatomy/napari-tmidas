@@ -3660,6 +3660,24 @@ class FileResultsWidget(QWidget):
             self.viewer.status = (
                 "Processing with a single thread (function is not thread-safe)"
             )
+        # GPU-distributable functions (e.g. Trackastra) run one subprocess per
+        # file, each pinned to its own GPU, so run as many concurrently as there
+        # are GPUs to spread the batch across all cards.
+        elif getattr(processing_func, "supports_gpu_distribution", False):
+            try:
+                from napari_tmidas.processing_functions.trackastra_tracking import (
+                    _detect_gpu_ids,
+                )
+
+                n_gpus = len(_detect_gpu_ids())
+            except Exception:
+                n_gpus = 0
+            worker_thread_count = max(1, n_gpus)
+            self.viewer.status = (
+                f"Distributing across {worker_thread_count} GPU(s)"
+                if n_gpus > 1
+                else "Processing with a single thread (1 GPU)"
+            )
         # GPU-based processing should use single thread (unless use_cpu=True)
         elif "use_cpu" in param_values and not param_values["use_cpu"]:
             worker_thread_count = 1

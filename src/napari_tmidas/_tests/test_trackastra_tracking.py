@@ -59,6 +59,7 @@ def test_trackastra_tracking_uses_zarr_raw_for_tif_label(tmp_path, monkeypatch):
         output_path,
         channel,
         dimension_order,
+        batch_size="Auto",
     ):
         captured["img_path"] = img_path
         captured["mask_path"] = mask_path
@@ -71,7 +72,7 @@ def test_trackastra_tracking_uses_zarr_raw_for_tif_label(tmp_path, monkeypatch):
         stdout = "ok"
         stderr = ""
 
-    def fake_subprocess_run(cmd, capture_output, text):
+    def fake_subprocess_run(cmd, *args, **kwargs):
         # Simulate a successful TrackAstra run and create expected output.
         out = tmp_path / "movie_tracked.tif"
         out.write_bytes(b"TIFF")
@@ -182,6 +183,60 @@ def test_create_trackastra_script_streams_output_relabel():
     assert "graph_to_ctc" in script
 
 
+def test_create_trackastra_script_has_cuda_oom_recovery():
+    """Script must shrink batch size on CUDA OOM and fall back to CPU."""
+    script = trackastra_mod.create_trackastra_script(
+        "raw.tif", "mask_labels.tif", "ctc", "ilp", "out_tracked.tif",
+        channel="", dimension_order="Auto", batch_size="Auto",
+    )
+    compile(script, "gen.py", "exec")
+    assert "_is_cuda_oom" in script
+    assert "torch.cuda.empty_cache()" in script
+    assert "device='cpu'" in script
+    assert "expandable_segments" in script
+    # ilp/greedy retry must not fire on OOM (prediction is mode-independent).
+    assert "not _is_cuda_oom(exc)" in script
+
+
+def test_create_trackastra_script_resolves_batch_size():
+    """batch_size param maps to the injected `requested_batch` literal."""
+    cases = {"Auto": "requested_batch = None", "": "requested_batch = None",
+             "bogus": "requested_batch = None", "1": "requested_batch = 1",
+             "4": "requested_batch = 4", "0": "requested_batch = None"}
+    for value, expected in cases.items():
+        script = trackastra_mod.create_trackastra_script(
+            "raw.tif", "mask_labels.tif", "ctc", "greedy", "out.tif",
+            channel="", dimension_order="Auto", batch_size=value,
+        )
+        assert expected in script, (value, expected)
+
+
+def test_detect_gpu_ids_honours_override(monkeypatch):
+    """TRACKASTRA_GPUS controls multi-GPU distribution; 'none' disables pinning."""
+    monkeypatch.setenv("TRACKASTRA_GPUS", "0,1")
+    assert trackastra_mod._detect_gpu_ids() == ["0", "1"]
+
+    monkeypatch.setenv("TRACKASTRA_GPUS", "none")
+    assert trackastra_mod._detect_gpu_ids() == []
+
+    # Falls back to CUDA_VISIBLE_DEVICES when no explicit override is given.
+    monkeypatch.delenv("TRACKASTRA_GPUS", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    assert trackastra_mod._detect_gpu_ids() == ["3"]
+
+
+def test_gpu_pool_size_matches_detected_ids(monkeypatch):
+    """The shared pool holds one slot per detected GPU."""
+    monkeypatch.setenv("TRACKASTRA_GPUS", "0,1")
+    # Reset the lazily-built singleton so the override takes effect.
+    monkeypatch.setattr(trackastra_mod, "_GPU_POOL", None)
+    monkeypatch.setattr(trackastra_mod, "_GPU_IDS", None)
+
+    pool, ids = trackastra_mod._get_gpu_pool()
+    assert ids == ["0", "1"]
+    assert pool.qsize() == 2
+
+
 def test_trackastra_marked_as_path_loading():
     """Workers must know Trackastra reads from disk so they skip the eager load."""
     # skip_load is honoured by the napari widget worker (image=None, no alloc).
@@ -198,7 +253,8 @@ def test_trackastra_normalizes_invalid_mode(tmp_path, monkeypatch):
     captured = {}
 
     def fake_create_trackastra_script(
-        img_path, mask_path, model, mode, output_path, channel, dimension_order
+        img_path, mask_path, model, mode, output_path, channel, dimension_order,
+        batch_size="Auto",
     ):
         captured["mode"] = mode
         return "print('mock')\n"

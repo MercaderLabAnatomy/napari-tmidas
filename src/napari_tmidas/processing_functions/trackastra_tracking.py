@@ -8,9 +8,11 @@ to manage TrackAstra dependencies separately from the main environment.
 """
 
 import os
+import queue
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +23,66 @@ from napari_tmidas._registry import BatchProcessingRegistry
 
 
 _SUPPORTED_IMAGE_SUFFIXES = (".tif", ".tiff", ".zarr")
+
+
+# --- Multi-GPU distribution -------------------------------------------------
+# When several movies are tracked in one batch run, spread the per-file
+# Trackastra subprocesses across the available GPUs. Each job acquires one GPU
+# id from a shared pool (pinned via CUDA_VISIBLE_DEVICES); the pool size bounds
+# concurrency to one job per GPU, which also prevents two jobs colliding on the
+# same card and running it out of memory.
+_GPU_POOL_LOCK = threading.Lock()
+_GPU_POOL = None  # queue.Queue of GPU id strings (built lazily)
+_GPU_IDS = None  # list of detected GPU id strings ([] = don't pin)
+
+
+def _detect_gpu_ids():
+    """Detect GPU ids to distribute across. Honours overrides.
+
+    - ``TRACKASTRA_GPUS`` (e.g. "0,1", or "none"/"" to disable pinning)
+    - else ``CUDA_VISIBLE_DEVICES`` if already set
+    - else counts physical GPUs via ``nvidia-smi -L``
+    Returns a list of id strings; empty means do not pin a device.
+    """
+    override = os.environ.get("TRACKASTRA_GPUS")
+    if override is not None:
+        if override.strip().lower() in ("", "none", "cpu"):
+            return []
+        return [g.strip() for g in override.split(",") if g.strip() != ""]
+
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None and cvd.strip() != "":
+        return [g.strip() for g in cvd.split(",") if g.strip() != ""]
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10
+        )
+        if out.returncode == 0:
+            n = len(
+                [
+                    line
+                    for line in out.stdout.splitlines()
+                    if line.strip().startswith("GPU ")
+                ]
+            )
+            if n > 0:
+                return [str(i) for i in range(n)]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return []
+
+
+def _get_gpu_pool():
+    """Return (pool, gpu_ids), building the shared pool once."""
+    global _GPU_POOL, _GPU_IDS
+    with _GPU_POOL_LOCK:
+        if _GPU_POOL is None:
+            _GPU_IDS = _detect_gpu_ids()
+            _GPU_POOL = queue.Queue()
+            for gpu_id in _GPU_IDS:
+                _GPU_POOL.put(gpu_id)
+        return _GPU_POOL, _GPU_IDS
 
 
 def _strip_known_image_suffix(name: str) -> str:
@@ -407,6 +469,7 @@ def create_trackastra_script(
     output_path,
     channel="all",
     dimension_order="Auto",
+    batch_size="Auto",
 ):
     """Create a Python script to run TrackAstra in the dedicated environment.
 
@@ -414,7 +477,21 @@ def create_trackastra_script(
     TIFF page, or ``da.from_zarr`` for zarr) so Trackastra streams feature
     extraction frame-by-frame, and writes the tracked output one frame at a
     time. This keeps peak RAM at a few frames instead of the whole TZYX volume.
+
+    GPU prediction memory is the other bottleneck: on CUDA OOM the script
+    shrinks ``batch_size`` and finally falls back to CPU. ``batch_size``
+    accepts "Auto" (model default, 4 on CUDA) or a positive integer.
     """
+
+    # Resolve batch_size into a literal injected into the script (None = Auto).
+    batch_size_literal = "None"
+    if batch_size is not None and str(batch_size).strip().lower() not in ("", "auto"):
+        try:
+            parsed = int(batch_size)
+            if parsed > 0:
+                batch_size_literal = str(parsed)
+        except (TypeError, ValueError):
+            pass
 
     # img/mask loads use a single embedded lazy loader (see _LAZY_LOADERS).
     img_load_code = f"img = _lazy_load({str(img_path)!r})"
@@ -422,7 +499,10 @@ def create_trackastra_script(
 
     script_content = f"""
 import os
+# Reduce CUDA fragmentation; must be set before torch initializes CUDA.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import sys
+import gc
 import numpy as np
 import dask.array as da
 from dask import delayed
@@ -600,12 +680,61 @@ else:
 print(f'Final shapes - Img: {{img.shape}}, Mask: {{mask.shape}}')
 
 model = Trackastra.from_pretrained('{model}', device="automatic")
+
+# User-requested prediction batch size ('Auto' -> model default, 4 on CUDA).
+requested_batch = {batch_size_literal}
+
+
+def _is_cuda_oom(exc):
+    oom_cls = getattr(torch.cuda, 'OutOfMemoryError', ())
+    return isinstance(exc, oom_cls) or 'out of memory' in str(exc).lower()
+
+
+def _free_gpu():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _track_once(track_model, m, batch_size):
+    kwargs = {{}} if batch_size is None else {{'batch_size': batch_size}}
+    return track_model.track(img, mask, mode=m, **kwargs)
+
+
+def _track_mode(m):
+    # Prediction (transformer attention) is the GPU-memory bottleneck and is
+    # identical across tracking modes. On CUDA OOM, shrink the batch size, then
+    # fall back to CPU (slow but bounded by host RAM) rather than failing.
+    ladder = [requested_batch]
+    if requested_batch != 1:
+        ladder.append(1)
+    for batch_size in ladder:
+        try:
+            return _track_once(model, m, batch_size)
+        except Exception as exc:
+            if _is_cuda_oom(exc):
+                print(
+                    f'CUDA OOM (mode={{m}}, batch_size={{batch_size}}); '
+                    'freeing GPU and retrying with a smaller batch...'
+                )
+                _free_gpu()
+                continue
+            raise
+    print('CUDA still OOM; loading model on CPU and predicting there (slow)...')
+    _free_gpu()
+    cpu_model = Trackastra.from_pretrained('{model}', device='cpu')
+    return cpu_model.track(img, mask, mode=m, batch_size=1)
+
+
 try:
-    track_result = model.track(img, mask, mode='{mode}')
+    track_result = _track_mode('{mode}')
 except Exception as exc:
-    if '{mode}' != 'greedy':
+    # ilp/greedy only differ in the post-prediction solve, so a non-OOM failure
+    # in '{mode}' may be solver-specific — retry once with greedy.
+    if '{mode}' != 'greedy' and not _is_cuda_oom(exc):
         print(f'Warning: TrackAstra {mode} mode failed ({{exc}}). Retrying with greedy mode...')
-        track_result = model.track(img, mask, mode='greedy')
+        _free_gpu()
+        track_result = _track_mode('greedy')
     else:
         raise
 
@@ -753,6 +882,11 @@ else:
             "options": ["Auto", "TYX", "TZYX", "TCZYX", "TCYX"],
             "description": "Dimension order hint for raw images (e.g., TCZYX for time-Z-channel-Y-X). Helps with channel detection when loading label files.",
         },
+        "batch_size": {
+            "type": str,
+            "default": "Auto",
+            "description": "GPU prediction batch size. 'Auto' uses the model default (4 on CUDA); lower it (e.g. 1) if you hit CUDA out-of-memory. On OOM the run auto-shrinks the batch and finally falls back to CPU.",
+        },
         "label_pattern": {
             "type": str,
             "default": "_labels.tif",
@@ -766,6 +900,7 @@ def trackastra_tracking(
     mode: str = "greedy",
     channel: str = "",
     dimension_order: str = "Auto",
+    batch_size: str = "Auto",
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
     _output_folder: str = None,
@@ -831,7 +966,11 @@ def trackastra_tracking(
             )
             return image
     else:
-        print("Input array not loaded (skip_load); reading dimensions from file.")
+        _src_tag = os.path.basename(_source_filepath) if _source_filepath else "?"
+        print(
+            f"[{_src_tag}] Input array not loaded (skip_load); "
+            "reading dimensions from file."
+        )
 
     # Normalize the tracking mode up front so an invalid value does not waste a
     # full (multi-minute) feature-extraction run before failing in the subprocess.
@@ -866,8 +1005,9 @@ def trackastra_tracking(
 
     temp_dir = Path(os.path.dirname(img_path))
 
-    # Create the tracking script
-    script_path = temp_dir / "run_tracking.py"
+    # Create the tracking script. Use a per-file unique name so concurrent jobs
+    # (multi-GPU batches) sharing an input directory never clobber each other.
+    script_path = temp_dir / f"run_tracking_{Path(img_path).stem}_{os.getpid()}.py"
     # Save the mask data
     # For label images, use the original path as mask_path
     basename = os.path.basename(img_path)
@@ -886,7 +1026,10 @@ def trackastra_tracking(
             )
             raw_path = img_path  # Fallback to using label as input
         else:
-            print("Processing label file: using matched raw-label pair for tracking")
+            print(
+                f"[{os.path.basename(img_path)}] Processing label file: "
+                "using matched raw-label pair for tracking"
+            )
     else:
         # For raw images, find the corresponding label image
         raw_path = img_path
@@ -919,6 +1062,7 @@ def trackastra_tracking(
         str(output_path),
         channel,
         dimension_order,
+        batch_size,
     )
 
     with open(script_path, "w") as f:
@@ -934,8 +1078,32 @@ def trackastra_tracking(
         "python",
         str(script_path),
     ]
-    print(f"Running TrackAstra with model='{model}', mode='{mode}'...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Acquire a GPU from the shared pool so concurrent files spread across cards
+    # (blocks until one is free; no-op when no GPUs are detected/pinning is off).
+    pool, gpu_ids = _get_gpu_pool()
+    gpu_id = pool.get() if gpu_ids else None
+    run_env = os.environ.copy()
+    label_tag = os.path.basename(mask_path)
+    if gpu_id is not None:
+        run_env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        print(
+            f"[{label_tag}] Running TrackAstra with model='{model}', "
+            f"mode='{mode}' on GPU {gpu_id}..."
+        )
+    else:
+        print(
+            f"[{label_tag}] Running TrackAstra with model='{model}', "
+            f"mode='{mode}'..."
+        )
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=run_env
+        )
+    finally:
+        if gpu_id is not None:
+            pool.put(gpu_id)
+            print(f"[{label_tag}] Released GPU {gpu_id}")
 
     if result.returncode != 0:
         print("TrackAstra error:")
@@ -951,7 +1119,7 @@ def trackastra_tracking(
     # Return the produced path so the processing worker does not save a
     # second suffixed copy based on the current input filename.
     if output_path.exists():
-        print(f"Tracking completed. Output saved at: {output_path}")
+        print(f"[{label_tag}] Tracking completed. Output saved at: {output_path}")
         if script_path.exists():
             os.remove(script_path)
         return str(output_path)
@@ -971,3 +1139,9 @@ def trackastra_tracking(
 # parent process avoids materializing the ~tens-of-GB array just to discard it.
 trackastra_tracking.skip_load = True
 trackastra_tracking._loads_from_path = True
+
+# Each file is tracked in its own subprocess pinned to one GPU (see the GPU
+# pool above), so multiple files can run concurrently across GPUs. This marker
+# lets the batch widget raise the worker thread count to the GPU count instead
+# of forcing single-threaded execution.
+trackastra_tracking.supports_gpu_distribution = True
