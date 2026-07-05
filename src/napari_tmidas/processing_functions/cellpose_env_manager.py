@@ -643,6 +643,11 @@ def _patch_zarr_open_for_cellpose_distributed():
             raise TypeError(
                 f"Unsupported positional zarr.open arguments: {{args}}"
             )
+        # Convert str -> Path so zarr v3 skips URL parsing (which strips '#'
+        # fragment characters from filenames containing '#').
+        if isinstance(store, str):
+            import pathlib as _pathlib
+            store = _pathlib.Path(store)
         return _orig_open(store=store, **kwargs)
 
     zarr.open = _open_compat
