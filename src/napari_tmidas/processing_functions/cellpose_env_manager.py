@@ -651,6 +651,36 @@ def _patch_zarr_open_for_cellpose_distributed():
         return _orig_open(store=store, **kwargs)
 
     zarr.open = _open_compat
+
+    # Also patch zarr.open_array so output paths with '#' aren't truncated.
+    _orig_open_array = zarr.open_array
+
+    def _open_array_compat(store=None, *args, **kwargs):
+        if args and "mode" not in kwargs:
+            kwargs["mode"] = args[0]
+            args = args[1:]
+        if args:
+            raise TypeError(
+                f"Unsupported positional zarr.open_array arguments: {{args}}"
+            )
+        if isinstance(store, str):
+            import pathlib as _pathlib
+            store = _pathlib.Path(store)
+        return _orig_open_array(store=store, **kwargs)
+
+    zarr.open_array = _open_array_compat
+
+    # Also patch zarr.save so the output path with '#' isn't truncated.
+    _orig_save = zarr.save
+
+    def _save_compat(store, *args, **kwargs):
+        if isinstance(store, str):
+            import pathlib as _pathlib
+            store = _pathlib.Path(store)
+        return _orig_save(store, *args, **kwargs)
+
+    zarr.save = _save_compat
+
     print(
         "Applied zarr.open compatibility shim for Cellpose distributed "
         f"mode (zarr={{getattr(zarr, '__version__', 'unknown')}})"
