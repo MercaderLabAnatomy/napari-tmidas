@@ -121,6 +121,45 @@ def _find_matching_raw_path(label_path: str, label_pattern: str):
     return raw_base, candidates, None
 
 
+def _resolve_gurobi_license(gurobi_license: str = ""):
+    """Resolve which Gurobi license file the ilp solver should use.
+
+    Trackastra's ``ilp`` mode solves via motile/ilpy → Gurobi. The pip
+    ``gurobipy`` package ships a bundled *size-limited* license
+    (``TYPE=PIP``) inside the conda env (``.../envs/trackastra/lib/gurobi.lic``)
+    and prioritises it, so it shadows a full/academic license placed in the
+    home directory. Setting ``GRB_LICENSE_FILE`` explicitly overrides that,
+    since it takes precedence over every default search location.
+
+    Resolution order (first hit wins):
+      1. explicit ``gurobi_license`` path argument (from the widget),
+      2. an already-exported ``GRB_LICENSE_FILE``,
+      3. ``~/gurobi.lic`` (the standard academic/named-user location).
+
+    Returns the resolved license path as a string, or ``None`` to leave the
+    environment untouched (bundled size-limited license is then used).
+    """
+    candidate = (gurobi_license or "").strip()
+    if candidate:
+        lic = os.path.expanduser(candidate)
+        if os.path.isfile(lic):
+            return lic
+        print(
+            f"Warning: gurobi_license path '{candidate}' not found; "
+            "falling back to auto-detection."
+        )
+
+    existing = os.environ.get("GRB_LICENSE_FILE", "").strip()
+    if existing and os.path.isfile(os.path.expanduser(existing)):
+        return os.path.expanduser(existing)
+
+    home_lic = os.path.join(os.path.expanduser("~"), "gurobi.lic")
+    if os.path.isfile(home_lic):
+        return home_lic
+
+    return None
+
+
 def _load_zarr_array(path: str) -> np.ndarray:
     """Load a zarr array/group as a NumPy array, with robust fallbacks."""
     import zarr
@@ -887,6 +926,11 @@ else:
             "default": "Auto",
             "description": "GPU prediction batch size. 'Auto' uses the model default (4 on CUDA); lower it (e.g. 1) if you hit CUDA out-of-memory. On OOM the run auto-shrinks the batch and finally falls back to CPU.",
         },
+        "gurobi_license": {
+            "type": str,
+            "default": "",
+            "description": "Path to a Gurobi license file (.lic) for the 'ilp' mode solver. Leave empty to auto-detect ~/gurobi.lic; only needed to override the bundled size-limited pip license. Ignored by 'greedy' modes.",
+        },
         "label_pattern": {
             "type": str,
             "default": "_labels.tif",
@@ -901,6 +945,7 @@ def trackastra_tracking(
     channel: str = "",
     dimension_order: str = "Auto",
     batch_size: str = "Auto",
+    gurobi_license: str = "",
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
     _output_folder: str = None,
@@ -939,6 +984,11 @@ def trackastra_tracking(
         Dimension order hint for raw images (e.g., "TCZYX", "TZYX"). If "Auto",
         dimensions are auto-detected. This helps clarify channel detection when
         processing label files.
+    gurobi_license : str
+        Optional path to a Gurobi license file (.lic) used by the 'ilp' mode
+        solver. Leave empty to auto-detect ~/gurobi.lic (or an already-exported
+        GRB_LICENSE_FILE); only needed to override the bundled size-limited pip
+        license that ships in the conda env. Ignored by the greedy modes.
     label_pattern : str
         To identify label images
 
@@ -1084,6 +1134,23 @@ def trackastra_tracking(
     pool, gpu_ids = _get_gpu_pool()
     gpu_id = pool.get() if gpu_ids else None
     run_env = os.environ.copy()
+
+    # Point Gurobi at the user's (academic/named-user) license so the ilp
+    # solver isn't capped by the bundled size-limited pip license. Only
+    # relevant for mode='ilp'; harmless for greedy modes.
+    license_path = _resolve_gurobi_license(gurobi_license)
+    if license_path:
+        run_env["GRB_LICENSE_FILE"] = license_path
+        if mode == "ilp":
+            print(f"Using Gurobi license: {license_path}")
+    elif mode == "ilp":
+        print(
+            "No Gurobi license file found (checked gurobi_license arg, "
+            "GRB_LICENSE_FILE, ~/gurobi.lic); the ilp solver will use the "
+            "bundled size-limited pip license and may fail on large problems. "
+            "Provide a license via the 'gurobi_license' parameter."
+        )
+
     label_tag = os.path.basename(mask_path)
     if gpu_id is not None:
         run_env["CUDA_VISIBLE_DEVICES"] = gpu_id
