@@ -138,7 +138,16 @@ class TestMergeSmallLabels:
     # ------------------------------------------------------------------
 
     def test_registered_in_registry(self):
-        """The function must be discoverable via the BatchProcessingRegistry."""
+        """The function must be discoverable via the BatchProcessingRegistry.
+
+        Uses an explicit reload so the test is not affected by other test
+        classes that clear the registry in their setup_method.
+        """
+        import importlib
+
+        import napari_tmidas.processing_functions.merge_small_labels as _mod
+        importlib.reload(_mod)
+
         from napari_tmidas._registry import BatchProcessingRegistry
 
         info = BatchProcessingRegistry.get_function_info(
