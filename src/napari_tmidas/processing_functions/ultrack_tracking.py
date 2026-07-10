@@ -273,10 +273,10 @@ device = 'cpu'
 
 if torch.cuda.is_available():
     print("✓ PyTorch CUDA detected")
-    print(f"  Device: {{{{torch.cuda.get_device_name(0)}}}}")
+    print(f"  Device: {torch.cuda.get_device_name(0)}")
     props = torch.cuda.get_device_properties(0)
-    print(f"  Compute: sm_{{{{props.major}}}}{{{{props.minor}}}}")
-    print(f"  VRAM: {{{{props.total_memory / 1024**3:.1f}}}} GB")
+    print(f"  Compute: sm_{props.major}{props.minor}")
+    print(f"  VRAM: {props.total_memory / 1024**3:.1f} GB")
     
     # Critical: Test actual GPU kernel execution
     # Blackwell sm_120 will fail here with PyTorch stable
@@ -292,20 +292,20 @@ if torch.cuda.is_available():
         gpu_available = True
         device = 'cuda'
     except Exception as e:
-        print(f"⚠ GPU kernel test FAILED: {{{{type(e).__name__}}}}")
+        print(f"⚠ GPU kernel test FAILED: {type(e).__name__}")
         if 'sm_120' in str(e) or 'Blackwell' in str(e) or 'no kernel image' in str(e):
             print("  → Blackwell GPU detected but not supported by PyTorch stable")
             print("  → SOLUTION: Upgrade to PyTorch nightly:")
             print("     conda run -n ultrack pip uninstall -y torch torchvision")
             print("     conda run -n ultrack pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130")
         else:
-            print(f"  → Error: {{{{e}}}}")
+            print(f"  → Error: {e}")
         print("  → Falling back to CPU mode (will work but slower)")
         device = 'cpu'
 else:
     print("ℹ CUDA not available, using CPU mode")
 
-print(f"\\nProcessing device: {{{{device.upper()}}}}")
+print(f"\\nProcessing device: {device.upper()}")
 """
         
         labels_to_contours_call = """
@@ -466,13 +466,13 @@ if gurobi_license:
 print('Loading label images for ensemble (using out-of-memory zarr storage)...')
 label_paths = {label_paths_str}
 
-print(f"Found {{{{len(label_paths)}}}} label images for ensemble:")
+print(f"Found {{len(label_paths)}} label images for ensemble:")
 for path in label_paths:
-    print(f"  - {{{{path}}}}")
+    print(f"  - {{path}}")
 
 # Create temporary directory for zarr storage
 temp_dir = tempfile.mkdtemp(prefix='ultrack_labels_')
-print(f"Using temporary storage: {{{{temp_dir}}}}")
+print(f"Using temporary storage: {{temp_dir}}")
 
 try:
     # Load label images and convert to zarr arrays (disk-backed)
@@ -481,17 +481,17 @@ try:
     
     for i, path in enumerate(label_paths):
         if not Path(path).exists():
-            print(f"Warning: Label file not found: {{{{path}}}}")
+            print(f"Warning: Label file not found: {{path}}")
             continue
         
-        print(f"Loading {{{{path}}}}...")
+        print(f"Loading {{path}}...")
         
         # Load TIFF into memory (temporary)
         labels_data = imread(path)
         shape = labels_data.shape
         dtype = labels_data.dtype
         
-        print(f"  Shape: {{{{shape}}}}, dtype: {{{{dtype}}}}")
+        print(f"  Shape: {{shape}}, dtype: {{dtype}}")
         
         # Validate dimensions
         if reference_shape is None:
@@ -525,7 +525,7 @@ try:
 
     # Determine if data is TYX (3D) or TZYX (4D)
     ndim = len(reference_shape)
-    print(f"Data dimensionality: {{{{ndim}}}}D")
+    print(f"Data dimensionality: {{ndim}}D")
 
     if ndim == 3:
         print("Processing as TYX (time-series 2D)")
@@ -539,15 +539,15 @@ try:
     edges_path = Path(temp_dir) / 'edges.zarr'
 
 {labels_to_contours_call}
-    print(f"Detection shape: {{{{detection.shape}}}}")
-    print(f"Contours shape: {{{{contours.shape}}}}")
+    print(f"Detection shape: {{detection.shape}}")
+    print(f"Contours shape: {{contours.shape}}")
 
     # Configure ultrack - set working directory to output folder
     # This ensures data.db and metadata.toml are saved with the output images
     output_dir = Path('{output_path}').parent
     ultrack_db_dir = output_dir / 'ultrack_data'
     ultrack_db_dir.mkdir(exist_ok=True)
-    print(f"ultrack database directory: {{{{ultrack_db_dir}}}}")
+    print(f"ultrack database directory: {{ultrack_db_dir}}")
     
     config = MainConfig()
     config.data_config.working_dir = str(ultrack_db_dir)
@@ -571,9 +571,9 @@ try:
     config.tracking_config.solution_gap = 0.0
 
     print("\\nultrack configuration:")
-    print(f"  Segmentation: min_area={{{{config.segmentation_config.min_area}}}}")
-    print(f"  Linking: max_neighbors={{{{config.linking_config.max_neighbors}}}}, max_distance={{{{config.linking_config.max_distance}}}}")
-    print(f"  Tracking: appear={{{{config.tracking_config.appear_weight}}}}, disappear={{{{config.tracking_config.disappear_weight}}}}, division={{{{config.tracking_config.division_weight}}}}")
+    print(f"  Segmentation: min_area={{config.segmentation_config.min_area}}")
+    print(f"  Linking: max_neighbors={{config.linking_config.max_neighbors}}, max_distance={{config.linking_config.max_distance}}")
+    print(f"  Tracking: appear={{config.tracking_config.appear_weight}}, disappear={{config.tracking_config.disappear_weight}}, division={{config.tracking_config.division_weight}}")
 
     # Run tracking
     print("\\nRunning ultrack tracking...")
@@ -591,7 +591,7 @@ try:
     # Save tracks to CSV
     tracks_csv_path = '{output_path}'.replace('_ultrack.tif', '_ultrack_tracks.csv')
     tracks_df.to_csv(tracks_csv_path, index=False)
-    print(f"Saved tracks to: {{{{tracks_csv_path}}}}")
+    print(f"Saved tracks to: {{tracks_csv_path}}")
 
     # Create tracked label image (zarr array on disk)
     tracking_labels = tracks_to_zarr(config, tracks_df)
@@ -599,17 +599,17 @@ try:
     # Save tracked masks using simple imwrite (like trackastra)
     # Label images are sparse (mostly zeros), so memory footprint is small even for large TZYX
     print(f"Exporting tracked labels to TIFF...")
-    print(f"  Shape: {{{{tracking_labels.shape}}}}, dtype: {{{{tracking_labels.dtype}}}}")
+    print(f"  Shape: {{tracking_labels.shape}}, dtype: {{tracking_labels.dtype}}")
     
     # Load full array from zarr (sparse labels compress well, minimal RAM)
     tracked_array = np.asarray(tracking_labels).astype(np.uint32)
-    print(f"  Loaded {{{{tracked_array.nbytes / (1024**3):.2f}}}} GB from zarr")
+    print(f"  Loaded {{tracked_array.nbytes / (1024**3):.2f}} GB from zarr")
     
     # Write using simple imwrite (same approach as trackastra)
     imwrite('{output_path}', tracked_array, compression='zlib')
     
     print(f'✓ Saved tracked masks to: {output_path}')
-    print(f'\u2713 Tracked {{{{len(tracks_df["track_id"].unique())}}}} cells across {{{{tracking_labels.shape[0]}}}} timepoints')
+    print(f'\u2713 Tracked {{len(tracks_df["track_id"].unique())}} cells across {{tracking_labels.shape[0]}} timepoints')
 
 finally:
     # Clean up temporary directory
