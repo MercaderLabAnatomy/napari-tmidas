@@ -77,6 +77,8 @@ def create_ultrack_ensemble_script(
     disappear_weight: float = -2.0,
     division_weight: float = -0.01,
     enable_gpu: bool = True,
+    window_size: Optional[int] = None,
+    solution_gap: float = 0.001,
 ) -> str:
     """
     Create a Python script to run ultrack with segmentation ensemble.
@@ -98,6 +100,10 @@ def create_ultrack_ensemble_script(
         Maximum distance between cells for linking
     appear_weight : float
         Weight for cell appearance
+    window_size : Optional[int]
+        Number of timepoints per ILP window (None = entire timelapse at once)
+    solution_gap : float
+        ILP solver optimality gap tolerance (0.0 = exact, 0.001 = 0.1%)
     disappear_weight : float
         Weight for cell disappearance
     division_weight : float
@@ -566,14 +572,15 @@ try:
     config.tracking_config.appear_weight = {appear_weight}
     config.tracking_config.disappear_weight = {disappear_weight}
     config.tracking_config.division_weight = {division_weight}
-    config.tracking_config.window_size = None  # Process entire timelapse for best quality
+    config.tracking_config.window_size = {repr(window_size)}
     config.tracking_config.overlap_size = 1
-    config.tracking_config.solution_gap = 0.0
+    config.tracking_config.solution_gap = {solution_gap}
 
     print("\\nultrack configuration:")
     print(f"  Segmentation: min_area={{config.segmentation_config.min_area}}")
     print(f"  Linking: max_neighbors={{config.linking_config.max_neighbors}}, max_distance={{config.linking_config.max_distance}}")
     print(f"  Tracking: appear={{config.tracking_config.appear_weight}}, disappear={{config.tracking_config.disappear_weight}}, division={{config.tracking_config.division_weight}}")
+    print(f"  ILP: window_size={{config.tracking_config.window_size}}, solution_gap={{config.tracking_config.solution_gap}}")
 
     # Run tracking
     print("\\nRunning ultrack tracking...")
@@ -774,6 +781,21 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
             "default": True,
             "description": "Enable GPU acceleration with PyTorch (default: ON, supports Blackwell sm_120). Turn OFF for CPU-only mode (NumPy/scipy).",
         },
+        "window_size": {
+            "type": int,
+            "default": 10,
+            "min": 0,
+            "max": 500,
+            "description": "Number of timepoints per ILP optimization window (0 = entire timelapse at once). Smaller windows solve much faster but lose long-range tracking context. Recommended: 5-20 for large datasets.",
+        },
+        "solution_gap": {
+            "type": float,
+            "default": 0.001,
+            "min": 0.0,
+            "max": 0.1,
+            "step": 0.001,
+            "description": "ILP solver optimality gap tolerance (0.0 = exact optimal, takes longest). 0.001 = stop at 0.1% gap. Higher values terminate faster at a small quality cost.",
+        },
     },
 )
 def ultrack_ensemble_tracking(
@@ -787,6 +809,8 @@ def ultrack_ensemble_tracking(
     disappear_weight: float = -2.0,
     division_weight: float = -0.01,
     enable_gpu: bool = True,
+    window_size: int = 10,
+    solution_gap: float = 0.001,
 ) -> np.ndarray:
     """
     Track cells using ultrack with segmentation ensemble.
@@ -847,6 +871,10 @@ def ultrack_ensemble_tracking(
     enable_gpu : bool
         Enable GPU acceleration with PyTorch (default: ON, supports Blackwell sm_120)
         Set to False for CPU-only mode (NumPy/scipy)
+    window_size : int
+        Number of timepoints per ILP window (0 = entire timelapse). Default 10.
+    solution_gap : float
+        ILP optimality gap tolerance. Default 0.001 (0.1%). Use 0.0 for exact.
 
     Returns:
     --------
@@ -951,6 +979,9 @@ def ultrack_ensemble_tracking(
     output_path = output_dir / f"{base_name}_ultrack.tif"
 
     # Create the tracking script
+    # Convert window_size: 0 means "no windowing" (process entire timelapse at once)
+    effective_window_size = None if window_size == 0 else window_size
+
     script_content = create_ultrack_ensemble_script(
         label_paths=label_paths,
         output_path=str(output_path),
@@ -962,6 +993,8 @@ def ultrack_ensemble_tracking(
         disappear_weight=disappear_weight,
         division_weight=division_weight,
         enable_gpu=enable_gpu,
+        window_size=effective_window_size,
+        solution_gap=solution_gap,
     )
 
     # Run ultrack in the dedicated environment
