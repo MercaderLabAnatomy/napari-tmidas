@@ -825,10 +825,11 @@ def run_ultrack_in_env(
     progress_callback=None,
     input_file: Optional[str] = None,
     output_file: Optional[str] = None,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, any]:
     """
     Run a Python script in the ultrack conda environment.
-    
+
     Parameters:
     -----------
     script_content : str
@@ -841,7 +842,11 @@ def run_ultrack_in_env(
         Path to input file (for logging)
     output_file : str, optional
         Path to output file (for logging)
-    
+    extra_env : Dict[str, str], optional
+        Extra environment variables to inject into the subprocess (e.g.
+        ``{"GRB_LICENSE_FILE": "/home/user/gurobi.lic"}``). Merged on top of
+        the inherited environment.
+
     Returns:
     --------
     Dict[str, any]
@@ -859,12 +864,12 @@ def run_ultrack_in_env(
     
     try:
         conda_cmd = get_conda_cmd()
-        
+
         # Write script to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write(script_content)
             script_path = f.name
-        
+
         try:
             # Run the script with REAL-TIME output streaming
             log(f"Running ultrack in environment '{env_name}'...")
@@ -872,7 +877,14 @@ def run_ultrack_in_env(
                 log(f"  Input: {input_file}")
             if output_file:
                 log(f"  Output: {output_file}")
-            
+
+            # Inherit the current environment, layering in any extras (e.g.
+            # GRB_LICENSE_FILE so the ilp solver picks up the right license).
+            run_env = None
+            if extra_env:
+                run_env = os.environ.copy()
+                run_env.update(extra_env)
+
             # Stream output in real-time so you see ILP progress
             process = subprocess.Popen(
                 [conda_cmd, "run", "-n", env_name, "python", script_path],
@@ -880,6 +892,7 @@ def run_ultrack_in_env(
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 text=True,
                 bufsize=1,  # Line buffered
+                env=run_env,
             )
             
             output_lines = []

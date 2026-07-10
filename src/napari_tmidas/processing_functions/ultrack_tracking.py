@@ -11,6 +11,7 @@ handle segmentation uncertainty by evaluating multiple candidate segmentations.
 """
 
 import inspect
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -24,8 +25,45 @@ from napari_tmidas.processing_functions.ultrack_env_manager import (
     is_env_created,
     is_package_installed,
     run_ultrack_in_env,
-    setup_gurobi_license,
 )
+
+
+def _resolve_gurobi_license(gurobi_license: str = "") -> Optional[str]:
+    """Resolve which Gurobi license file the ilp solver should use.
+
+    Ultrack's linking step solves an ILP that can be handled by Gurobi. An
+    existing ``.lic`` file (academic/named-user license) is read directly by
+    Gurobi and needs no ``grbgetkey`` activation step; we simply point
+    ``GRB_LICENSE_FILE`` at it so it overrides any bundled/default license in
+    the conda env.
+
+    Resolution order (first hit wins):
+      1. explicit ``gurobi_license`` path argument (from the widget),
+      2. an already-exported ``GRB_LICENSE_FILE``,
+      3. ``~/gurobi.lic`` (the standard academic/named-user location).
+
+    Returns the resolved license path as a string, or ``None`` when no license
+    file is found (the default solver is then used).
+    """
+    candidate = (gurobi_license or "").strip()
+    if candidate:
+        lic = os.path.expanduser(candidate)
+        if os.path.isfile(lic):
+            return lic
+        print(
+            f"Warning: gurobi_license path '{candidate}' not found; "
+            "falling back to auto-detection."
+        )
+
+    existing = os.environ.get("GRB_LICENSE_FILE", "").strip()
+    if existing and os.path.isfile(os.path.expanduser(existing)):
+        return os.path.expanduser(existing)
+
+    home_lic = os.path.join(os.path.expanduser("~"), "gurobi.lic")
+    if os.path.isfile(home_lic):
+        return home_lic
+
+    return None
 
 
 def create_ultrack_ensemble_script(
@@ -50,7 +88,8 @@ def create_ultrack_ensemble_script(
     output_path : str
         Path to save the tracked output
     gurobi_license : Optional[str]
-        Gurobi license key if provided
+        Path to a resolved Gurobi license file (.lic), or None for the default
+        solver. Exported as GRB_LICENSE_FILE for the subprocess.
     min_area : int
         Minimum area for candidate segments
     max_neighbors : int
@@ -377,10 +416,12 @@ from ultrack.config import MainConfig
 print("\\nVerifying processing mode...")
 {gpu_verification_code}
 
-# Setup Gurobi if license key is provided
+# Gurobi license: GRB_LICENSE_FILE is exported into this process's environment
+# by the caller when a license file was resolved. Gurobi reads it directly, so
+# no activation step is needed here - just verify it and fall back otherwise.
 gurobi_license = {repr(gurobi_license)}
-if gurobi_license and gurobi_license != "":
-    print("Setting up Gurobi with license key...")
+if gurobi_license:
+    print(f"Using Gurobi license file: {{gurobi_license}}")
     try:
         import gurobipy as gp
         env = gp.Env(empty=True)
@@ -388,7 +429,7 @@ if gurobi_license and gurobi_license != "":
         env.start()
         print("✓ Gurobi license verified")
     except Exception as e:
-        print(f"Warning: Gurobi setup failed: {{{{e}}}}")
+        print(f"Warning: Gurobi setup failed: {{e}}")
         print("Proceeding with default solver...")
 
 # Load label images from different segmentation methods
@@ -650,7 +691,7 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
         "gurobi_license": {
             "type": str,
             "default": "",
-            "description": "Gurobi license key (only needed ONCE during first-time setup; leave empty for default solver)",
+            "description": "Path to a Gurobi license file (.lic) for the ilp solver. Leave empty to auto-detect ~/gurobi.lic (or an already-exported GRB_LICENSE_FILE); otherwise falls back to the default solver.",
         },
         "min_area": {
             "type": int,
@@ -757,9 +798,10 @@ def ultrack_ensemble_tracking(
         Comma-separated list of label file suffixes for ensemble
         (e.g., "_cp_labels.tif,_convpaint_labels.tif")
     gurobi_license : str
-        Gurobi license key. Only needed ONCE during first-time environment setup.
-        Leave empty for default solver, or enter your license key (e.g., "YOUR_LICENSE_KEY").
-        After initial activation, leave empty on subsequent runs.
+        Optional path to a Gurobi license file (.lic) used by the ilp solver.
+        Leave empty to auto-detect ~/gurobi.lic (or an already-exported
+        GRB_LICENSE_FILE); otherwise the default solver is used. Gurobi reads
+        the .lic file directly, so no grbgetkey activation step is required.
     min_area : int
         Minimum cell area in pixels
     max_neighbors : int
@@ -803,14 +845,14 @@ def ultrack_ensemble_tracking(
         print("Warning: scikit-image version check failed. Tracking may encounter issues with zarr arrays.")
         print("Continuing anyway - if you see 'buffer source array is read-only' errors, please check scikit-image installation.")
 
-    # Handle Gurobi license if provided (only needed first time)
-    if gurobi_license and gurobi_license.strip() != "":
-        print(f"Gurobi license key provided: {gurobi_license}")
-        print("Note: License only needs to be entered once during first-time setup.")
-        if not setup_gurobi_license(gurobi_license):
-            print("Warning: Failed to setup Gurobi license. Continuing with default solver.")
-        else:
-            print("Gurobi license activated. You can leave this field empty on future runs.")
+    # Resolve the Gurobi license file for the ilp solver. We point
+    # GRB_LICENSE_FILE at it rather than running grbgetkey: an existing .lic
+    # file is read directly by Gurobi and needs no activation step.
+    gurobi_license_path = _resolve_gurobi_license(gurobi_license)
+    if gurobi_license_path:
+        print(f"Using Gurobi license file: {gurobi_license_path}")
+    else:
+        print("No Gurobi license file found; using default solver.")
 
     # Get the current file path from the processing context
     img_path = None
@@ -882,7 +924,7 @@ def ultrack_ensemble_tracking(
     script_content = create_ultrack_ensemble_script(
         label_paths=label_paths,
         output_path=str(output_path),
-        gurobi_license=gurobi_license if gurobi_license.strip() != "" else None,
+        gurobi_license=gurobi_license_path,
         min_area=min_area,
         max_neighbors=max_neighbors,
         max_distance=max_distance,
@@ -894,11 +936,15 @@ def ultrack_ensemble_tracking(
 
     # Run ultrack in the dedicated environment
     print(f"Running ultrack ensemble tracking with {len(label_paths)} segmentation(s)...")
+    extra_env = (
+        {"GRB_LICENSE_FILE": gurobi_license_path} if gurobi_license_path else None
+    )
     result = run_ultrack_in_env(
         script_content=script_content,
         progress_callback=lambda msg: print(msg),
         input_file=str(label_paths[0]),
         output_file=str(output_path),
+        extra_env=extra_env,
     )
 
     if not result["success"]:
