@@ -90,12 +90,13 @@ def _get_cuda_version() -> Optional[str]:
 def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
     """
     Ensure scikit-image has the read-only array fix.
-    
-    The fix for read-only arrays (needed for zarr/pandas compatibility) was merged
-    in commit 70ab2a6b on Feb 8, 2026. It will be in scikit-image >= 0.26.1.
-    
-    Until 0.26.1 is released, this installs the dev version from GitHub.
-    Once 0.26.1+ is available, it upgrades to the stable release.
+
+    The const-buffer fix for read-only arrays (needed for zarr/pandas
+    compatibility) is not in any released scikit-image yet (latest is 0.26.0).
+    If a fixed release (>= 0.26.1) is installed, this reports success; otherwise
+    read-only arrays are handled at runtime by the map_array shim injected into
+    the tracking script (see create_ultrack_ensemble_script), so no fragile
+    source build is attempted here.
     
     Parameters:
     -----------
@@ -176,25 +177,16 @@ def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
             
             return True
         
-        # Need to install dev version with the fix
-        log("Installing scikit-image dev version with read-only array fix...")
-        log("  (Will auto-upgrade to stable 0.26.1+ when available)")
-        
-        result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "pip", "install",
-             "--upgrade", "git+https://github.com/scikit-image/scikit-image.git@main"],
-            capture_output=True,
-            text=True,
-            timeout=300
+        # No released scikit-image has the const-buffer fix yet (<= 0.26.0),
+        # and building from git main is slow and fragile. The tracking script
+        # applies a runtime map_array shim that copies read-only buffers, so we
+        # don't need to touch the installed scikit-image here.
+        log(
+            f"scikit-image {current_version} lacks the const-buffer fix; "
+            "read-only arrays are handled by the runtime map_array shim."
         )
-        
-        if result.returncode == 0:
-            log("✓ Installed scikit-image dev version")
-            return True
-        else:
-            log(f"Failed to install scikit-image dev version: {result.stderr}")
-            return False
-            
+        return True
+
     except Exception as e:
         log(f"Error managing scikit-image: {e}")
         return False

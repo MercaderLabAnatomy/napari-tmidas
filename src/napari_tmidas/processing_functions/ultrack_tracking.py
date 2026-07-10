@@ -410,6 +410,36 @@ import zarr
 from ultrack import track, to_tracks_layer, tracks_to_zarr
 from ultrack.config import MainConfig
 
+# ---------------------------------------------------------------------------
+# Compatibility shim for "ValueError: buffer source array is read-only".
+# scikit-image's cython _map_array requires writable buffers, but ultrack's ILP
+# solver indexes an ArrayMap whose internal in/out values (and the DB-backed
+# node IDs) are read-only. The const-buffer fix is not in any released
+# scikit-image yet (<= 0.26.0), so wrap map_array to copy read-only inputs.
+# Safe no-op once a fixed scikit-image ships.
+# ---------------------------------------------------------------------------
+try:
+    import numpy as _np_shim
+    import skimage.util._map_array as _ma_shim
+    if not getattr(_ma_shim.map_array, "_tmidas_rw_patched", False):
+        _orig_map_array = _ma_shim.map_array
+        def _writable_shim(a):
+            if isinstance(a, _np_shim.ndarray) and not a.flags.writeable:
+                return a.copy()
+            return a
+        def _map_array_rw(input_arr, input_vals, output_vals, out=None):
+            return _orig_map_array(
+                _writable_shim(input_arr),
+                _writable_shim(input_vals),
+                _writable_shim(output_vals),
+                out=out,
+            )
+        _map_array_rw._tmidas_rw_patched = True
+        _ma_shim.map_array = _map_array_rw
+        print("Applied scikit-image read-only buffer compatibility shim")
+except Exception as _shim_err:
+    print(f"Warning: could not apply scikit-image read-only shim: {{_shim_err}}")
+
 {labels_to_contours_import}
 
 # Verify GPU/CPU configuration
