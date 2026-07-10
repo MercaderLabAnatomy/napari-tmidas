@@ -184,8 +184,8 @@ The pipeline preserves the dtype of the input image:
 
 ## See Also
 
-- [Image Processing Overview](./basic_processing.md)
-- [Batch Processing](./basic_processing.md#batch-processing)
+- [All Processing Functions](./all_processing_functions.md)
+- [Batch Processing Reference](./all_processing_functions.md)
 - [Label Inspector](./batch_label_inspection.md)
 
 ## Technical Details

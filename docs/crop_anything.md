@@ -281,7 +281,7 @@ multi_channel/
 
 ## Related Features
 
-- **[Basic Processing](basic_processing.md)**: Image preprocessing and filtering
+- **[All Processing Functions](all_processing_functions.md)**: Image preprocessing and filtering
 - **[Cellpose Segmentation](cellpose_segmentation.md)**: Alternative segmentation method
 - **[Grid View Overlay](grid_view_overlay.md)**: Visualize multiple processed images
 - **[Label Inspection](label_inspection.md)**: Interactive label verification and editing

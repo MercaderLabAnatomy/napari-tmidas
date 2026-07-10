@@ -72,19 +72,17 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 ### Core Workflows
 
 - **[File Conversion](docs/file_conversion.md)** - Multi-format microscopy file conversion (LIF, ND2, CZI, NDPI, Acquifer)
-- **[Batch Processing](docs/basic_processing.md)** - Label operations, filters, channel splitting
+- **[Batch Processing](docs/all_processing_functions.md)** - All 40+ processing functions in one place
 - **[Frame Removal](docs/frame_removal.md)** - Interactive human-in-the-loop frame removal from time series
 - **[Label-Based Cropping](docs/label_based_cropping.md)** - Interactive ROI extraction with label expansion
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
-- **[Colocalization](docs/advanced_processing.md#colocalization-analysis)** - Multi-channel ROI analysis
 
 ### Advanced Features
 
 - [Batch Crop Anything](docs/crop_anything.md) - Interactive object cropping with SAM2
 - [Batch Label Inspection](docs/batch_label_inspection.md) - Manual label verification and editing
-- [SciPy Filters](docs/advanced_processing.md#scipy-filters) - Gaussian, median, morphological operations
-- [Scikit-Image Filters](docs/advanced_processing.md#scikit-image-filters) - CLAHE, thresholding, edge detection
+- [Multichannel Processing](docs/multichannel_processing.md) - Channel selection and per-channel processing
 
 ## 💻 Installation
 

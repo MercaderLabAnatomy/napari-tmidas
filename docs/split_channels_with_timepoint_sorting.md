@@ -197,6 +197,6 @@ Both approaches are valid! Choose based on your workflow needs.
 
 ## See Also
 
-- [Basic Processing](basic_processing.md) - Standard channel splitting
+- [All Processing Functions](all_processing_functions.md) - Standard channel splitting
 - [Batch Processing Guide](batch_label_inspection.md) - General batch processing workflows
 - `sort_images_by_timepoints.py` - Standalone timepoint sorting script

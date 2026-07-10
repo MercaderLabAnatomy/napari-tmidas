@@ -449,4 +449,4 @@ If you use Spotiflow in your research, please cite:
 - [CAREamics Denoising](careamics_denoising.md) - Denoise images before spot detection
 - [RegionProps Analysis](regionprops_analysis.md) - Quantify detected spots
 - [Trackastra Tracking](trackastra_tracking.md) - Track spots over time
-- [Advanced Processing](advanced_processing.md) - More image processing functions
+- [All Processing Functions](all_processing_functions.md) - More image processing functions

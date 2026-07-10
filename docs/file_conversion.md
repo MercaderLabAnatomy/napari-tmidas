@@ -348,7 +348,7 @@ Automatically detects file size and chooses optimal strategy.
 ## Related Features
 
 - **[Batch Crop Anything](crop_anything.md)** - Extract regions from converted images
-- **[Image Processing](basic_processing.md)** - Process converted images
+- **[Image Processing](all_processing_functions.md)** - Process converted images
 - **[Cellpose Segmentation](cellpose_segmentation.md)** - Segment converted datasets
 
 ## Technical Specifications

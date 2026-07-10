@@ -81,4 +81,4 @@ print(f"Failed: {len(results['failed'])} images")
 ## See Also
 
 - Full documentation: [label_based_cropping.md](./label_based_cropping.md)
-- Batch processing: [Batch Image Processing](./basic_processing.md#batch-processing)
+- Batch processing: [All Processing Functions](./all_processing_functions.md)

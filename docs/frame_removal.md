@@ -229,9 +229,9 @@ While the widget is focused:
 
 ## See Also
 
-- [Basic Processing Functions](basic_processing.md) - For automated frame processing
-- [Split TZYX into ZYX TIFs](basic_processing.md#split-tzyx-into-zyx-tifs) - For splitting time series
-- [Timepoint Merger](basic_processing.md) - For combining time series
+- [All Processing Functions](all_processing_functions.md) - For automated frame processing
+- [Split TZYX into ZYX TIFs](all_processing_functions.md#time-series-operations) - For splitting time series
+- [Merge Timepoints](all_processing_functions.md#time-series-operations) - For combining time series
 
 ## Requirements
 

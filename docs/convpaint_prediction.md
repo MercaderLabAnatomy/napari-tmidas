@@ -352,5 +352,5 @@ GitHub. https://github.com/guiwitz/napari-convpaint
 
 - [Cellpose Segmentation](cellpose_segmentation.md) - Deep learning instance segmentation
 - [CAREamics Denoising](careamics_denoising.md) - AI-based denoising
-- [Semantic to Instance](basic_processing.md#semantic-to-instance-segmentation) - Post-processing conversion
-- [Batch Processing Guide](basic_processing.md) - General batch processing workflow
+- [Semantic to Instance Segmentation](all_processing_functions.md) - Post-processing conversion
+- [All Processing Functions](all_processing_functions.md) - Complete batch processing reference

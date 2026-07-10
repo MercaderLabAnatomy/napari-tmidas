@@ -452,4 +452,4 @@ If you use CAREamics in your research, please cite the relevant papers:
 - [Cellpose Segmentation](cellpose_segmentation.md) - Segment denoised images
 - [Spotiflow Detection](spotiflow_detection.md) - Detect spots in denoised images  
 - [VisCy Virtual Staining](viscy_virtual_staining.md) - Virtual staining for label-free imaging
-- [Advanced Processing](advanced_processing.md) - More image processing functions
+- [All Processing Functions](all_processing_functions.md) - More image processing functions

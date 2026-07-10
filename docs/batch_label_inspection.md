@@ -289,8 +289,8 @@ If edits appear lost:
 ## Related Features
 
 - **[Cellpose Segmentation](cellpose_segmentation.md)** - Generate labels to inspect
-- **[Batch Processing](basic_processing.md)** - Post-process labels
-- **[Label Operations](basic_processing.md#label-image-operations)** - Filter/transform labels
+- **[Batch Processing](all_processing_functions.md)** - Post-process labels
+- **[Label Operations](all_processing_functions.md#label-image-operations)** - Filter/transform labels
 - **[RegionProps Analysis](regionprops_analysis.md)** - Analyze edited labels
 
 ## Technical Details

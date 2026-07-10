@@ -1,5 +1,7 @@
 # Basic Image Processing Functions
 
+> **This page has been superseded.** For a complete overview of all batch processing functions, see [all_processing_functions.md](all_processing_functions.md).
+
 This document describes the basic image processing functions available in napari-tmidas for batch processing.
 
 ## Interactive Table Workflow

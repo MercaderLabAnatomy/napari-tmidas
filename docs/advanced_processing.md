@@ -1,3 +1,5 @@
+> **This page has been superseded.** For a complete overview of all batch processing functions, see [all_processing_functions.md](all_processing_functions.md). For CAREamics, see [careamics_denoising.md](careamics_denoising.md). For Spotiflow, see [spotiflow_detection.md](spotiflow_detection.md).
+
 # CAREamics Denoising
 
 ## Overview
@@ -402,7 +404,7 @@ Statistical tables containing:
 
 ## See Also
 
-- [Basic Processing Functions](basic_processing.md)
+- [All Processing Functions](all_processing_functions.md)
 - [Cellpose Segmentation](cellpose_segmentation.md)
 - [Regionprops Analysis](regionprops_analysis.md)
 - [Grid View Overlay](grid_view_overlay.md)
