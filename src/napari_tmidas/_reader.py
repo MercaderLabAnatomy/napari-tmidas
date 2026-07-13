@@ -2,7 +2,64 @@
 This module implements a reader plugin for napari.
 """
 
+import contextlib
+import threading
+from collections import OrderedDict
+
 import numpy as np
+
+# Cache of open TiffFile handles so lazy per-page dask tasks don't reopen
+# and re-parse the file's page index on every read (O(pages²) otherwise —
+# dominant cost for files with thousands of pages).
+_TIFF_HANDLES: OrderedDict = OrderedDict()
+_TIFF_HANDLES_LOCK = threading.Lock()
+_TIFF_HANDLES_MAX = 8
+
+
+def _get_cached_tiff(path):
+    """Return a (shared, thread-safe) open TiffFile for *path*.
+
+    The cached handle is validated against the file's current identity
+    (inode, mtime, size) so an overwritten or replaced file is reopened
+    instead of served stale from the old inode.
+    """
+    import os
+
+    import tifffile
+
+    st = os.stat(path)
+    sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+    with _TIFF_HANDLES_LOCK:
+        cached = _TIFF_HANDLES.get(path)
+        if cached is not None:
+            tf, cached_sig = cached
+            if cached_sig == sig and not tf.filehandle.closed:
+                _TIFF_HANDLES.move_to_end(path)
+                return tf
+            with contextlib.suppress(Exception):
+                tf.close()
+        tf = tifffile.TiffFile(path)
+        # Serialize file seeks/reads across dask threads (decode still
+        # runs in parallel) — same mechanism tifffile's zarr store uses.
+        tf.filehandle.lock = True
+        _TIFF_HANDLES[path] = (tf, sig)
+        while len(_TIFF_HANDLES) > _TIFF_HANDLES_MAX:
+            _, (old, _) = _TIFF_HANDLES.popitem(last=False)
+            with contextlib.suppress(Exception):
+                old.close()
+        return tf
+
+
+def invalidate_tiff_cache(path=None):
+    """Close cached TIFF handle(s) — call after overwriting a file on disk,
+    otherwise reads keep coming from the old (replaced) inode."""
+    with _TIFF_HANDLES_LOCK:
+        paths = [path] if path is not None else list(_TIFF_HANDLES)
+        for p in paths:
+            entry = _TIFF_HANDLES.pop(p, None)
+            if entry is not None:
+                with contextlib.suppress(Exception):
+                    entry[0].close()
 
 
 def napari_get_reader(path):
@@ -83,23 +140,24 @@ def tiff_reader_function(path):
     Rebuilds the array as series[0].shape (e.g. TZYX) via one dask task per
     IFD page, so only viewed slices are ever decompressed into RAM.
     """
-    import tifffile
     import dask.array as da
+    import tifffile
     from dask import delayed
 
     paths = [path] if isinstance(path, str) else path
     results = []
 
     for p in paths:
-        with tifffile.TiffFile(p) as tf:
-            series = tf.series[0]
-            shape = tuple(int(s) for s in series.shape)
-            dtype = series.dtype
-            n_pages = len(series.pages)
+        tf = _get_cached_tiff(p)
+        series = tf.series[0]
+        shape = tuple(int(s) for s in series.shape)
+        dtype = series.dtype
+        n_pages = len(series.pages)
 
         if n_pages <= 1 or len(shape) <= 2:
             arr = tifffile.imread(p)
             import os
+
             basename = os.path.basename(p).lower()
             layer_type = "labels" if "label" in basename else "image"
             results.append((arr, {}, layer_type))
@@ -108,8 +166,13 @@ def tiff_reader_function(path):
         page_shape = shape[-2:]
 
         def _read_page(fpath, idx):
-            with tifffile.TiffFile(fpath) as _tf:
-                return _tf.series[0].pages[idx].asarray()
+            # Shared cached handle: the page index is parsed once per file,
+            # not once per page read.  The whole fetch runs under the
+            # handle's reentrant lock: lazy page-IFD instantiation in
+            # `pages[idx]` mutates shared state and is not thread-safe.
+            tf = _get_cached_tiff(fpath)
+            with tf.filehandle.lock:
+                return tf.series[0].pages[idx].asarray()
 
         dask_pages = [
             da.from_delayed(
@@ -125,6 +188,7 @@ def tiff_reader_function(path):
 
         # Detect label files by filename convention
         import os
+
         basename = os.path.basename(p).lower()
         layer_type = "labels" if "label" in basename else "image"
         results.append((arr, {}, layer_type))
