@@ -203,6 +203,10 @@ class TrackAstraEnvManager:
         "trackastra": "0.5.3",
         "zarr": "3.0.0",
     }
+    # Exclusive upper bounds: versions >= these break compatibility.
+    MAX_VERSIONS = {
+        "motile": "1.0.0",  # 1.0.0 renamed NodeSelection -> NodeSelectedCost
+    }
 
     @staticmethod
     def get_conda_cmd():
@@ -331,6 +335,11 @@ print(json.dumps(status))
             required = cls.REQUIRED_VERSIONS[pkg]
             if not cls._version_at_least(found, required):
                 reasons.append(f"{pkg} version {found} < required {required}")
+            max_ver = cls.MAX_VERSIONS.get(pkg)
+            if max_ver and cls._version_at_least(found, max_ver):
+                reasons.append(
+                    f"{pkg} version {found} >= max allowed {max_ver} (API incompatibility)"
+                )
 
         return (len(reasons) > 0), reasons
 
@@ -340,6 +349,11 @@ print(json.dumps(status))
         print("Repairing TrackAstra environment to required package versions...")
         conda_cmd = cls.get_conda_cmd()
         try:
+            # Clear corrupted/stale cached packages before installing.
+            subprocess.run(
+                [conda_cmd, "clean", "--packages", "--index-cache", "-y"],
+                check=False,
+            )
             # Keep solver stack aligned with TrackAstra ILP requirements.
             solver_cmd = [
                 conda_cmd,
@@ -367,7 +381,7 @@ print(json.dumps(status))
                 "install",
                 "--upgrade",
                 "trackastra[ilp]",
-                "motile",
+                "motile==0.4.0",
                 "zarr>=3",
             ]
             subprocess.run(pip_cmd, check=True)
@@ -402,6 +416,11 @@ print(json.dumps(status))
             env_create_cmd.insert(-1, "--no-default-packages")
 
         try:
+            # Clear corrupted/stale cached packages before installing.
+            subprocess.run(
+                [conda_cmd, "clean", "--packages", "--index-cache", "-y"],
+                check=False,
+            )
             subprocess.run(env_create_cmd, check=True)
 
             # Install ilpy first from conda-forge
@@ -425,7 +444,7 @@ print(json.dumps(status))
             # Install TrackAstra ILP extras via pip (upstream recipe).
             pip_packages = [
                 "trackastra[ilp]",
-                "motile",
+                "motile==0.4.0",
                 "zarr>=3",
             ]
 

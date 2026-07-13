@@ -388,3 +388,38 @@ def test_trackastra_env_needs_repair_when_zarr_missing():
     needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
     assert needs_repair is True
     assert any("zarr" in reason for reason in reasons)
+
+
+def test_trackastra_env_needs_repair_when_motile_too_new():
+    """motile>=1.0.0 renamed NodeSelection; env_needs_repair must flag it."""
+    status = {
+        "python": "3.11.0",
+        "packages": {
+            "gurobipy": {"present": True, "version": "13.0.0"},
+            "ilpy": {"present": True, "version": "0.5.1"},
+            "motile": {"present": True, "version": "1.0.0"},
+            "trackastra": {"present": True, "version": "0.5.3"},
+            "zarr": {"present": True, "version": "3.0.0"},
+        },
+    }
+
+    needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
+    assert needs_repair is True
+    assert any("motile" in r and "1.0.0" in r for r in reasons)
+
+
+def test_trackastra_env_healthy_with_motile_040():
+    """motile==0.4.0 is within the allowed range; no repair needed."""
+    status = {
+        "python": "3.11.0",
+        "packages": {
+            "gurobipy": {"present": True, "version": "13.0.0"},
+            "ilpy": {"present": True, "version": "0.5.1"},
+            "motile": {"present": True, "version": "0.4.0"},
+            "trackastra": {"present": True, "version": "0.5.3"},
+            "zarr": {"present": True, "version": "3.0.0"},
+        },
+    }
+
+    needs_repair, reasons = TrackAstraEnvManager.env_needs_repair(status)
+    assert needs_repair is False, reasons
