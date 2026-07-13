@@ -2477,7 +2477,7 @@ class ProcessingWorker(QThread):
             )
             is_folder_function = (
                 "timepoint" in function_name.lower()
-                or "merge" in function_name.lower()
+                or "merge_timepoint" in function_name.lower()
                 or "folder" in function_name.lower()
                 or "grid" in function_name.lower()
             )
@@ -3382,7 +3382,7 @@ class FileResultsWidget(QWidget):
         is_folder_function = (
             "folder" in function_name.lower()
             or "timepoint" in function_name.lower()
-            or "merge" in function_name.lower()
+            or "merge_timepoint" in function_name.lower()
             or "grid" in function_name.lower()
             or "folder" in description.lower()
             or "cellpose" in description.lower()

@@ -47,23 +47,28 @@ try:
     from sklearn_extra.cluster import KMedoids
 
     _HAS_KMEDOIDS = True
-except (ImportError, ValueError) as e:
-    # ImportError: package not installed
-    # ValueError: binary incompatibility (e.g., numpy version mismatch)
+except Exception as e:
+    # ImportError: package not installed or C extension binary incompatibility
+    # ValueError: numpy version mismatch (older detection)
     KMedoids = None
     _HAS_KMEDOIDS = False
-    error_msg = str(e)
-    if "numpy.dtype size changed" in error_msg:
+    import importlib.util
+
+    _sklearn_extra_spec = importlib.util.find_spec("sklearn_extra")
+    if _sklearn_extra_spec is not None:
+        # Package is installed but fails to load — binary incompatibility
+        # (e.g., compiled against NumPy 1.x, running under NumPy 2.x)
         print(
-            "scikit-learn-extra has a NumPy binary incompatibility. "
-            "This is typically resolved by reinstalling scikit-learn-extra. "
-            "Run: pip install --force-reinstall --no-cache-dir scikit-learn-extra"
+            f"scikit-learn-extra has a binary incompatibility ({type(e).__name__}). "
+            "This is typically caused by a NumPy version mismatch. "
+            "Reinstall with: pip install --force-reinstall --no-cache-dir scikit-learn-extra"
         )
     else:
         print(
             f"scikit-learn-extra not available ({type(e).__name__}). "
             "Install with: pip install scikit-learn-extra"
         )
+    del _sklearn_extra_spec
 
 try:
     import pandas as pd
