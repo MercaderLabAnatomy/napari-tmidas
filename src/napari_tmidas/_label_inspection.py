@@ -644,6 +644,7 @@ class LabelInspector:
         self.image_label_pairs = []
         self.current_index = 0
         self._click_delete_cb = None  # click-to-delete mouse callback
+        self._click_relabel_cb = None  # click-to-relabel mouse callback
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -860,9 +861,12 @@ class LabelInspector:
             name=f"Labels ({os.path.basename(label_path)})",
         )
 
-        # Click-to-delete mode persists across pairs; rebind its Ctrl+Z
-        # undo on the freshly created layer.
-        if self._click_delete_cb is not None:
+        # Click-to-delete / click-to-relabel modes persist across pairs;
+        # rebind their shared Ctrl+Z undo on the freshly created layer.
+        if (
+            self._click_delete_cb is not None
+            or self._click_relabel_cb is not None
+        ):
             self._bind_undo_key(new_labels_layer, True)
 
         # Show progress
@@ -921,8 +925,8 @@ class LabelInspector:
             None,
         )
 
-    def delete_label_all_timepoints(self, label_id: int = None) -> None:
-        """Delete *label_id* (default: the selected label) from **all** timepoints.
+    def _remap_all_timepoints(self, labels_layer, mapping: dict) -> None:
+        """Apply {old_id: new_id} *mapping* to the layer across **all** timepoints.
 
         For dask-backed labels this is a value-remap LUT entry
         (:meth:`_DaskFancyIndexWrapper.remap_values`): zero I/O at call time,
@@ -930,6 +934,27 @@ class LabelInspector:
         accumulated, and pending manual edits are remapped too.  The current
         view refreshes instantly from the in-place-updated slice cache.
         """
+        data = labels_layer.data
+
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+
+        if isinstance(data, _DaskFancyIndexWrapper):
+            data.remap_values(mapping)
+        elif da is not None and isinstance(data, da.Array):
+            wrapper = _DaskFancyIndexWrapper(data)
+            wrapper.remap_values(mapping)
+            labels_layer.data = wrapper
+        else:
+            # Plain numpy: in-place.
+            _apply_value_map_inplace(data, mapping)
+
+        labels_layer.refresh()
+
+    def delete_label_all_timepoints(self, label_id: int = None) -> None:
+        """Delete *label_id* (default: the selected label) from **all** timepoints."""
         labels_layer = self._find_labels_layer()
         if labels_layer is None:
             self.viewer.status = "No labels layer found."
@@ -942,60 +967,162 @@ class LabelInspector:
             self.viewer.status = "Select a non-background label first."
             return
 
-        data = labels_layer.data
-
-        try:
-            import dask.array as da
-        except ImportError:
-            da = None
-
-        if isinstance(data, _DaskFancyIndexWrapper):
-            data.remap_values({label_id: 0})
-        elif da is not None and isinstance(data, da.Array):
-            wrapper = _DaskFancyIndexWrapper(data)
-            wrapper.remap_values({label_id: 0})
-            labels_layer.data = wrapper
-        else:
-            # Plain numpy: in-place.
-            data[data == label_id] = 0
-
-        labels_layer.refresh()
+        self._remap_all_timepoints(labels_layer, {label_id: 0})
         self.viewer.status = (
             f"Label {label_id} removed from all timepoints. "
             "Save to write changes to disk."
         )
 
-    def _on_undo_key(self, layer):
-        """Ctrl+Z while click-to-delete mode is on.
+    def relabel_label_all_timepoints(
+        self, old_id: int, new_id: int = None
+    ) -> None:
+        """Give *old_id* the value *new_id* (default: the selected label)
+        across **all** timepoints.
 
-        Undoes the most recent all-T deletion; when there is none pending,
-        falls through to napari's own paint undo.  Saved deletions cannot
-        be undone (the save is the undo barrier).
+        Relabeling onto an existing ID merges the two labels; relabeling to
+        0 is equivalent to deletion.
         """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+
+        if new_id is None:
+            new_id = int(labels_layer.selected_label)
+        old_id, new_id = int(old_id), int(new_id)
+        if old_id == 0:
+            self.viewer.status = (
+                "Cannot relabel background — click a label instead."
+            )
+            return
+        if old_id == new_id:
+            self.viewer.status = f"Label {old_id} already has this ID."
+            return
+
+        self._remap_all_timepoints(labels_layer, {old_id: new_id})
+        self.viewer.status = (
+            f"Label {old_id} relabeled to {new_id} on all timepoints. "
+            "Save to write changes to disk."
+        )
+
+    def _on_undo_key(self, _provider=None):
+        """Ctrl+Z while click-to-delete / click-to-relabel mode is on.
+
+        Undoes the most recent all-T deletion or relabel; when there is
+        none pending, falls through to napari's own paint undo.  Saved
+        operations cannot be undone (the save is the undo barrier).
+
+        Bound on both the viewer and the Labels layer, so it receives the
+        key regardless of which layer is currently active; the labels layer
+        is resolved here rather than taken from the provider argument.
+        """
+        layer = self._find_labels_layer()
+        if layer is None:
+            return
         data = getattr(layer, "data", None)
         if isinstance(data, _DaskFancyIndexWrapper):
             mapping = data.undo_remap()
             if mapping:
                 layer.refresh()
-                ids = ", ".join(str(k) for k in mapping)
-                self.viewer.status = f"Restored label {ids} (deletion undone)."
+                desc = ", ".join(
+                    (
+                        f"{k} restored (deletion undone)"
+                        if v == 0
+                        else f"{k}→{v} reverted"
+                    )
+                    for k, v in mapping.items()
+                )
+                self.viewer.status = f"Undo: label {desc}."
                 return
         undo = getattr(layer, "undo", None)
         if callable(undo):
             undo()
 
     def _bind_undo_key(self, layer, bind: bool) -> None:
-        if layer is None or not hasattr(layer, "bind_key"):
-            return
+        """(Un)bind Ctrl+Z for delete-undo.
+
+        napari only dispatches a key to the *active* layer's keymap, so a
+        layer-only binding silently stops working whenever another layer
+        (e.g. an image channel) becomes active.  Bind on the viewer too —
+        it is always in the keymap chain — while keeping the layer binding
+        so it shadows napari's native paint-undo when Labels is active.
+        Passing ``None`` unbinds, restoring napari's default undo.
+        """
+        handler = self._on_undo_key if bind else None
         with contextlib.suppress(Exception):
-            layer.bind_key(
-                "Control-Z",
-                self._on_undo_key if bind else None,
-                overwrite=True,
+            self.viewer.bind_key("Control-Z", handler, overwrite=True)
+        if layer is not None and hasattr(layer, "bind_key"):
+            with contextlib.suppress(Exception):
+                layer.bind_key("Control-Z", handler, overwrite=True)
+
+    def _make_click_callback(self, on_click):
+        """Build a mouse-drag callback that fires *on_click(layer, label_id,
+        event)* only for a clean left-click (no drag — panning is unaffected),
+        with the clicked label value already resolved (None for off-canvas).
+        """
+
+        def _cb(viewer, event):
+            if event.button != 1:  # left button only
+                return
+            dragged = False
+            yield  # wait out the drag: only a clean click fires
+            while event.type == "mouse_move":
+                dragged = True
+                yield
+            if dragged:
+                return
+            layer = self._find_labels_layer()
+            if layer is None:
+                return
+            try:
+                val = layer.get_value(
+                    event.position,
+                    view_direction=event.view_direction,
+                    dims_displayed=event.dims_displayed,
+                    world=True,
+                )
+            except TypeError:  # older napari signature
+                val = layer.get_value(event.position, world=True)
+            on_click(layer, None if val is None else int(val), event)
+
+        return _cb
+
+    def _on_click_delete(self, layer, label_id, event):
+        if not label_id:  # None (off-canvas) or 0 (background)
+            self.viewer.status = (
+                "Click-to-delete: background clicked, nothing removed."
             )
+            return
+        self.delete_label_all_timepoints(label_id)
+
+    def _on_click_relabel(self, layer, label_id, event):
+        modifiers = {
+            str(m) for m in (getattr(event, "modifiers", None) or ())
+        }
+        if "Control" in modifiers:
+            # Pipette: pick up the clicked label as the target ID.
+            if not label_id:
+                self.viewer.status = (
+                    "Click-to-relabel: background clicked, no ID picked."
+                )
+                return
+            layer.selected_label = label_id
+            self.viewer.status = (
+                f"Picked label {label_id} — plain-click other labels "
+                f"to relabel them to {label_id}."
+            )
+            return
+        if not label_id:
+            self.viewer.status = (
+                "Click-to-relabel: background clicked, nothing relabeled."
+            )
+            return
+        self.relabel_label_all_timepoints(
+            label_id, int(layer.selected_label)
+        )
 
     def enable_click_delete(self, enabled: bool) -> None:
-        """Toggle click-to-delete mode.
+        """Toggle click-to-delete mode (mutually exclusive with relabel).
 
         While enabled, a plain left-click (no drag — panning is unaffected)
         on a label deletes that label from **all** timepoints via the fast
@@ -1004,38 +1131,11 @@ class LabelInspector:
         array before filling.
         """
         if enabled and self._click_delete_cb is None:
-
-            def _cb(viewer, event):
-                if event.button != 1:  # left button only
-                    return
-                dragged = False
-                yield  # wait out the drag: only a clean click deletes
-                while event.type == "mouse_move":
-                    dragged = True
-                    yield
-                if dragged:
-                    return
-                layer = self._find_labels_layer()
-                if layer is None:
-                    return
-                try:
-                    val = layer.get_value(
-                        event.position,
-                        view_direction=event.view_direction,
-                        dims_displayed=event.dims_displayed,
-                        world=True,
-                    )
-                except TypeError:  # older napari signature
-                    val = layer.get_value(event.position, world=True)
-                if val is None or int(val) == 0:
-                    self.viewer.status = (
-                        "Click-to-delete: background clicked, nothing removed."
-                    )
-                    return
-                self.delete_label_all_timepoints(int(val))
-
-            self._click_delete_cb = _cb
-            self.viewer.mouse_drag_callbacks.append(_cb)
+            self.enable_click_relabel(False)
+            self._click_delete_cb = self._make_click_callback(
+                self._on_click_delete
+            )
+            self.viewer.mouse_drag_callbacks.append(self._click_delete_cb)
             self._bind_undo_key(self._find_labels_layer(), True)
             self.viewer.status = (
                 "Click-to-delete ON: click a label to remove it "
@@ -1045,8 +1145,41 @@ class LabelInspector:
             with contextlib.suppress(ValueError):
                 self.viewer.mouse_drag_callbacks.remove(self._click_delete_cb)
             self._click_delete_cb = None
-            self._bind_undo_key(self._find_labels_layer(), False)
+            if self._click_relabel_cb is None:
+                self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-delete OFF."
+
+    def enable_click_relabel(self, enabled: bool) -> None:
+        """Toggle click-to-relabel mode (mutually exclusive with delete).
+
+        While enabled, a plain left-click on a label assigns it the layer's
+        currently selected label ID on **all** timepoints via the fast LUT
+        path (merging it into any existing label with that ID).
+        Ctrl+left-click pipettes: it sets the selected label ID from the
+        clicked label instead of relabeling.  Ctrl+Z undoes the last
+        relabel.
+        """
+        if enabled and self._click_relabel_cb is None:
+            self.enable_click_delete(False)
+            self._click_relabel_cb = self._make_click_callback(
+                self._on_click_relabel
+            )
+            self.viewer.mouse_drag_callbacks.append(self._click_relabel_cb)
+            self._bind_undo_key(self._find_labels_layer(), True)
+            self.viewer.status = (
+                "Click-to-relabel ON: Ctrl+click a label to pick up its ID, "
+                "then click labels to relabel them to it on all timepoints "
+                "(Ctrl+Z undoes the last relabel)."
+            )
+        elif not enabled and self._click_relabel_cb is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.mouse_drag_callbacks.remove(
+                    self._click_relabel_cb
+                )
+            self._click_relabel_cb = None
+            if self._click_delete_cb is None:
+                self._bind_undo_key(self._find_labels_layer(), False)
+            self.viewer.status = "Click-to-relabel OFF."
 
     def next_pair(self):
         """
@@ -1122,10 +1255,42 @@ def label_inspector(
     )
     def click_to_delete(enabled: bool = False):
         """While on, left-click a label in the viewer to delete it from all T."""
+        # NB: index by name — `.enabled` is FunctionGui's own bool property
+        # (widget enabled state) and shadows the parameter's CheckBox.
+        if enabled and click_to_relabel["enabled"].value:
+            click_to_relabel["enabled"].value = False
         inspector.enable_click_delete(enabled)
+
+    @magicgui(
+        auto_call=True,
+        enabled={
+            "label": "Click a label to relabel it (Ctrl+click picks up an ID)",
+            "tooltip": (
+                "While enabled, Ctrl+left-click a label to pipette its ID, "
+                "then plain left-click other labels to relabel them to that "
+                "ID on every timepoint (merging them into it). The target "
+                "ID is napari's selected label, so you can also pick it "
+                "with napari's pipette (color picker) tool — switch back "
+                "to the pan/zoom tool (camera symbol) before clicking — or "
+                "type it into the label spinbox. Ctrl+Z undoes the last "
+                "relabel. Click-drag (pan/zoom) and clicks on background "
+                "do nothing. Relabels are staged in memory; press 'Save "
+                "Changes and Continue' to write them to the file — saved "
+                "relabels can no longer be undone."
+            ),
+        },
+    )
+    def click_to_relabel(enabled: bool = False):
+        """While on, left-click a label to give it the pipetted ID on all T."""
+        if enabled and click_to_delete["enabled"].value:
+            click_to_delete["enabled"].value = False
+        inspector.enable_click_relabel(enabled)
 
     viewer.window.add_dock_widget(save_and_continue)
     viewer.window.add_dock_widget(click_to_delete, name="Delete label (all T)")
+    viewer.window.add_dock_widget(
+        click_to_relabel, name="Relabel label (all T)"
+    )
 
 
 def label_inspector_widget():

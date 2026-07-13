@@ -275,6 +275,165 @@ class TestLabelInspector:
         inspector.enable_click_delete(False)
         assert len(self.viewer.mouse_drag_callbacks) == 0
 
+    def test_relabel_label_all_t_preserves_unsaved_edits(self):
+        """Relabeling across T merges IDs and keeps pending manual edits."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data, selected_label):
+                self.data = data
+                self.selected_label = selected_label
+
+            def refresh(self):
+                pass
+
+        base = np.zeros((3, 4, 4), dtype=np.uint32)
+        base[:, 0, 0] = 5  # label to relabel, present at every T
+        base[:, 1, 1] = 3  # merge target
+        wrapper = _DaskFancyIndexWrapper(da.from_array(base, chunks=(1, 4, 4)))
+
+        # Unsaved paint edit at T=1.
+        wrapper[np.array([1]), np.array([2]), np.array([2])] = 7
+
+        layer = _FakeLabels(wrapper, selected_label=3)
+        self.viewer.layers = [layer]
+
+        inspector = LabelInspector(self.viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            # new_id defaults to the selected label (the pipetted ID).
+            inspector.relabel_label_all_timepoints(5)
+
+            result = np.asarray(layer.data)
+            assert not np.any(result == 5)
+            assert np.all(result[:, 0, 0] == 3)  # merged into 3
+            assert np.all(result[:, 1, 1] == 3)
+            assert result[1, 2, 2] == 7  # unsaved paint edit survived
+
+            # No-ops: background source and identity relabel.
+            inspector.relabel_label_all_timepoints(0, 9)
+            inspector.relabel_label_all_timepoints(3, 3)
+            result = np.asarray(layer.data)
+            assert np.all(result[:, 0, 0] == 3)
+            assert not np.any(result == 9)
+
+    def test_relabel_label_all_t_numpy(self):
+        """Plain numpy labels are relabeled in place."""
+
+        class _FakeLabels:
+            def __init__(self, data, selected_label):
+                self.data = data
+                self.selected_label = selected_label
+
+            def refresh(self):
+                pass
+
+        data = np.zeros((4, 4), dtype=np.uint32)
+        data[0, 0] = 5
+        layer = _FakeLabels(data, selected_label=2)
+        self.viewer.layers = [layer]
+
+        inspector = LabelInspector(self.viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.relabel_label_all_timepoints(5)
+        assert layer.data[0, 0] == 2
+
+    def test_click_to_relabel_mode(self):
+        """Plain click relabels to the selected ID; Ctrl+click pipettes."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 3
+                self.clicked_value = 5
+
+            def refresh(self):
+                pass
+
+            def get_value(self, position, **kwargs):
+                return self.clicked_value
+
+        class _FakeEvent:
+            def __init__(self, modifiers=()):
+                self.button = 1
+                self.type = "mouse_press"
+                self.position = (0, 0, 0)
+                self.view_direction = None
+                self.dims_displayed = [1, 2]
+                self.modifiers = modifiers
+
+        base = np.zeros((3, 4, 4), dtype=np.uint32)
+        base[:, 0, 0] = 5
+        base[:, 1, 1] = 3
+        wrapper = _DaskFancyIndexWrapper(da.from_array(base, chunks=(1, 4, 4)))
+        layer = _FakeLabels(wrapper)
+
+        self.viewer.layers = [layer]
+        self.viewer.mouse_drag_callbacks = []
+
+        inspector = LabelInspector(self.viewer)
+        inspector.enable_click_relabel(True)
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        def _fire(event):
+            gen = self.viewer.mouse_drag_callbacks[0](self.viewer, event)
+            next(gen)
+            event.type = "mouse_release"
+            with contextlib.suppress(StopIteration):
+                next(gen)
+
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            # Drag (pan): callback must NOT relabel.
+            event = _FakeEvent()
+            gen = self.viewer.mouse_drag_callbacks[0](self.viewer, event)
+            next(gen)
+            event.type = "mouse_move"
+            next(gen)
+            event.type = "mouse_release"
+            with contextlib.suppress(StopIteration):
+                next(gen)
+            assert np.any(np.asarray(layer.data) == 5)
+
+            # Ctrl+click: pipette — pick up the clicked ID, no relabel.
+            layer.clicked_value = 3
+            _fire(_FakeEvent(modifiers=("Control",)))
+            assert layer.selected_label == 3
+            assert np.any(np.asarray(layer.data) == 5)
+
+            # Clean click on label 5: relabeled to the pipetted 3 on all T.
+            layer.clicked_value = 5
+            _fire(_FakeEvent())
+            result = np.asarray(layer.data)
+            assert not np.any(result == 5)
+            assert np.all(result[:, 0, 0] == 3)
+
+        inspector.enable_click_relabel(False)
+        assert len(self.viewer.mouse_drag_callbacks) == 0
+
+    def test_click_modes_mutually_exclusive(self):
+        """Enabling one click mode disables the other."""
+        self.viewer.layers = []
+        self.viewer.mouse_drag_callbacks = []
+
+        inspector = LabelInspector(self.viewer)
+        inspector.enable_click_delete(True)
+        inspector.enable_click_relabel(True)
+        assert inspector._click_delete_cb is None
+        assert inspector._click_relabel_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_delete(True)
+        assert inspector._click_relabel_cb is None
+        assert inspector._click_delete_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_delete(False)
+        assert len(self.viewer.mouse_drag_callbacks) == 0
+
     def test_undo_remap(self):
         """Ctrl+Z semantics: undo restores the last deletion exactly."""
         import dask.array as da
@@ -308,7 +467,13 @@ class TestLabelInspector:
         assert wrapper.undo_remap() is None
 
     def test_undo_key_handler_falls_back_to_napari_undo(self):
-        """_on_undo_key uses wrapper undo first, then napari's paint undo."""
+        """_on_undo_key uses wrapper undo first, then napari's paint undo.
+
+        The handler resolves the labels layer itself and ignores the
+        provider argument napari passes, so it works whether Ctrl+Z is
+        dispatched from the viewer or the layer keymap (i.e. regardless of
+        which layer is currently active).
+        """
         import dask.array as da
 
         from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
@@ -329,15 +494,48 @@ class TestLabelInspector:
                 self.undo_called = True
 
         layer = _FakeLabels(wrapper)
+        self.viewer.layers = [layer]
         inspector = LabelInspector(self.viewer)
 
         wrapper.remap_values({5: 0})
-        inspector._on_undo_key(layer)
-        assert np.any(np.asarray(wrapper) == 5)  # deletion undone
-        assert not layer.undo_called
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            # Provider is the viewer (as when the labels layer is NOT active);
+            # the handler still resolves the labels layer and undoes.
+            inspector._on_undo_key(self.viewer)
+            assert np.any(np.asarray(wrapper) == 5)  # deletion undone
+            assert not layer.undo_called
 
-        inspector._on_undo_key(layer)  # nothing pending → napari undo
-        assert layer.undo_called
+            inspector._on_undo_key()  # nothing pending → napari undo
+            assert layer.undo_called
+
+    def test_bind_undo_key_binds_viewer_and_layer(self):
+        """Ctrl+Z is bound on the viewer (always in keymap chain) + layer."""
+
+        class _FakeLayer:
+            def __init__(self):
+                self.bound = {}
+
+            def bind_key(self, key, func, overwrite=False):
+                self.bound[key] = func
+
+        self.viewer.bind_key = Mock()
+        layer = _FakeLayer()
+        inspector = LabelInspector(self.viewer)
+
+        inspector._bind_undo_key(layer, True)
+        # Bound on the viewer so it fires even when another layer is active.
+        # (bound methods compare equal but are not identical objects.)
+        self.viewer.bind_key.assert_called_with(
+            "Control-Z", inspector._on_undo_key, overwrite=True
+        )
+        assert layer.bound["Control-Z"] == inspector._on_undo_key
+
+        inspector._bind_undo_key(layer, False)
+        # None unbinds, restoring napari's native undo.
+        self.viewer.bind_key.assert_called_with(
+            "Control-Z", None, overwrite=True
+        )
+        assert layer.bound["Control-Z"] is None
 
     def test_save_over_source_file(self):
         """Saving must not truncate the file the lazy graph reads from.

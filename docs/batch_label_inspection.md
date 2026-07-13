@@ -87,6 +87,10 @@ For each pair displayed:
 - **Selection tools**: Select and modify regions
 - **Undo/Redo**: Ctrl+Z / Ctrl+Y
 
+**Click Modes** (napari-tmidas, see [One-Click Label Editing](#one-click-label-editing-all-timepoints)):
+- **Click-to-delete**: Left-click a label to remove it from every timepoint
+- **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
+
 **Viewing Tips**:
 - Adjust label opacity (right panel) to see image beneath
 - Use different colormaps for better visibility
@@ -107,6 +111,42 @@ For each pair displayed:
 - Saves final edits and closes widget
 
 ## Features
+
+### One-Click Label Editing (all timepoints)
+
+Two toggleable click modes, each in its own dock widget, edit a label across
+**every timepoint** of a time series (e.g. tracked TZYX labels) with a single
+click. Both use a lazy remapping path, so they are instant even for stacks far
+larger than RAM — no data is rewritten until you save.
+
+**Click-to-Delete** — enable *"Click a label to delete it from all timepoints"*:
+
+- **Left-click** any label in the viewer to remove it from every timepoint
+  (e.g. delete a whole mistracked cell in one click)
+- Replaces the slow bucket-fill workflow, which loads the entire array
+
+**Click-to-Relabel** — enable *"Click a label to relabel it (Ctrl+click picks up an ID)"*:
+
+- **Ctrl+left-click** a label to *pipette* its ID (this sets napari's
+  selected label)
+- **Left-click** other labels to reassign them to the pipetted ID on every
+  timepoint — clicked objects are merged into the target label
+  (e.g. fix a track that switched IDs halfway through)
+- Alternatively, pick the target ID with napari's own tools: select the
+  **pipette (color picker)** in the layer controls and click a label,
+  switch back to the **pan/zoom tool (camera symbol)**, then click the
+  labels to relabel — or simply type the ID into the label spinbox
+- Relabeling to ID 0 is equivalent to deletion
+
+**Behavior common to both modes**:
+
+- **Ctrl+Z** undoes the last delete/relabel (paint edits made in between are
+  preserved)
+- Click-dragging (pan/zoom) and clicks on background do nothing
+- Edits are staged in memory; press **Save and Continue** to write them to
+  the file — saved operations can no longer be undone
+- The two modes are mutually exclusive: enabling one switches the other off
+- The active mode persists as you move through image-label pairs
 
 ### Automatic Pair Matching
 
@@ -170,17 +210,28 @@ After running Cellpose or another segmenter:
 ### Merging Split Objects
 
 When segmentation over-splits cells:
-1. Select both object IDs
-2. Paint with same label to merge
-3. Erase artifacts/noise
-4. Save changes
+1. Enable **Click-to-Relabel**
+2. Ctrl+click the object to keep (pipettes its ID)
+3. Click the split-off fragments to merge them into it (all timepoints at once)
+4. Or paint manually with the same label for partial merges
+5. Save changes
 
 ### Removing False Positives
 
 When segmentation detects spurious objects:
-1. Use eraser (label = 0) to remove
-2. Paint background color where needed
+1. Enable **Click-to-Delete** and click each spurious object —
+   removed from every timepoint instantly
+2. Or use eraser (label = 0) for partial removal
 3. Save corrected labels
+
+### Fixing Tracking ID Switches
+
+When a tracked object changes ID partway through a time series:
+1. Enable **Click-to-Relabel**
+2. Ctrl+click the object at a timepoint where it has the correct ID
+3. Navigate to a timepoint after the switch and click the object —
+   the wrong ID is reassigned to the correct one everywhere
+4. Save changes
 
 ### Refining Boundaries
 

@@ -81,7 +81,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 ### Advanced Features
 
 - [Batch Crop Anything](docs/crop_anything.md) - Interactive object cropping with SAM2
-- [Batch Label Inspection](docs/batch_label_inspection.md) - Manual label verification and editing
+- [Batch Label Inspection](docs/batch_label_inspection.md) - Manual label verification and editing, with one-click delete/relabel across all timepoints
 - [Multichannel Processing](docs/multichannel_processing.md) - Channel selection and per-channel processing
 
 ## 💻 Installation
