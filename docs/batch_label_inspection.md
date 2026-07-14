@@ -60,6 +60,11 @@ sample1_seg.tif + sample1_seg_labels.tif  ✗ No match (_labels not in sample1_s
 sample1_labels_filtered.tif               ✓ Match (if suffix is "_labels")
 ```
 
+**Raw channel axis**: Controls how the raw image's channel dimension is
+aligned with the (channel-less) label. Leave on **Auto** for well-formed
+OME-TIFF/Zarr; override only when Auto misaligns the overlay. See
+[Multi-Channel Raw Image Alignment](#multi-channel-raw-image-alignment).
+
 ### Step 3: Load Pairs
 
 Click **Load** to scan the folder and create image-label pairs.
@@ -164,6 +169,37 @@ Input: label suffix "_labels"
   image1.tif + image2_labels.tif (different base names)
   file_labels.tif (no matching image found)
 ```
+
+### Multi-Channel Raw Image Alignment
+
+Raw images often carry a **channel** dimension that the label lacks — for
+example a `TZCYX` raw (time, Z, 2 channels, Y, X) paired with a `TZYX`
+tracked label. napari aligns axes from the last dimension backwards, so
+if the channel axis is not identified, the label's timepoints get matched
+against the raw's Z (and Z against C), and the overlay is misaligned.
+
+The widget resolves the raw's channel axis so it can (a) split the raw into
+one layer per channel and (b) exclude that axis when scaling the label to the
+raw's spatial extent. Resolution follows a layered strategy, most-trusted
+first:
+
+1. **Manual override** (*Raw channel axis* dropdown) — wins whenever set:
+   - **Auto** *(default)* — detect automatically (steps 2–3 below)
+   - **None** — the raw has no channel axis
+   - **0**–**4** — force that axis index as the channel dimension
+2. **Metadata** — read from the file's axes (OME-TIFF `DimensionOrder`,
+   ImageJ hyperstack order, or Zarr `.zattrs`). This is source-robust: the
+   channel axis is read from the file rather than assumed at a fixed slot, so
+   images written by ImageJ/Java, OME, or plain Python all resolve correctly
+   even when a singleton dimension is squeezed away.
+3. **Shape heuristic** — when no axes metadata exists, the channel axis is
+   guessed as the small dimension (size 2–16) with larger Y/X. This handles
+   most layouts but is ambiguous when a real Z or T axis is also small — in
+   that case, set the *Raw channel axis* dropdown manually.
+
+A resolved index is always range-checked against the loaded array, so a stale
+or incorrect value degrades to "no channel axis" rather than corrupting the
+overlay. The status bar reports the channel axis and the label scale in use.
 
 ### Format Validation
 
@@ -298,6 +334,18 @@ For inaccurate object boundaries:
 - Convert labels to integer format if needed
 - Regenerate problematic label files
 - Verify with external tools (ImageJ, etc.)
+
+### Image and Label Overlay Misaligned
+
+**Cause**: The raw image has a channel dimension the label lacks (e.g. a
+`TZCYX` raw with a `TZYX` label) and its channel axis could not be identified
+automatically — usually a TIFF written without clean axes metadata.
+
+**Solutions**:
+- Set the **Raw channel axis** dropdown to the channel dimension's index
+  (0-based) before loading — for a `TZCYX` raw that is `2`
+- Choose **None** if the raw genuinely has no channel axis
+- Confirm the channel axis and label scale reported in the status bar
 
 ### Edits Not Saving
 

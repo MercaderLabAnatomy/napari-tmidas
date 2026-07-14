@@ -574,6 +574,130 @@ class TestLabelInspector:
         # Post-save reads through the wrapper stay consistent (idempotent).
         assert np.array_equal(np.asarray(wrapper), expected)
 
+    def test_detect_channel_axis_from_tiff_path(self):
+        """A multi-channel TZCYX raw TIFF reports its channel axis so it can be
+        aligned with a channel-less TZYX label.
+
+        Regression: channel-axis detection was gated on zarr inputs, so a
+        multi-channel raw TIFF paired with a single-channel label was overlaid
+        with mismatched dimensions.
+        """
+        import tifffile
+
+        from napari_tmidas._reader import detect_channel_axis_from_tiff_path
+
+        raw = os.path.join(self.temp_dir, "raw.tif")
+        # T=2, Z=3, C=2, Y=8, X=8 written with explicit axes metadata.
+        data = np.zeros((2, 3, 2, 8, 8), dtype=np.uint16)
+        tifffile.imwrite(
+            raw, data, photometric="minisblack", metadata={"axes": "TZCYX"}
+        )
+        assert detect_channel_axis_from_tiff_path(raw) == 2
+
+        # A label without a channel axis has none to report.
+        lbl = os.path.join(self.temp_dir, "labels_tracked.tif")
+        tifffile.imwrite(
+            lbl,
+            np.zeros((2, 3, 8, 8), dtype=np.uint32),
+            photometric="minisblack",
+            metadata={"axes": "TZYX"},
+        )
+        assert detect_channel_axis_from_tiff_path(lbl) is None
+
+    def test_detect_channel_axis_matches_reader_array_across_sources(self):
+        """The detected channel index must match the axis position in the array
+        the reader actually hands napari — for any writer's axis order and even
+        when a singleton dimension is squeezed away.
+
+        C sits at a different position depending on the source (ImageJ/Java vs
+        OME vs plain Python).  tifffile normalizes each into a consistent
+        (axes, shape, array) triple, and a singleton axis (e.g. T=1) drops from
+        both the axes string and the array together, shifting C's index.  The
+        detector reads C from that same axes string, so its index stays aligned
+        with the reader's array in every case — this test pins that invariant.
+        """
+        import tifffile
+
+        from napari_tmidas._reader import (
+            detect_channel_axis_from_tiff_path,
+            tiff_reader_function,
+        )
+
+        cases = [
+            # (filename, shape, axes, writer-kwargs, C's index in written array)
+            ("ij_full.tif", (4, 3, 2, 8, 8), "TZCYX", {"imagej": True}, 2),
+            ("ome_tczyx.tif", (4, 2, 3, 8, 8), "TCZYX", {"ome": True}, 1),
+            ("ij_t1.tif", (1, 3, 2, 8, 8), "TZCYX", {"imagej": True}, 2),
+            ("ome_t1.tif", (1, 3, 2, 8, 8), "TZCYX", {"ome": True}, 2),
+        ]
+        for name, shape, axes, kw, c_written in cases:
+            path = os.path.join(self.temp_dir, name)
+            arr = np.zeros(shape, dtype=np.uint16)
+            # Give C a distinctive per-plane signature so we can locate it in
+            # the reader's array regardless of how dims were squeezed/reordered.
+            idx = [slice(None)] * arr.ndim
+            idx[c_written] = 1
+            arr[tuple(idx)] = 7
+            tifffile.imwrite(path, arr, metadata={"axes": axes}, **kw)
+
+            detected = detect_channel_axis_from_tiff_path(path)
+            reader_arr = np.asarray(tiff_reader_function(path)[0][0])
+
+            # The detected index must be valid for the reader's array and point
+            # at the axis of size 2 carrying the channel signature.
+            assert detected is not None, name
+            assert 0 <= detected < reader_arr.ndim, name
+            assert reader_arr.shape[detected] == 2, (name, reader_arr.shape)
+            take1 = np.take(reader_arr, 1, axis=detected)
+            assert take1.max() == 7, name
+
+    def test_resolve_channel_axis_override(self):
+        """The manual override wins over auto-detection and is range-checked."""
+        from unittest.mock import Mock
+
+        inspector = LabelInspector(Mock())
+        image = np.zeros((2, 3, 2, 8, 8))  # 5D raw (TZCYX)
+        label = np.zeros((2, 3, 8, 8))  # 4D label (TZYX)
+
+        # Forced index is used verbatim (no metadata needed).
+        inspector.channel_axis_override = "2"
+        assert inspector._resolve_channel_axis(image, label, "raw.tif") == 2
+
+        # "None" suppresses the channel axis even when dims differ.
+        inspector.channel_axis_override = "None"
+        assert inspector._resolve_channel_axis(image, label, "raw.tif") is None
+
+        # An out-of-range manual pick degrades to None rather than misaligning.
+        inspector.channel_axis_override = "9"
+        assert inspector._resolve_channel_axis(image, label, "raw.tif") is None
+
+        # "Auto" falls back to TIFF metadata detection.
+        inspector.channel_axis_override = "Auto"
+        with patch(
+            "napari_tmidas._reader.detect_channel_axis_from_tiff_path",
+            return_value=2,
+        ):
+            assert (
+                inspector._resolve_channel_axis(image, label, "raw.tif") == 2
+            )
+
+        # Auto with equal dims (no extra axis) detects nothing.
+        assert (
+            inspector._resolve_channel_axis(label, label, "raw.tif") is None
+        )
+
+        # Auto falls back to the shape heuristic when metadata is unavailable
+        # (e.g. a TIFF whose axes tags tifffile reports as "QQYX").
+        inspector.channel_axis_override = "Auto"
+        with patch(
+            "napari_tmidas._reader.detect_channel_axis_from_tiff_path",
+            return_value=None,
+        ):
+            # (2, 3, 2, 8, 8): channel axis 2 recovered from shape alone.
+            assert (
+                inspector._resolve_channel_axis(image, label, "raw.tif") == 2
+            )
+
 
 class TestLabelInspectorWidget:
     def test_widget_creation(self):

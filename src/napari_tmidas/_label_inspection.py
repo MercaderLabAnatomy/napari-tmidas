@@ -645,6 +645,10 @@ class LabelInspector:
         self.current_index = 0
         self._click_delete_cb = None  # click-to-delete mouse callback
         self._click_relabel_cb = None  # click-to-relabel mouse callback
+        # Manual channel-axis override for the raw image: "auto" runs metadata
+        # detection, "none" forces no channel axis, an int string (e.g. "2")
+        # pins that axis.  Fallback for TIFFs with missing/ambiguous axes tags.
+        self.channel_axis_override = "auto"
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -797,6 +801,63 @@ class LabelInspector:
 
             self._show_message("info", "Loading Report", msg)
 
+    def _resolve_channel_axis(self, image, label_image, image_path):
+        """Return the raw image's channel-axis index, or ``None``.
+
+        Honors :attr:`channel_axis_override` first (``"none"`` → no axis, an
+        int string → that axis); ``"auto"`` falls back to metadata detection
+        for zarr and TIFF inputs.  The returned index is always validated
+        against the loaded array's dimensionality, so a stale or out-of-range
+        value (e.g. from a squeezed array or a wrong manual pick) degrades to
+        ``None`` rather than corrupting the overlay.
+        """
+        override = str(self.channel_axis_override).strip().lower()
+        channel_axis = None
+        if override == "none":
+            return None
+        if override not in ("", "auto"):
+            try:
+                channel_axis = int(override)
+            except ValueError:
+                channel_axis = None
+        elif image.ndim > label_image.ndim:
+            try:
+                if _is_zarr(image_path):
+                    from napari_tmidas._file_selector import (
+                        detect_channels_from_zarr_path,
+                    )
+
+                    _n_ch, channel_axis = detect_channels_from_zarr_path(
+                        image_path
+                    )
+                else:
+                    # Metadata first, then the shared shape heuristic — the
+                    # same two-stage strategy the zarr detector uses, so a
+                    # TIFF with missing/ambiguous axes tags (e.g. tifffile
+                    # reporting "QQYX") still resolves the channel axis from
+                    # the array shape instead of silently giving up.
+                    from napari_tmidas._reader import (
+                        detect_channel_axis_from_tiff_path,
+                    )
+
+                    channel_axis = detect_channel_axis_from_tiff_path(
+                        image_path
+                    )
+                    if channel_axis is None:
+                        from napari_tmidas._file_selector import (
+                            _detect_channels_from_shape,
+                        )
+
+                        _n_ch, channel_axis = _detect_channels_from_shape(
+                            image.shape
+                        )
+            except Exception:
+                channel_axis = None
+        # Guard: a stale/out-of-range index would misalign the overlay.
+        if channel_axis is not None and not (0 <= channel_axis < image.ndim):
+            channel_axis = None
+        return channel_axis
+
     def _load_current_pair(self):
         """
         Load the current image-label pair into the Napari viewer.
@@ -811,22 +872,13 @@ class LabelInspector:
         image = _load_image(image_path)
         label_image = _load_label(label_path)
 
-        # --- Detect channel axis for zarr images ---
-        # If the raw image has a channel dimension that the label lacks we need
-        # to (a) tell napari which axis is channels so it splits layers, and
-        # (b) exclude that axis when computing the spatial scale.
-        channel_axis = None
-        if _is_zarr(image_path) and image.ndim > label_image.ndim:
-            try:
-                from napari_tmidas._file_selector import (
-                    detect_channels_from_zarr_path,
-                )
-
-                _n_ch, channel_axis = detect_channels_from_zarr_path(
-                    image_path
-                )
-            except Exception:
-                channel_axis = None
+        # --- Resolve the raw image's channel axis ---------------------------
+        # A channel axis lets napari (a) split the raw into per-channel layers
+        # and (b) be excluded from the label spatial-scale computation.  The
+        # manual override wins when set; otherwise it is auto-detected for both
+        # zarr (via .zattrs) and multi-channel TIFFs (e.g. a TZCYX raw paired
+        # with a TZYX label, read from series axes metadata).
+        channel_axis = self._resolve_channel_axis(image, label_image, image_path)
 
         # Build the image shape *without* the channel axis for scale comparison
         if channel_axis is not None:
@@ -1215,16 +1267,31 @@ class LabelInspector:
     call_button="Start Label Inspection",
     folder_path={"label": "Folder Path", "widget_type": "LineEdit"},
     label_suffix={"label": "Label Suffix (e.g., _labels.tif)"},
+    channel_axis={
+        "label": "Raw channel axis",
+        "widget_type": "ComboBox",
+        "choices": ["Auto", "None", "0", "1", "2", "3", "4"],
+        "tooltip": (
+            "Which axis of the RAW image is the channel dimension (the one "
+            "the label lacks). 'Auto' reads it from the file's axes metadata "
+            "and is correct for well-formed OME-TIFF/zarr. Pick a number to "
+            "force it when metadata is missing/ambiguous (e.g. a TZCYX raw "
+            "paired with a TZYX label → axis 2), or 'None' if the raw has no "
+            "channel axis."
+        ),
+    },
 )
 def label_inspector(
     folder_path: str,
     label_suffix: str,
     viewer: Viewer,
+    channel_axis: str = "Auto",
 ):
     """
     MagicGUI widget for starting label inspection.
     """
     inspector = LabelInspector(viewer)
+    inspector.channel_axis_override = channel_axis
     inspector.load_image_label_pairs(folder_path, label_suffix)
 
     # Add buttons for saving and continuing to the next pair

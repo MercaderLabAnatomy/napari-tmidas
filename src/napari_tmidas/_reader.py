@@ -50,6 +50,22 @@ def _get_cached_tiff(path):
         return tf
 
 
+def detect_channel_axis_from_tiff_path(path):
+    """Return the channel-axis index of a TIFF, or ``None`` when there is none.
+
+    Uses the series' axes metadata (e.g. ``"TZCYX"``) to locate the ``C``
+    dimension.  The index is relative to ``series.shape`` — the same shape the
+    lazy reader rebuilds the array with — so it can be handed straight to
+    napari's ``channel_axis`` and excluded from spatial-scale computation.
+    """
+    try:
+        tf = _get_cached_tiff(path)
+        axes = tf.series[0].axes
+    except Exception:
+        return None
+    return axes.index("C") if "C" in axes else None
+
+
 def invalidate_tiff_cache(path=None):
     """Close cached TIFF handle(s) — call after overwriting a file on disk,
     otherwise reads keep coming from the old (replaced) inode."""
