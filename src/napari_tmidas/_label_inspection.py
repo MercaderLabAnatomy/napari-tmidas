@@ -105,6 +105,16 @@ def _load_image(path: str):
     return imread(path)
 
 
+def _is_dask_array(arr) -> bool:
+    """Return True if *arr* is a dask array, without importing dask eagerly."""
+    try:
+        import dask.array as da
+
+        return isinstance(arr, da.Array)
+    except ImportError:
+        return False
+
+
 def _apply_value_map(block, mapping=None):
     """Return *block* with the {old_id: new_id} *mapping* applied.
 
@@ -391,8 +401,13 @@ class _DaskFancyIndexWrapper:
             outer_dim = min(constant_dims.keys())
             outer_val = constant_dims[outer_dim]
             t_slice = self._get_outer_slice(outer_dim, outer_val)
+            # Keep the non-outer index arrays as arrays (from the original
+            # index): collapsing them all to scalars would return a 0-d
+            # value where numpy fancy-indexing semantics require shape
+            # (n,) — napari's data_setitem relies on this for single-voxel
+            # edits.
             reduced = tuple(
-                idx for i, idx in enumerate(new_index) if i != outer_dim
+                idx for i, idx in enumerate(index) if i != outer_dim
             )
             return t_slice[reduced]
 
@@ -496,6 +511,246 @@ class _DaskFancyIndexWrapper:
             slices.append(self._get_outer_slice(outer_dim, t))
         result = np.stack(slices, axis=outer_dim)
         return result.astype(dtype) if dtype is not None else result
+
+
+class _TrackView:
+    """Read-through 3-D "track volume" view over a TZYX/TYX label source.
+
+    Base class for the track-inspection views: every plane is assembled on
+    demand from the underlying source (a :class:`_DaskFancyIndexWrapper` or
+    a numpy array), so the view never copies the movie and always reflects
+    pending remaps and paint edits.  Label IDs are unchanged, so the
+    ID-based tools (click-to-delete / click-to-relabel, Ctrl+Z undo, save)
+    work identically through the view.
+    """
+
+    def __init__(self, source):
+        if getattr(source, "ndim", 0) not in (3, 4):
+            raise ValueError(
+                "Track view needs a 3-D (TYX) or 4-D (TZYX) label source."
+            )
+        self._source = source
+        self.dtype = source.dtype
+        self.ndim = 3
+        self._n_t = source.shape[0]
+        # A TYX movie has an implicit Z of size 1.
+        self._n_z = source.shape[1] if source.ndim == 4 else 1
+        # Materialized full view, built lazily by __array__ when napari's
+        # 3-D display first asks for it.  While present, ALL reads
+        # (including 3-D click pick-rays, which would otherwise re-read
+        # one timepoint from disk per plane they cross) are served from
+        # it, and delete/relabel remaps update it in place — so 3-D
+        # clicking stays interactive on movies of any size.
+        self._vol = None
+
+    def _t_slice(self, t: int) -> np.ndarray:
+        """Timepoint *t* of the source as numpy, pending edits included."""
+        if isinstance(self._source, _DaskFancyIndexWrapper):
+            return self._source._get_outer_slice(0, int(t))
+        s = self._source[int(t)]
+        if hasattr(s, "compute"):
+            s = s.compute()
+        return np.asarray(s)
+
+    def _plane(self, i: int) -> np.ndarray:
+        raise NotImplementedError
+
+    def invalidate(self) -> None:
+        """Drop all derived caches after an arbitrary source edit."""
+        self._vol = None
+
+    def apply_mapping(self, mapping: dict) -> None:
+        """Update caches in place for a global {old_id: new_id} remap.
+
+        The cheap alternative to :meth:`invalidate` for delete / relabel:
+        the materialized volume is remapped with one numpy pass instead of
+        being rebuilt from disk, so the 3-D display and its pick-rays stay
+        interactive.
+        """
+        if self._vol is not None:
+            _apply_value_map_inplace(self._vol, mapping)
+
+    def __getitem__(self, index):
+        # Serve everything from the materialized volume while it exists —
+        # it already reflects all edits (kept up to date in place).
+        if self._vol is not None:
+            return self._vol[index]
+        if not isinstance(index, tuple):
+            index = (index,)
+        first = index[0] if index else slice(None)
+        rest = index[1:]
+        # Scalar outer plane — napari's 2-D slicing path.
+        if isinstance(first, (int, np.integer)):
+            plane = self._plane(int(first))
+            return plane[rest] if rest else plane
+        # Pure int/slice indexing — assemble the requested planes.
+        if all(isinstance(ix, (int, np.integer, slice)) for ix in index):
+            planes = [
+                self._plane(i)[rest] if rest else self._plane(i)
+                for i in range(*first.indices(self.shape[0]))
+            ]
+            if planes:
+                return np.stack(planes)
+            probe = self._plane(0)[rest] if rest else self._plane(0)
+            return np.empty((0, *np.shape(probe)), dtype=self.dtype)
+        # Fancy indexing (napari's 3-D picking): 1-D coord arrays, possibly
+        # mixed with scalars (broadcast to the arrays' length), served
+        # plane-by-plane so the source's T-slice cache is reused.
+        if len(index) == 3 and all(
+            isinstance(ix, (int, np.integer))
+            or (isinstance(ix, np.ndarray) and ix.ndim == 1)
+            for ix in index
+        ):
+            n = next(
+                ix.size for ix in index if isinstance(ix, np.ndarray)
+            )
+            pp, yy, xx = (
+                (
+                    np.asarray(ix, dtype=np.intp)
+                    if isinstance(ix, np.ndarray)
+                    else np.full(n, int(ix), dtype=np.intp)
+                )
+                for ix in index
+            )
+            out = np.zeros(pp.shape, dtype=self.dtype)
+            for i in np.unique(pp):
+                m = pp == i
+                out[m] = self._plane(int(i))[yy[m], xx[m]]
+            return out
+        raise NotImplementedError(
+            f"Track view does not support this index: {index!r}"
+        )
+
+    def __array__(self, dtype=None):
+        """Materialize the full view plane-by-plane (used by napari's 3-D
+        display and only then — 2-D slicing stays lazy).
+
+        The result is cached on the view so subsequent refreshes and 3-D
+        pick-rays cost no I/O; edits keep the cache current in place.
+        """
+        if self._vol is None:
+            out = np.empty(self.shape, dtype=self.dtype)
+            for i in range(self.shape[0]):
+                out[i] = self._plane(i)
+            self._vol = out
+        if dtype is not None and dtype != self._vol.dtype:
+            return self._vol.astype(dtype)
+        return self._vol
+
+
+class _StackedTrackView(_TrackView):
+    """All timepoints concatenated along Z: shape ``(T*Z, Y, X)``.
+
+    Plane ``i`` shows timepoint ``i // Z``, slice ``i % Z``, so a track
+    (one label ID through time) is a single connected object through the
+    stack.  Fully editable: paint / fill writes are translated back to
+    ``(t, z)`` and forwarded to the source, where they are recorded (and
+    saved) like any other edit.
+    """
+
+    def __init__(self, source):
+        super().__init__(source)
+        self.shape = (self._n_t * self._n_z, *source.shape[-2:])
+
+    def _plane(self, i: int) -> np.ndarray:
+        t, z = divmod(int(i), self._n_z)
+        t_slice = self._t_slice(t)
+        return t_slice[z] if self._source.ndim == 4 else t_slice
+
+    def __setitem__(self, index, value):
+        if not isinstance(index, tuple):
+            index = (index,)
+        # Keep the materialized 3-D volume in sync with paint edits.
+        if self._vol is not None:
+            self._vol[index] = value
+        if self._source.ndim == 3:  # TYX: the view aliases the source
+            self._source[index] = value
+            return
+        first = index[0] if index else None
+        if isinstance(first, (int, np.integer)) and all(
+            isinstance(ix, (int, np.integer, slice)) for ix in index[1:]
+        ):
+            t, z = divmod(int(first), self._n_z)
+            self._source[(t, z, *index[1:])] = value
+            return
+        # napari paint / fill: tuple of equal-length 1-D coord arrays.
+        if len(index) == 3 and all(
+            isinstance(ix, np.ndarray) and ix.ndim == 1 for ix in index
+        ):
+            pp, yy, xx = (np.asarray(ix, dtype=np.intp) for ix in index)
+            tt, zz = np.divmod(pp, self._n_z)
+            vals = None if np.ndim(value) == 0 else np.asarray(value)
+            for t in np.unique(tt):
+                m = tt == t
+                # Constant-t coordinate arrays hit the source wrapper's
+                # sparse-diff fast path.
+                self._source[
+                    np.full(int(m.sum()), int(t), dtype=np.intp),
+                    zz[m],
+                    yy[m],
+                    xx[m],
+                ] = (value if vals is None else vals[m])
+            return
+        raise NotImplementedError(
+            f"Track view does not support writing with this index: {index!r}"
+        )
+
+
+class _MaxProjTrackView(_TrackView):
+    """One Z-max-projected plane per timepoint: shape ``(T, Y, X)``.
+
+    Tracks read as clean tubes in 3-D, at the cost of Z information —
+    where labels overlap along Z the higher ID wins.  Read-only for paint
+    (a projected pixel has no unique ``(t, z)`` origin to write back to);
+    the ID-based click tools still work because they only need the label
+    ID under the cursor.  Projected planes are cached (LRU) and dropped
+    via :meth:`invalidate` whenever the source is edited.
+    """
+
+    _CACHE_MAX_PLANES = 32
+
+    def __init__(self, source):
+        super().__init__(source)
+        self.shape = (self._n_t, *source.shape[-2:])
+        self._cache: OrderedDict = OrderedDict()
+
+    def _plane(self, i: int) -> np.ndarray:
+        i = int(i)
+        if i in self._cache:
+            self._cache.move_to_end(i)
+            return self._cache[i]
+        t_slice = self._t_slice(i)
+        plane = t_slice.max(axis=0) if self._source.ndim == 4 else t_slice
+        while len(self._cache) >= self._CACHE_MAX_PLANES:
+            self._cache.popitem(last=False)
+        self._cache[i] = plane
+        return plane
+
+    def invalidate(self) -> None:
+        super().invalidate()
+        self._cache.clear()
+
+    def apply_mapping(self, mapping: dict) -> None:
+        """Remap caches in place; projected planes are dropped instead.
+
+        2-D planes recompute exactly on demand (one timepoint of I/O), so
+        they are dropped.  The materialized 3-D volume is remapped in
+        place to stay interactive; where the remapped track occluded
+        another label along Z the true projection would reveal that
+        label, but recomputing it means re-reading the whole movie — the
+        volume shows background there instead until the view is rebuilt
+        (toggle the mode off/on).  The underlying data is always exact.
+        """
+        super().apply_mapping(mapping)
+        self._cache.clear()
+
+    def __setitem__(self, index, value):
+        raise TypeError(
+            "The Z-max-projection track view is read-only: a projected "
+            "pixel has no unique (t, z) origin to write back to. Use "
+            "click-to-delete / click-to-relabel (they work on label IDs), "
+            "or switch the track view to 'Stack T along Z' to paint."
+        )
 
 
 def _load_label(path: str):
@@ -616,6 +871,26 @@ def _save_label_wrapper(wrapper: "_DaskFancyIndexWrapper", path: str) -> None:
     wrapper._cache.clear()
 
 
+def _resample_nearest(arr: np.ndarray, shape: tuple) -> np.ndarray:
+    """Nearest-neighbor resample *arr* to *shape* (same ndim, no interpolation).
+
+    Used to align a raw-image slice with a lower/higher-resolution label
+    slice: for each target pixel the spatially closest source pixel is
+    sampled, mirroring how the viewer overlays the two layers via scale.
+    """
+    if arr.shape == tuple(shape):
+        return arr
+    idx = np.ix_(
+        *[
+            np.minimum(
+                ((np.arange(ts) + 0.5) * (ss / ts)).astype(int), ss - 1
+            )
+            for ts, ss in zip(shape, arr.shape)
+        ]
+    )
+    return arr[idx]
+
+
 def _label_dtype_is_integer(path: str) -> bool:
     """Return True if the TIFF at *path* stores integer data.
 
@@ -639,16 +914,30 @@ def _label_dtype_is_integer(path: str) -> bool:
 
 
 class LabelInspector:
+    # Cap on per-track intensity-histogram bins; wider integer ranges (and
+    # non-integer raws) fall back to a mean instead of a percentile.
+    _INTENSITY_MAX_BINS = 1 << 16
+
     def __init__(self, viewer: Viewer):
         self.viewer = viewer
         self.image_label_pairs = []
         self.current_index = 0
         self._click_delete_cb = None  # click-to-delete mouse callback
         self._click_relabel_cb = None  # click-to-relabel mouse callback
+        # Cached per-track raw-intensity stats for the current pair, and the
+        # last low-intensity deletion (for live-preview undo). See
+        # delete_low_intensity_tracks.
+        self._track_stats = None
+        self._low_intensity_last = None
         # Manual channel-axis override for the raw image: "auto" runs metadata
         # detection, "none" forces no channel axis, an int string (e.g. "2")
         # pins that axis.  Fallback for TIFFs with missing/ambiguous axes tags.
         self.channel_axis_override = "auto"
+        # Track-inspection view: "off" | "stack" | "max" (see _TrackView).
+        # Like the click modes, the chosen mode persists across pairs.
+        self.track_view_mode = "off"
+        self._track_view_layer = None
+        self._track_hidden = []  # [(layer, was_visible)] to restore on exit
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -868,6 +1157,14 @@ class LabelInspector:
             self.viewer.status = "No pairs to inspect."
             return
 
+        # New pair → previous pair's intensity stats and preview no longer apply.
+        self._invalidate_track_stats()
+
+        # Layers are about to be cleared — drop stale track-view references;
+        # the view is rebuilt over the new pair below if the mode is on.
+        self._track_view_layer = None
+        self._track_hidden = []
+
         image_path, label_path = self.image_label_pairs[self.current_index]
         image = _load_image(image_path)
         label_image = _load_label(label_path)
@@ -921,6 +1218,10 @@ class LabelInspector:
         ):
             self._bind_undo_key(new_labels_layer, True)
 
+        # Track view persists across pairs; rebuild it over the new labels.
+        if self.track_view_mode != "off":
+            self._apply_track_view()
+
         # Show progress
         total = len(self.image_label_pairs)
         ch_info = (
@@ -944,15 +1245,9 @@ class LabelInspector:
 
         _, label_path = self.image_label_pairs[self.current_index]
 
-        # Find the labels layer in the viewer
-        labels_layer = next(
-            (
-                layer
-                for layer in self.viewer.layers
-                if isinstance(layer, Labels)
-            ),
-            None,
-        )
+        # Find the labels layer in the viewer (never the track view — its
+        # 3-D shape must not be written over the TZYX label file).
+        labels_layer = self._find_labels_layer()
 
         if labels_layer is None:
             self.viewer.status = "No labels found."
@@ -968,14 +1263,23 @@ class LabelInspector:
         self.viewer.status = f"Saved labels to {label_path}."
 
     def _find_labels_layer(self):
+        """The regular (source-backed) labels layer, never a track view."""
         return next(
             (
                 layer
                 for layer in self.viewer.layers
                 if isinstance(layer, Labels)
+                and not isinstance(getattr(layer, "data", None), _TrackView)
             ),
             None,
         )
+
+    def _click_value_layer(self):
+        """Layer that resolves what the user clicked: the track view when
+        active (it is the visible one), else the regular labels layer."""
+        if self._track_view_layer is not None:
+            return self._track_view_layer
+        return self._find_labels_layer()
 
     def _remap_all_timepoints(self, labels_layer, mapping: dict) -> None:
         """Apply {old_id: new_id} *mapping* to the layer across **all** timepoints.
@@ -1004,6 +1308,7 @@ class LabelInspector:
             _apply_value_map_inplace(data, mapping)
 
         labels_layer.refresh()
+        self._refresh_track_view(mapping)
 
     def delete_label_all_timepoints(self, label_id: int = None) -> None:
         """Delete *label_id* (default: the selected label) from **all** timepoints."""
@@ -1020,6 +1325,8 @@ class LabelInspector:
             return
 
         self._remap_all_timepoints(labels_layer, {label_id: 0})
+        # A manual edit changes track geometry — re-measure on next preview.
+        self._invalidate_track_stats()
         self.viewer.status = (
             f"Label {label_id} removed from all timepoints. "
             "Save to write changes to disk."
@@ -1052,10 +1359,300 @@ class LabelInspector:
             return
 
         self._remap_all_timepoints(labels_layer, {old_id: new_id})
+        # A manual edit changes track geometry — re-measure on next preview.
+        self._invalidate_track_stats()
         self.viewer.status = (
             f"Label {old_id} relabeled to {new_id} on all timepoints. "
             "Save to write changes to disk."
         )
+
+    def _iter_label_raw_slices(self, labels_data, raw):
+        """Yield aligned (label_slice, raw_slice) numpy pairs, outer-dim-wise.
+
+        Streams one outer (T) slice at a time so peak RAM stays at one
+        slice for arbitrarily long movies.  Wrapper-backed labels are read
+        via :meth:`_DaskFancyIndexWrapper._get_outer_slice` so pending
+        unsaved edits are measured too.  Raw slices are nearest-neighbor
+        resampled onto the label grid when resolutions differ.
+        """
+        if labels_data.ndim < 3:
+            outer = [None]
+        else:
+            outer = range(labels_data.shape[0])
+        for t in outer:
+            if t is None:
+                lbl_t, raw_t = labels_data, raw
+            elif isinstance(labels_data, _DaskFancyIndexWrapper):
+                lbl_t, raw_t = labels_data._get_outer_slice(0, t), raw[t]
+            else:
+                lbl_t, raw_t = labels_data[t], raw[t]
+            if hasattr(lbl_t, "compute"):
+                lbl_t = lbl_t.compute()
+            if hasattr(raw_t, "compute"):
+                raw_t = raw_t.compute()
+            lbl_t = np.asarray(lbl_t)
+            raw_t = _resample_nearest(np.asarray(raw_t), lbl_t.shape)
+            yield lbl_t, raw_t
+
+    def _measure_track_intensities(self, labels_layer, channel="mean"):
+        """Build and cache per-track raw-intensity statistics for the pair.
+
+        In one streaming pass (one T-slice at a time, so peak RAM stays at a
+        single slice) this accumulates, for every non-zero label ID:
+
+        * a **histogram** of its voxel intensities — indexed by integer raw
+          value (bounded to ``_INTENSITY_MAX_BINS`` bins), enabling any
+          percentile to be read back later without re-touching the image, and
+        * a **sum and count** as a fallback average for non-integer or
+          wide-range raws where a histogram is impractical.
+
+        *channel* selects which channel of a multi-channel raw supplies the
+        intensity: ``"mean"`` averages all channels, an int string picks that
+        channel index along the detected channel axis.
+
+        Also records the raw image's global min/max for bit-depth-independent
+        normalization.  The result is cached and reused across threshold
+        changes; it is re-measured when *channel* differs from the cached run,
+        and :meth:`_invalidate_track_stats` drops it when the pair changes or
+        the labels are edited by another tool.
+
+        Returns the stats dict, or ``None`` with an explanatory viewer status
+        when the raw image cannot be loaded or aligned.
+        """
+        channel = str(channel).strip().lower()
+        if (
+            self._track_stats is not None
+            and self._track_stats.get("channel") == channel
+        ):
+            return self._track_stats
+
+        image_path, _ = self.image_label_pairs[self.current_index]
+        try:
+            raw = _load_image(image_path)
+        except Exception as exc:
+            self.viewer.status = f"Could not load raw image: {exc}"
+            return None
+
+        labels_data = labels_layer.data
+        channel_axis = self._resolve_channel_axis(
+            raw, labels_data, image_path
+        )
+        if channel_axis is not None:
+            n_ch = raw.shape[channel_axis]
+            ci = None
+            if channel not in ("", "mean", "auto"):
+                try:
+                    ci = int(channel)
+                except ValueError:
+                    ci = None
+            if ci is not None and 0 <= ci < n_ch:
+                raw = np.take(raw, ci, axis=channel_axis)
+            else:
+                # "mean" or an out-of-range pick → average all channels.
+                raw = raw.mean(axis=channel_axis)
+        # Squeeze leading singleton dims (e.g. a stray T=1 axis).
+        while raw.ndim > labels_data.ndim and raw.shape[0] == 1:
+            raw = raw[0]
+        if raw.ndim != labels_data.ndim:
+            self.viewer.status = (
+                f"Cannot measure intensity: raw shape {raw.shape} does not "
+                f"align with label shape {labels_data.shape}."
+            )
+            return None
+
+        # Integer raws with a modest range get exact per-track histograms;
+        # anything else falls back to a plain mean.
+        raw_dtype = np.asarray(raw).dtype if not hasattr(raw, "dtype") else raw.dtype
+        n_bins = 0
+        if np.issubdtype(raw_dtype, np.integer):
+            info_max = int(np.iinfo(raw_dtype).max)
+            if 0 <= info_max < self._INTENSITY_MAX_BINS:
+                n_bins = info_max + 1
+
+        hist: dict = {}
+        sums: dict = {}
+        counts: dict = {}
+        raw_min, raw_max = np.inf, -np.inf
+        for lbl_t, raw_t in self._iter_label_raw_slices(labels_data, raw):
+            raw_min = min(raw_min, float(raw_t.min()))
+            raw_max = max(raw_max, float(raw_t.max()))
+            flat_l = lbl_t.ravel()
+            fg = flat_l != 0
+            if not np.any(fg):
+                continue
+            flat_l = flat_l[fg]
+            flat_r = raw_t.ravel()[fg]
+            uniq, inv = np.unique(flat_l, return_inverse=True)
+            s = np.bincount(inv, weights=flat_r.astype(np.float64))
+            c = np.bincount(inv)
+            for i, (u, sv, cv) in enumerate(
+                zip(uniq.tolist(), s.tolist(), c.tolist())
+            ):
+                sums[u] = sums.get(u, 0.0) + sv
+                counts[u] = counts.get(u, 0) + cv
+                if n_bins:
+                    vals = np.clip(flat_r[inv == i].astype(np.int64), 0, n_bins - 1)
+                    h = hist.get(u)
+                    if h is None:
+                        h = np.zeros(n_bins, dtype=np.int64)
+                        hist[u] = h
+                    h += np.bincount(vals, minlength=n_bins)
+
+        self._track_stats = {
+            "channel": channel,
+            "hist": hist if n_bins else None,
+            "sums": sums,
+            "counts": counts,
+            "raw_min": raw_min,
+            "raw_max": raw_max,
+        }
+        return self._track_stats
+
+    def _track_brightness(self, stats: dict, percentile: float) -> dict:
+        """Return ``{label_id: normalized_brightness}`` for the given percentile.
+
+        Each track's brightness is the *percentile*-th percentile of its voxel
+        intensities (50 = median, the robust analog of the mean; lower values
+        weight the track's dimmer voxels so partially-dim tracks are flagged),
+        linearly normalized to [0, 1] via the raw image's global min/max.
+        Falls back to the mean when no histogram was built.
+        """
+        raw_min, raw_max = stats["raw_min"], stats["raw_max"]
+        span = raw_max - raw_min
+        hist = stats["hist"]
+        out = {}
+        for label_id, count in stats["counts"].items():
+            if hist is not None:
+                h = hist[label_id]
+                total = h.sum()
+                rank = np.searchsorted(
+                    np.cumsum(h), percentile / 100.0 * total, side="left"
+                )
+                value = float(min(rank, len(h) - 1))
+            else:
+                value = stats["sums"][label_id] / count
+            out[int(label_id)] = (
+                (value - raw_min) / span if span > 0 else 0.0
+            )
+        return out
+
+    def delete_low_intensity_tracks(
+        self, threshold: float, channel="mean", percentile: float = 50.0
+    ) -> None:
+        """Delete every track whose raw-image brightness, normalized to
+        [0, 1], is below *threshold* — across **all** timepoints.
+
+        A track's brightness is the median of its voxel intensities
+        (*percentile* defaults to 50; robust to a few bright pixels).
+        Normalization uses the raw image's own global min/max, so the same
+        threshold behaves identically for 8-bit and 16-bit inputs (and for
+        data that only occupies part of its dtype range, e.g. a 12-bit
+        camera).  For a multi-channel raw, *channel* selects which channel
+        supplies the intensity (``"mean"`` averages all channels, an int
+        string picks that channel index).
+
+        Re-applying is safe: the previous low-intensity deletion (if any) is
+        undone first, so each Apply reflects only the current settings rather
+        than compounding.  ``threshold <= 0`` deletes nothing and simply
+        restores all tracks.
+
+        The deletion itself is a single remap operation: instant on
+        dask-backed labels, also undoable with Ctrl+Z while a click mode is
+        active, and staged in memory until saved.
+        """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        if not self.image_label_pairs:
+            self.viewer.status = "No image-label pair loaded."
+            return
+
+        # Undo the previous preview so each call reflects only current settings.
+        self._undo_low_intensity(labels_layer)
+
+        if threshold <= 0:
+            self.viewer.status = "Showing all tracks (threshold 0)."
+            return
+
+        stats = self._measure_track_intensities(labels_layer, channel)
+        if stats is None:
+            return  # status already set
+        if not stats["counts"]:
+            self.viewer.status = "No labels found to measure."
+            return
+
+        brightness = self._track_brightness(stats, percentile)
+        mapping = {
+            label_id: 0
+            for label_id, norm in brightness.items()
+            if norm < threshold
+        }
+        n_tracks = len(brightness)
+
+        if not mapping:
+            self.viewer.status = (
+                f"No tracks below normalized intensity {threshold:.2f} "
+                f"({n_tracks} track(s) measured)."
+            )
+            return
+
+        self._apply_low_intensity(labels_layer, mapping)
+        ids = sorted(mapping)
+        id_info = f" (IDs {ids})" if len(ids) <= 8 else ""
+        self.viewer.status = (
+            f"Deleted {len(ids)} of {n_tracks} track(s) with median "
+            f"intensity < {threshold:.2f}{id_info}. "
+            "Save to write changes to disk."
+        )
+
+    def _apply_low_intensity(self, labels_layer, mapping: dict) -> None:
+        """Apply a low-intensity deletion and remember how to reverse it."""
+        data = labels_layer.data
+        backup = (
+            np.array(data, copy=True)
+            if not isinstance(data, _DaskFancyIndexWrapper)
+            and not _is_dask_array(data)
+            else None
+        )
+        self._remap_all_timepoints(labels_layer, mapping)
+        self._low_intensity_last = {"mapping": mapping, "backup": backup}
+
+    def _undo_low_intensity(self, labels_layer=None) -> None:
+        """Reverse the most recent low-intensity deletion, if still pending.
+
+        Dask-backed labels are reverted via the wrapper's undo log, but only
+        when the deletion is still the most recent operation — if the user
+        made other edits since, reversing it could corrupt them, so it is
+        left in place.  Plain-numpy labels are restored from the snapshot
+        taken when the deletion was applied.
+        """
+        info = self._low_intensity_last
+        if info is None:
+            return
+        self._low_intensity_last = None
+        layer = labels_layer or self._find_labels_layer()
+        if layer is None:
+            return
+        data = layer.data
+        if isinstance(data, _DaskFancyIndexWrapper):
+            if data._op_log and data._op_log[-1][0] == info["mapping"]:
+                data.undo_remap()
+                layer.refresh()
+                self._refresh_track_view()
+        elif info["backup"] is not None:
+            data[...] = info["backup"]
+            layer.refresh()
+            self._refresh_track_view()
+
+    def _invalidate_track_stats(self) -> None:
+        """Drop cached per-track intensity stats and any pending preview.
+
+        Called when the loaded pair changes or the labels are edited by
+        another tool, so a subsequent low-intensity preview re-measures.
+        """
+        self._track_stats = None
+        self._low_intensity_last = None
 
     def _on_undo_key(self, _provider=None):
         """Ctrl+Z while click-to-delete / click-to-relabel mode is on.
@@ -1076,6 +1673,7 @@ class LabelInspector:
             mapping = data.undo_remap()
             if mapping:
                 layer.refresh()
+                self._refresh_track_view()
                 desc = ", ".join(
                     (
                         f"{k} restored (deletion undone)"
@@ -1086,7 +1684,14 @@ class LabelInspector:
                 )
                 self.viewer.status = f"Undo: label {desc}."
                 return
-        undo = getattr(layer, "undo", None)
+        # Paint history lives on the layer that was painted — the track
+        # view when it is active, the regular labels layer otherwise.
+        undo_layer = (
+            self._track_view_layer
+            if self._track_view_layer is not None
+            else layer
+        )
+        undo = getattr(undo_layer, "undo", None)
         if callable(undo):
             undo()
 
@@ -1103,9 +1708,10 @@ class LabelInspector:
         handler = self._on_undo_key if bind else None
         with contextlib.suppress(Exception):
             self.viewer.bind_key("Control-Z", handler, overwrite=True)
-        if layer is not None and hasattr(layer, "bind_key"):
-            with contextlib.suppress(Exception):
-                layer.bind_key("Control-Z", handler, overwrite=True)
+        for lyr in (layer, self._track_view_layer):
+            if lyr is not None and hasattr(lyr, "bind_key"):
+                with contextlib.suppress(Exception):
+                    lyr.bind_key("Control-Z", handler, overwrite=True)
 
     def _make_click_callback(self, on_click):
         """Build a mouse-drag callback that fires *on_click(layer, label_id,
@@ -1123,7 +1729,7 @@ class LabelInspector:
                 yield
             if dragged:
                 return
-            layer = self._find_labels_layer()
+            layer = self._click_value_layer()
             if layer is None:
                 return
             try:
@@ -1233,6 +1839,114 @@ class LabelInspector:
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-relabel OFF."
 
+    def set_track_view_mode(self, mode: str) -> None:
+        """Switch the track-inspection view: ``"off"``, ``"stack"`` or ``"max"``.
+
+        ``"stack"`` concatenates all timepoints along Z into one
+        ``(T*Z, Y, X)`` volume — a track (label ID) becomes a single
+        connected object through the stack, and paint edits map back to
+        ``(t, z)``.  ``"max"`` shows one Z-max-projected plane per
+        timepoint, ``(T, Y, X)`` — tracks read as clean tubes in 3-D but
+        the view is read-only for paint.  Both views are lazy for 2-D
+        scrubbing and share the underlying label data, so the ID-based
+        click tools, Ctrl+Z undo and saving keep working unchanged.  The
+        mode persists across pairs, like the click modes.
+        """
+        mode = str(mode).strip().lower()
+        if mode not in ("off", "stack", "max"):
+            mode = "off"
+        self.track_view_mode = mode
+        self._apply_track_view()
+
+    def _apply_track_view(self) -> None:
+        """(Re)build the track-view layer for the current mode."""
+        self._remove_track_view()
+        if self.track_view_mode == "off":
+            self.viewer.status = "Track view off."
+            return
+        labels_layer = self._find_labels_layer()
+        data = getattr(labels_layer, "data", None)
+        if labels_layer is None or getattr(data, "ndim", 0) not in (3, 4):
+            self.viewer.status = (
+                "Track view needs a loaded 3-D (TYX) or 4-D (TZYX) "
+                "labels layer."
+            )
+            return
+        if self.track_view_mode == "stack":
+            view = _StackedTrackView(data)
+            desc = "T stacked along Z"
+        else:
+            view = _MaxProjTrackView(data)
+            desc = "Z max-projected per T"
+        # Reuse the labels layer's spatial scale so the view keeps the
+        # right YX aspect; the stacked axis reuses the Z spacing.
+        try:
+            lscale = [float(s) for s in labels_layer.scale]
+        except Exception:
+            lscale = [1.0] * data.ndim
+        if data.ndim == 4:
+            axis0 = lscale[1] if self.track_view_mode == "stack" else 1.0
+            view_scale = [axis0, lscale[2], lscale[3]]
+        else:
+            view_scale = [1.0, lscale[1], lscale[2]]
+        # Hide the regular layers while the track view is active — mixing
+        # a (T*Z)YX volume with TZYX layers in one dims model is confusing.
+        for layer in list(self.viewer.layers):
+            self._track_hidden.append(
+                (layer, bool(getattr(layer, "visible", True)))
+            )
+            with contextlib.suppress(Exception):
+                layer.visible = False
+        self._track_view_layer = self.viewer.add_labels(
+            view, scale=view_scale, name=f"Track view ({desc})"
+        )
+        if self.track_view_mode == "max":
+            # Best effort — napari may re-enable this on display changes;
+            # the view's read-only __setitem__ is the hard backstop.
+            with contextlib.suppress(Exception):
+                self._track_view_layer.editable = False
+        if (
+            self._click_delete_cb is not None
+            or self._click_relabel_cb is not None
+        ):
+            self._bind_undo_key(self._find_labels_layer(), True)
+        self.viewer.status = (
+            f"Track view ON ({desc}, {view.shape[0]} planes). Toggle "
+            "napari's 3D display to see whole tracks; click modes and "
+            "Ctrl+Z work as usual. Set 'Off' to restore the normal view."
+        )
+
+    def _remove_track_view(self) -> None:
+        """Remove the view layer and restore the hidden regular layers."""
+        if self._track_view_layer is not None:
+            with contextlib.suppress(Exception):
+                self.viewer.layers.remove(self._track_view_layer)
+            self._track_view_layer = None
+        for layer, was_visible in self._track_hidden:
+            with contextlib.suppress(Exception):
+                layer.visible = was_visible
+        self._track_hidden = []
+
+    def _refresh_track_view(self, mapping: dict = None) -> None:
+        """Redraw the track-view layer after a label edit.
+
+        When the edit is a global {old_id: new_id} *mapping* (delete /
+        relabel), the view's caches are updated in place — no I/O, so 3-D
+        stays interactive.  For arbitrary edits (undo, restores) the
+        caches are dropped and rebuilt lazily.
+        """
+        layer = self._track_view_layer
+        if layer is None:
+            return
+        data = getattr(layer, "data", None)
+        if isinstance(data, _TrackView):
+            if mapping:
+                data.apply_mapping(mapping)
+            else:
+                data.invalidate()
+        with contextlib.suppress(Exception):
+            layer.refresh()
+
     def next_pair(self):
         """
         Save changes and proceed to the next image-label pair.
@@ -1268,16 +1982,17 @@ class LabelInspector:
     folder_path={"label": "Folder Path", "widget_type": "LineEdit"},
     label_suffix={"label": "Label Suffix (e.g., _labels.tif)"},
     channel_axis={
-        "label": "Raw channel axis",
+        "label": "Raw channel axis (index)",
         "widget_type": "ComboBox",
         "choices": ["Auto", "None", "0", "1", "2", "3", "4"],
         "tooltip": (
-            "Which axis of the RAW image is the channel dimension (the one "
-            "the label lacks). 'Auto' reads it from the file's axes metadata "
+            "0-based position of the channel dimension in the RAW image's "
+            "dimension order (the dimension the label lacks). E.g. for a "
+            "TZCYX raw paired with a TZYX label, C is at position 2 "
+            "(T=0, Z=1, C=2). 'Auto' reads it from the file's axes metadata "
             "and is correct for well-formed OME-TIFF/zarr. Pick a number to "
-            "force it when metadata is missing/ambiguous (e.g. a TZCYX raw "
-            "paired with a TZYX label → axis 2), or 'None' if the raw has no "
-            "channel axis."
+            "force it when metadata is missing/ambiguous, or 'None' if the "
+            "raw has no channel dimension."
         ),
     },
 )
@@ -1297,14 +2012,14 @@ def label_inspector(
     # Add buttons for saving and continuing to the next pair
     @magicgui(call_button="Save Changes and Continue")
     def save_and_continue():
-        # Check if we're at the last pair before proceeding
-        if inspector.current_index >= len(inspector.image_label_pairs) - 1:
-            save_and_continue.call_button.enabled = False
-            inspector.viewer.status = (
-                "All pairs processed. Inspection complete."
-            )
-            return
+        at_last_pair = (
+            inspector.current_index >= len(inspector.image_label_pairs) - 1
+        )
+        # next_pair() saves the current labels before checking for the end,
+        # so the last pair's edits are written too.
         inspector.next_pair()
+        if at_last_pair:
+            save_and_continue.call_button.enabled = False
 
     @magicgui(
         auto_call=True,
@@ -1353,11 +2068,88 @@ def label_inspector(
             click_to_delete["enabled"].value = False
         inspector.enable_click_relabel(enabled)
 
+    @magicgui(
+        call_button="Apply",
+        threshold={
+            "label": "Intensity threshold (0–1)",
+            "widget_type": "FloatSlider",
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "tooltip": (
+                "Deletes every track (label ID) whose median raw-image "
+                "intensity is below this threshold, on all timepoints. "
+                "Intensities are normalized to 0–1 using the raw image's own "
+                "min/max, so the same threshold works for 8-bit and 16-bit "
+                "images regardless of their dtype range. Set the threshold "
+                "and press 'Apply' to preview; re-applying restores all "
+                "tracks first and re-applies only the current threshold, so "
+                "nothing compounds (0 shows all tracks). Deletions are "
+                "staged in memory; press 'Save Changes and Continue' to "
+                "write them to the file."
+            ),
+        },
+        channel={
+            "label": "Measure channel",
+            "widget_type": "ComboBox",
+            "choices": ["Mean", "0", "1", "2", "3", "4"],
+            "tooltip": (
+                "Which channel of a multi-channel raw image supplies the "
+                "intensity used to score each track. 'Mean' averages all "
+                "channels; pick a channel index (0-based, along the raw's "
+                "channel axis) to use just that marker. Ignored for "
+                "single-channel raws."
+            ),
+        },
+    )
+    def delete_low_intensity(threshold: float = 0.0, channel: str = "Mean"):
+        """Delete all tracks whose normalized median raw intensity < threshold."""
+        inspector.delete_low_intensity_tracks(threshold, channel=channel)
+
+    @magicgui(
+        auto_call=True,
+        mode={
+            "label": "Track view",
+            "widget_type": "ComboBox",
+            "choices": ["Off", "Stack T along Z", "Max-project Z per T"],
+            "tooltip": (
+                "Show the whole movie as a single 3-D volume so each track "
+                "(label ID) appears as one connected object — switch napari "
+                "to 3D display to see entire tracks, and use the click "
+                "modes to delete or relabel a whole track with one click. "
+                "'Stack T along Z' concatenates the timepoints (plane i = "
+                "timepoint i//Z, slice i%Z) and stays fully editable: "
+                "paint and fill map back to the right timepoint. "
+                "'Max-project Z per T' shows one Z-projected plane per "
+                "timepoint, so tracks read as clean tubes, but painting "
+                "is disabled (a projected pixel has no unique Z origin) "
+                "and where labels overlap in Z the higher ID wins. Both "
+                "views load lazily while scrubbing in 2D; napari's 3D "
+                "display loads the whole volume into RAM. Edits, Ctrl+Z "
+                "and 'Save Changes and Continue' work exactly as in the "
+                "normal view. 'Off' restores the normal layers."
+            ),
+        },
+    )
+    def track_view(mode: str = "Off"):
+        """Inspect whole tracks by viewing the movie as one 3-D stack."""
+        inspector.set_track_view_mode(
+            {
+                "Off": "off",
+                "Stack T along Z": "stack",
+                "Max-project Z per T": "max",
+            }.get(mode, "off")
+        )
+
     viewer.window.add_dock_widget(save_and_continue)
     viewer.window.add_dock_widget(click_to_delete, name="Delete label (all T)")
     viewer.window.add_dock_widget(
         click_to_relabel, name="Relabel label (all T)"
     )
+    viewer.window.add_dock_widget(
+        delete_low_intensity, name="Delete low-intensity tracks"
+    )
+    viewer.window.add_dock_widget(track_view, name="Track inspection")
 
 
 def label_inspector_widget():

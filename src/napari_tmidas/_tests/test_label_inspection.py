@@ -651,6 +651,226 @@ class TestLabelInspector:
             take1 = np.take(reader_arr, 1, axis=detected)
             assert take1.max() == 7, name
 
+    def test_delete_low_intensity_tracks_bitdepth_invariant(self):
+        """Tracks below the normalized threshold are deleted on all T; the
+        same threshold behaves identically for 8-bit and 16-bit raws.
+        """
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        # Label 5 sits on dim raw signal, label 7 on bright signal.
+        base = np.zeros((3, 8, 8), dtype=np.uint32)
+        base[:, 1, 1] = 5
+        base[:, 4, 4] = 7
+
+        for dtype, dim, bright in [
+            (np.uint8, 25, 240),
+            (np.uint16, 6400, 61440),  # same fractions of the 16-bit range
+        ]:
+            raw = np.zeros((3, 8, 8), dtype=dtype)
+            raw[:, 1, 1] = dim
+            raw[:, 4, 4] = bright
+
+            wrapper = _DaskFancyIndexWrapper(
+                da.from_array(base.copy(), chunks=(1, 8, 8))
+            )
+            layer = _FakeLabels(wrapper)
+            self.viewer.layers = [layer]
+
+            inspector = LabelInspector(self.viewer)
+            inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
+            inspector.channel_axis_override = "None"
+
+            with patch(
+                "napari_tmidas._label_inspection.Labels", _FakeLabels
+            ), patch(
+                "napari_tmidas._label_inspection._load_image",
+                return_value=raw,
+            ):
+                inspector.delete_low_intensity_tracks(0.5)
+
+            result = np.asarray(layer.data)
+            assert not np.any(result == 5), dtype  # dim track deleted
+            assert np.all(result[:, 4, 4] == 7), dtype  # bright track kept
+
+    def test_delete_low_intensity_preview_undoes_previous(self):
+        """Changing the threshold restores all tracks first, so previews
+        reflect only the current setting instead of compounding."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        base = np.zeros((3, 8, 8), dtype=np.uint32)
+        base[:, 1, 1] = 5  # dim
+        base[:, 4, 4] = 7  # bright
+        raw = np.zeros((3, 8, 8), dtype=np.uint8)
+        raw[:, 0, 0] = 255  # bright background sets the normalization max
+        raw[:, 1, 1] = 60  # dim track  → norm ~0.24
+        raw[:, 4, 4] = 200  # bright track → norm ~0.78
+
+        wrapper = _DaskFancyIndexWrapper(
+            da.from_array(base.copy(), chunks=(1, 8, 8))
+        )
+        layer = _FakeLabels(wrapper)
+        self.viewer.layers = [layer]
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
+        inspector.channel_axis_override = "None"
+
+        with patch(
+            "napari_tmidas._label_inspection.Labels", _FakeLabels
+        ), patch(
+            "napari_tmidas._label_inspection._load_image", return_value=raw
+        ):
+            # High threshold deletes BOTH tracks.
+            inspector.delete_low_intensity_tracks(0.9)
+            assert not np.any(np.asarray(layer.data) == 5)
+            assert not np.any(np.asarray(layer.data) == 7)
+
+            # Lower threshold: previous deletion is undone first, so the
+            # bright track returns and only the dim one is removed.
+            inspector.delete_low_intensity_tracks(0.5)
+            result = np.asarray(layer.data)
+            assert not np.any(result == 5)
+            assert np.all(result[:, 4, 4] == 7)
+
+            # Threshold 0 restores everything.
+            inspector.delete_low_intensity_tracks(0.0)
+            result = np.asarray(layer.data)
+            assert np.all(result[:, 1, 1] == 5)
+            assert np.all(result[:, 4, 4] == 7)
+
+    def test_delete_low_intensity_tracks_channels_and_scale(self):
+        """Multi-channel raws are averaged over C, and a raw at higher
+        resolution than the label is resampled onto the label grid.
+        """
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        # 3 timepoints, labels at 8x8; raw at 16x16 with a channel axis (C=2).
+        labels = np.zeros((3, 8, 8), dtype=np.uint32)
+        labels[:, 1, 1] = 5  # dim in both channels
+        labels[:, 4, 4] = 7  # bright in one channel only → mean still high
+        raw = np.zeros((3, 2, 16, 16), dtype=np.uint16)
+        raw[:, :, 2:4, 2:4] = 500  # label 5 footprint at 2x resolution
+        raw[:, 0, 8:10, 8:10] = 65000  # label 7, channel 0 only
+
+        layer = _FakeLabels(labels)
+        self.viewer.layers = [layer]
+
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
+        inspector.channel_axis_override = "1"
+
+        with patch(
+            "napari_tmidas._label_inspection.Labels", _FakeLabels
+        ), patch(
+            "napari_tmidas._label_inspection._load_image", return_value=raw
+        ):
+            inspector.delete_low_intensity_tracks(0.3)
+
+        assert not np.any(layer.data == 5)  # dim track deleted in place
+        assert np.all(layer.data[:, 4, 4] == 7)  # channel-mean keeps 7
+
+    def test_delete_low_intensity_tracks_channel_selection(self):
+        """The chosen channel drives the score; switching channels re-measures.
+
+        Label 7 is bright only in channel 0. Averaging keeps it, but scoring
+        on channel 1 (where it is dark) deletes it — and re-applying with a
+        different channel invalidates the cached measurement.
+        """
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        labels = np.zeros((2, 8, 8), dtype=np.uint32)
+        labels[:, 1, 1] = 5  # bright in both channels
+        labels[:, 4, 4] = 7  # bright in channel 0 only
+        raw = np.zeros((2, 2, 8, 8), dtype=np.uint16)
+        raw[:, :, 1, 1] = 40000  # label 5, both channels
+        raw[:, 0, 4, 4] = 65000  # label 7, channel 0 only (channel 1 stays 0)
+
+        layer = _FakeLabels(labels)
+        self.viewer.layers = [layer]
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
+        inspector.channel_axis_override = "1"
+
+        with patch(
+            "napari_tmidas._label_inspection.Labels", _FakeLabels
+        ), patch(
+            "napari_tmidas._label_inspection._load_image", return_value=raw
+        ):
+            # Channel 0: label 7 is bright → survives; label 5 (also bright) too.
+            inspector.delete_low_intensity_tracks(0.5, channel="0")
+            assert np.all(layer.data[:, 4, 4] == 7)
+            assert np.all(layer.data[:, 1, 1] == 5)
+
+            # Channel 1: label 7 is dark there → deleted; label 5 stays.
+            inspector.delete_low_intensity_tracks(0.5, channel="1")
+            assert not np.any(layer.data == 7)
+            assert np.all(layer.data[:, 1, 1] == 5)
+
+    def test_delete_low_intensity_tracks_none_below(self):
+        """Nothing is deleted when all tracks pass; status reports it."""
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        labels = np.zeros((2, 4, 4), dtype=np.uint32)
+        labels[:, 1, 1] = 3
+        raw = np.zeros((2, 4, 4), dtype=np.uint8)
+        raw[:, 1, 1] = 255
+
+        layer = _FakeLabels(labels)
+        self.viewer.layers = [layer]
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
+        inspector.channel_axis_override = "None"
+
+        with patch(
+            "napari_tmidas._label_inspection.Labels", _FakeLabels
+        ), patch(
+            "napari_tmidas._label_inspection._load_image", return_value=raw
+        ):
+            inspector.delete_low_intensity_tracks(0.5)
+
+        assert np.all(labels[:, 1, 1] == 3)
+        assert "No tracks below" in self.viewer.status
+
     def test_resolve_channel_axis_override(self):
         """The manual override wins over auto-detection and is range-checked."""
         from unittest.mock import Mock
@@ -699,9 +919,318 @@ class TestLabelInspector:
             )
 
 
+class TestTrackInspection:
+    """Track-inspection views: stack-T-along-Z and Z-max-projection."""
+
+    def _wrapper(self, base):
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        return _DaskFancyIndexWrapper(
+            da.from_array(base, chunks=(1, *base.shape[1:]))
+        )
+
+    def test_stacked_view_geometry_and_reads(self):
+        """Plane i of the stacked view is timepoint i//Z, slice i%Z."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.arange(3 * 2 * 4 * 4, dtype=np.uint32).reshape(3, 2, 4, 4)
+        view = _StackedTrackView(self._wrapper(base))
+
+        assert view.shape == (6, 4, 4)
+        assert view.ndim == 3 and view.dtype == base.dtype
+        for i in range(6):
+            np.testing.assert_array_equal(view[i], base[i // 2, i % 2])
+        # Scalar, sliced and full reads (the last is napari's 3-D display).
+        assert view[5, 3, 3] == base[2, 1, 3, 3]
+        np.testing.assert_array_equal(view[1:4], base.reshape(6, 4, 4)[1:4])
+        np.testing.assert_array_equal(np.asarray(view), base.reshape(6, 4, 4))
+
+    def test_stacked_view_fancy_read_and_write(self):
+        """3-D picking reads and paint writes map back to (t, z)."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.zeros((3, 2, 4, 4), dtype=np.uint32)
+        base[1, 0, 1, 1] = 5  # stacked plane 2
+        wrapper = self._wrapper(base)
+        view = _StackedTrackView(wrapper)
+
+        # Ray-cast-style fancy read across planes.
+        vals = view[
+            np.array([1, 2, 3]), np.array([1, 1, 1]), np.array([1, 1, 1])
+        ]
+        np.testing.assert_array_equal(vals, [0, 5, 0])
+
+        # Paint across a timepoint boundary: planes 1 and 2 are
+        # (t=0, z=1) and (t=1, z=0).
+        view[np.array([1, 2]), np.array([3, 3]), np.array([0, 0])] = 9
+        assert view[1, 3, 0] == 9 and view[2, 3, 0] == 9
+        result = np.asarray(wrapper)
+        assert result[0, 1, 3, 0] == 9 and result[1, 0, 3, 0] == 9
+
+        # Scalar-indexed write also maps back to (t, z).
+        view[5, 0, 0] = 7
+        assert np.asarray(wrapper)[2, 1, 0, 0] == 7
+
+    def test_fancy_reads_keep_numpy_shape_semantics(self):
+        """Single-voxel fancy reads must return shape (1,), not 0-d —
+        napari's data_setitem boolean-indexes with the result, and a 0-d
+        value silently produces corrupt 2-D indices."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.zeros((2, 2, 4, 4), dtype=np.uint32)
+        base[1, 1, 2, 2] = 6
+        wrapper = self._wrapper(base)
+        view = _StackedTrackView(wrapper)
+
+        # All-constant single-voxel read on the view (stacked plane 3).
+        out = view[np.array([3]), np.array([2]), np.array([2])]
+        assert out.shape == (1,) and out[0] == 6
+        # Same on the wrapper itself (regular 4-D layer editing path).
+        out = wrapper[
+            np.array([1]), np.array([1]), np.array([2]), np.array([2])
+        ]
+        assert out.shape == (1,) and out[0] == 6
+
+    def test_maxproj_view_projects_and_is_readonly(self):
+        """Max projection collapses Z per timepoint; paint is rejected."""
+        import pytest
+
+        from napari_tmidas._label_inspection import _MaxProjTrackView
+
+        base = np.zeros((2, 3, 4, 4), dtype=np.uint32)
+        base[0, 0, 1, 1] = 2
+        base[0, 2, 1, 1] = 7  # overlaps in Z → max wins
+        view = _MaxProjTrackView(self._wrapper(base))
+
+        assert view.shape == (2, 4, 4)
+        assert view[0][1, 1] == 7
+        np.testing.assert_array_equal(np.asarray(view), base.max(axis=1))
+        with pytest.raises(TypeError):
+            view[np.array([0]), np.array([1]), np.array([1])] = 3
+
+    def test_views_reflect_remaps(self):
+        """Remaps on the source show through; the projection cache is
+        stale until invalidated (the inspector invalidates on every edit)."""
+        from napari_tmidas._label_inspection import (
+            _MaxProjTrackView,
+            _StackedTrackView,
+        )
+
+        base = np.zeros((2, 2, 4, 4), dtype=np.uint32)
+        base[:, :, 0, 0] = 5
+        wrapper = self._wrapper(base)
+        stacked = _StackedTrackView(wrapper)
+        proj = _MaxProjTrackView(wrapper)
+        assert stacked[0, 0, 0] == 5 and proj[0][0, 0] == 5
+
+        wrapper.remap_values({5: 3})
+        assert stacked[0, 0, 0] == 3  # read-through, no cache
+        assert proj[0][0, 0] == 5  # cached projection is stale...
+        proj.invalidate()
+        assert proj[0][0, 0] == 3  # ...until invalidated
+
+    def test_views_on_tyx_source(self):
+        """A TYX movie needs no stacking: both views alias the source."""
+        from napari_tmidas._label_inspection import (
+            _MaxProjTrackView,
+            _StackedTrackView,
+        )
+
+        base = np.zeros((3, 4, 4), dtype=np.uint32)
+        base[:, 2, 2] = 4
+        wrapper = self._wrapper(base)
+        stacked = _StackedTrackView(wrapper)
+        proj = _MaxProjTrackView(wrapper)
+        assert stacked.shape == base.shape and proj.shape == base.shape
+        np.testing.assert_array_equal(np.asarray(stacked), base)
+        np.testing.assert_array_equal(np.asarray(proj), base)
+
+    def test_materialized_volume_serves_reads_and_remaps_in_place(self):
+        """After 3-D materialization, picks cost no source I/O and
+        delete/relabel updates the cached volume in place."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.zeros((3, 2, 4, 4), dtype=np.uint32)
+        base[:, :, 0, 0] = 5
+        base[:, 0, 2, 2] = 7
+        wrapper = self._wrapper(base)
+        view = _StackedTrackView(wrapper)
+
+        vol = np.asarray(view)  # 3-D display path materializes...
+        assert np.asarray(view) is vol  # ...and caches
+
+        # Pick-ray reads are now served from the volume — no source I/O.
+        loads = []
+        orig = view._t_slice
+        view._t_slice = lambda t: loads.append(t) or orig(t)
+        vals = view[np.array([0, 2]), np.array([0, 2]), np.array([0, 2])]
+        assert vals.tolist() == [5, 7] and loads == []
+
+        # Delete via remap: the cached volume updates in place.
+        wrapper.remap_values({5: 0})
+        view.apply_mapping({5: 0})
+        assert vol[0, 0, 0] == 0 and not np.any(np.asarray(view) == 5)
+
+        # Paint through the view lands in both the source and the volume.
+        view[np.array([1]), np.array([3]), np.array([3])] = 9
+        assert vol[1, 3, 3] == 9 and np.asarray(wrapper)[0, 1, 3, 3] == 9
+
+        # invalidate drops the cache; the next read rebuilds from source.
+        view.invalidate()
+        assert view._vol is None and loads == []
+        assert view[3][0, 0] == 0  # rebuilt from the remapped source
+        assert loads  # source was actually consulted again
+
+    def test_maxproj_remap_artifact_and_exact_plane_recompute(self):
+        """Volume remap is in place (documented z-overlap artifact);
+        2-D planes recompute exactly and reveal occluded labels."""
+        from napari_tmidas._label_inspection import _MaxProjTrackView
+
+        base = np.zeros((2, 2, 4, 4), dtype=np.uint32)
+        base[:, 0, 1, 1] = 2  # occluded by 5 (max by value)
+        base[:, 1, 1, 1] = 5
+        wrapper = self._wrapper(base)
+
+        # 2-D path (no materialized volume): plane recomputes exactly.
+        view = _MaxProjTrackView(wrapper)
+        assert view[0][1, 1] == 5
+        wrapper.remap_values({5: 0})
+        view.apply_mapping({5: 0})
+        assert view[0][1, 1] == 2  # occluded label revealed
+
+        # 3-D path: the cached volume is remapped in place — background
+        # where the deleted track occluded another (rebuild restores it).
+        wrapper.undo_remap()
+        view.invalidate()
+        vol = np.asarray(view)
+        assert vol[0, 1, 1] == 5
+        wrapper.remap_values({5: 0})
+        view.apply_mapping({5: 0})
+        assert view[0][1, 1] == 0  # served from the remapped volume
+        view.invalidate()
+        assert view[0][1, 1] == 2  # exact after rebuild
+
+    def test_set_track_view_mode_swaps_layers(self):
+        """The dropdown swaps the view layer in/out and keeps the regular
+        labels layer as the editing/saving target."""
+        from napari_tmidas._label_inspection import (
+            LabelInspector,
+            _MaxProjTrackView,
+            _StackedTrackView,
+        )
+
+        class _FakeLabels:
+            def __init__(self, data, name="", scale=None):
+                self.data = data
+                self.name = name
+                self.scale = scale or [1.0] * getattr(data, "ndim", 1)
+                self.visible = True
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        class _FakeViewer:
+            def __init__(self):
+                self.layers = []
+                self.status = ""
+                self.mouse_drag_callbacks = []
+
+            def add_labels(self, data, scale=None, name=""):
+                layer = _FakeLabels(data, name=name, scale=scale)
+                self.layers.append(layer)
+                return layer
+
+        base = np.zeros((2, 3, 4, 4), dtype=np.uint32)
+        base[:, :, 0, 0] = 5
+        wrapper = self._wrapper(base)
+
+        viewer = _FakeViewer()
+        main = _FakeLabels(wrapper, scale=[1.0, 2.0, 1.0, 1.0])
+        viewer.layers.append(main)
+
+        inspector = LabelInspector(viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.set_track_view_mode("stack")
+            view_layer = inspector._track_view_layer
+            assert isinstance(view_layer.data, _StackedTrackView)
+            assert view_layer.data.shape == (6, 4, 4)
+            # Stacked axis reuses the Z spacing; YX scale is preserved.
+            assert view_layer.scale == [2.0, 1.0, 1.0]
+            assert main.visible is False
+            # The regular labels layer stays the editing/saving target
+            # regardless of layer order; clicks resolve on the view.
+            viewer.layers.reverse()
+            assert inspector._find_labels_layer() is main
+            viewer.layers.reverse()
+            assert inspector._click_value_layer() is view_layer
+
+            # Switching modes replaces the view layer.
+            inspector.set_track_view_mode("max")
+            assert view_layer not in viewer.layers
+            view_layer = inspector._track_view_layer
+            assert isinstance(view_layer.data, _MaxProjTrackView)
+
+            # An all-T deletion refreshes the (cached) projection too.
+            assert view_layer.data[0][0, 0] == 5
+            inspector.delete_label_all_timepoints(5)
+            assert view_layer.data[0][0, 0] == 0
+
+            inspector.set_track_view_mode("off")
+            assert inspector._track_view_layer is None
+            assert viewer.layers == [main]
+            assert main.visible is True
+
+
 class TestLabelInspectorWidget:
     def test_widget_creation(self):
         """Test that the label inspector widget can be imported and called"""
         # Just test that the function exists and can be called
         # (without actually creating the widget to avoid Qt issues)
         assert callable(label_inspector_widget)
+
+    def test_save_and_continue_saves_last_pair(self, tmp_path):
+        """Regression: on the LAST pair, 'Save Changes and Continue'
+        returned early before next_pair(), so edits to the final label
+        image were silently dropped instead of written to disk.
+        """
+        import tifffile
+        from unittest.mock import MagicMock
+
+        from napari_tmidas._label_inspection import label_inspector
+
+        tifffile.imwrite(
+            str(tmp_path / "a.tif"), np.zeros((8, 8), dtype=np.uint16)
+        )
+        label_path = tmp_path / "a_labels.tif"
+        tifffile.imwrite(str(label_path), np.zeros((8, 8), dtype=np.uint32))
+
+        viewer = MagicMock()
+        label_inspector(
+            folder_path=str(tmp_path),
+            label_suffix="_labels.tif",
+            viewer=viewer,
+        )
+
+        # The first dock widget added inside label_inspector is the
+        # save-and-continue button.
+        save_widget = viewer.window.add_dock_widget.call_args_list[0].args[0]
+
+        edited = np.zeros((8, 8), dtype=np.uint32)
+        edited[2:4, 2:4] = 9
+
+        class _FakeLabels:
+            data = edited
+
+            def save(self, path):
+                tifffile.imwrite(path, self.data)
+
+        viewer.layers.__iter__.side_effect = lambda: iter([_FakeLabels()])
+
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            save_widget()
+
+        assert np.array_equal(tifffile.imread(str(label_path)), edited)
+        assert save_widget.call_button.enabled is False
