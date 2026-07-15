@@ -957,6 +957,17 @@ class LabelInspector:
         # the clicked ID exists, "current" only to the clicked timepoint.
         self.delete_scope = "all"
         self.relabel_scope = "all"
+        self._click_split_cb = None  # click-to-split mouse callback
+        # Seeds accumulated for a pending split, or None:
+        # {"label_id": int, "t": int, "coords": [tuple, ...]}.  Plain-click
+        # commits once two or more seeds exist; Ctrl+click adds more first.
+        self._split_seeds = None
+        # Self-managed, globally-unique ID allocator for split-off regions,
+        # (re)initialized per pair to global_max + 1.  napari's own "next
+        # free ID" ('m') maxes over the whole array but no-ops on wrapped /
+        # dask labels, so a split allocates its new ID here instead — global
+        # so a fragment never collides with a real track in another frame.
+        self._next_free_id = None
         # Most recent single-timepoint click edit, for Ctrl+Z:
         # {"t": int, "restores": [(coords, old_id), ...], "desc": str}.
         # Cleared by any later all-T remap so undo order stays correct.
@@ -1202,6 +1213,10 @@ class LabelInspector:
         self._track_view_layer = None
         self._track_hidden = []
 
+        # Pending split seeds and the ID allocator belong to the old pair.
+        self._split_seeds = None
+        self._next_free_id = None
+
         image_path, label_path = self.image_label_pairs[self.current_index]
         image = _load_image(image_path)
         label_image = _load_label(label_path)
@@ -1252,6 +1267,7 @@ class LabelInspector:
         if (
             self._click_delete_cb is not None
             or self._click_relabel_cb is not None
+            or self._click_split_cb is not None
         ):
             self._bind_undo_key(new_labels_layer, True)
 
@@ -1533,14 +1549,15 @@ class LabelInspector:
             "Save to write changes to disk."
         )
 
-    def _ray_hit_plane(self, layer, label_id, event, dims_displayed):
-        """Axis-0 index of the first voxel carrying *label_id* along the
-        3-D pick ray, or None.
+    def _ray_hit_voxel(self, layer, label_id, event, dims_displayed):
+        """Full data coordinate of the first voxel carrying *label_id* along
+        the 3-D pick ray (a 1-D int array), or None.
 
         napari's ``get_value`` already resolved the click to *label_id*
         via the same ray, so marching it again (~1 sample per voxel of
         ray length, one vectorized fancy-index read served from the
-        view's caches) recovers *where* along the ray it was hit.
+        view's caches) recovers *where* along the ray it was hit — the
+        precise voxel is needed both for the timepoint and as a split seed.
         """
         try:
             # Same world→layer conversions napari's get_value performs
@@ -1577,7 +1594,15 @@ class LabelInspector:
         hit = np.nonzero(vals == label_id)[0]
         if hit.size == 0:
             return None
-        return int(pts[hit[0], 0])
+        return pts[hit[0]]
+
+    def _ray_hit_plane(self, layer, label_id, event, dims_displayed):
+        """Axis-0 index of the first voxel carrying *label_id* along the
+        3-D pick ray, or None."""
+        vox = self._ray_hit_voxel(layer, label_id, event, dims_displayed)
+        if vox is None:
+            return None
+        return int(vox[0])
 
     def _clicked_timepoint(self, layer, label_id, event):
         """Timepoint of the clicked voxel, or None when unresolvable.
@@ -2070,6 +2095,7 @@ class LabelInspector:
         """
         if enabled and self._click_delete_cb is None:
             self.enable_click_relabel(False)
+            self.enable_click_split(False)
             self._click_delete_cb = self._make_click_callback(
                 self._on_click_delete
             )
@@ -2084,7 +2110,10 @@ class LabelInspector:
             with contextlib.suppress(ValueError):
                 self.viewer.mouse_drag_callbacks.remove(self._click_delete_cb)
             self._click_delete_cb = None
-            if self._click_relabel_cb is None:
+            if (
+                self._click_relabel_cb is None
+                and self._click_split_cb is None
+            ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-delete OFF."
 
@@ -2101,6 +2130,7 @@ class LabelInspector:
         """
         if enabled and self._click_relabel_cb is None:
             self.enable_click_delete(False)
+            self.enable_click_split(False)
             self._click_relabel_cb = self._make_click_callback(
                 self._on_click_relabel
             )
@@ -2118,9 +2148,318 @@ class LabelInspector:
                     self._click_relabel_cb
                 )
             self._click_relabel_cb = None
-            if self._click_delete_cb is None:
+            if (
+                self._click_delete_cb is None
+                and self._click_split_cb is None
+            ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-relabel OFF."
+
+    # ------------------------------------------------------------------
+    # Click-to-split (spatial split of an under-segmented label)
+    # ------------------------------------------------------------------
+    def _global_max_id(self, labels_layer) -> int:
+        """Largest label ID anywhere in the current pair's labels.
+
+        Read from the base data (all timepoints); for wrapper-backed
+        labels this maxes over the LUT-baked dask array, which is the
+        original geometry — split IDs are tracked in ``_next_free_id``,
+        so they never need re-scanning.
+        """
+        data = labels_layer.data
+        if isinstance(data, _DaskFancyIndexWrapper):
+            base = data._arr
+            if hasattr(base, "compute"):
+                return int(base.max().compute())
+            return int(np.max(np.asarray(base)))
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            return int(data.max().compute())
+        return int(np.max(data))
+
+    def _allocate_split_id(self, labels_layer) -> int:
+        """Return the next globally-unique label ID and advance the counter.
+
+        Initialized lazily per pair to ``global_max + 1`` so the first
+        allocation costs one scan and later splits are O(1); monotonic, so
+        intervening deletes / relabels (which only lower the max) can never
+        make a later split reuse a live ID.
+        """
+        if self._next_free_id is None:
+            self._next_free_id = self._global_max_id(labels_layer) + 1
+        new_id = self._next_free_id
+        self._next_free_id += 1
+        return new_id
+
+    def _click_data_coord(self, layer, label_id, event):
+        """(t, spatial_coord) of the clicked voxel, or None.
+
+        Only for labels with a time axis (axis 0), as the split writes and
+        single-timepoint undo are keyed by ``t``.  In 2-D display (the usual
+        way to split touching cells) ``world_to_data`` resolves the click
+        exactly; the non-displayed axes come from the dims sliders.  In 3-D
+        display ``world_to_data`` of the cursor lands on the near plane, not
+        the clicked voxel, so the pick ray is marched to the first voxel of
+        *label_id* — the same voxel napari's ``get_value`` returned.
+        """
+        data = getattr(layer, "data", None)
+        if getattr(data, "ndim", 0) < 3:
+            return None
+        shape = np.asarray(data.shape, dtype=np.intp)
+        dims_displayed = list(getattr(event, "dims_displayed", None) or [])
+        if len(dims_displayed) == 3:
+            vox = self._ray_hit_voxel(layer, label_id, event, dims_displayed)
+            if vox is None:
+                return None
+            coord = np.clip(np.asarray(vox, dtype=np.intp), 0, shape - 1)
+        else:
+            try:
+                full = np.asarray(
+                    layer.world_to_data(event.position), dtype=float
+                )
+            except Exception:
+                return None
+            if full.shape[0] != shape.shape[0]:
+                return None
+            coord = np.clip(np.rint(full).astype(np.intp), 0, shape - 1)
+        return int(coord[0]), tuple(int(c) for c in coord[1:])
+
+    def split_label_at_timepoint(self, label_id, t, seeds) -> None:
+        """Split the *label_id* region at timepoint *t* by *seeds*.
+
+        A seeded watershed on the distance transform of the label's mask
+        (its full spatial sub-volume at *t*) divides it into one region per
+        seed voxel, cut at the constrictions between them: the first seed's
+        region keeps *label_id*, each remaining seed's region becomes a
+        fresh globally-unique ID.  Two or more distinct seeds are required
+        — pass several to separate a cluster of merged cells in one go.  The
+        edit is a single-timepoint pixel write, recorded like a paint stroke
+        so it saves normally and Ctrl+Z merges every region back.
+        """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        label_id = int(label_id)
+        if label_id == 0:
+            self.viewer.status = "Select a non-background label to split."
+            return
+
+        seeds = list(dict.fromkeys(tuple(s) for s in seeds))  # unique, ordered
+        if len(seeds) < 2:
+            self.viewer.status = (
+                "Split: place at least two distinct points on the label."
+            )
+            return
+
+        data = labels_layer.data
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            data = _DaskFancyIndexWrapper(data)
+            labels_layer.data = data
+
+        t = int(t)
+        if isinstance(data, _DaskFancyIndexWrapper):
+            sub = data._get_outer_slice(0, t)
+        else:
+            sub = np.asarray(data[t])
+
+        if any(sub[s] != label_id for s in seeds):
+            self.viewer.status = (
+                f"Split: every point must land on label {label_id} at "
+                f"timepoint {t} — one missed it."
+            )
+            return
+
+        n_new = len(seeds) - 1
+        if self._next_free_id is None:
+            self._next_free_id = self._global_max_id(labels_layer) + 1
+        if (
+            np.issubdtype(data.dtype, np.integer)
+            and self._next_free_id + n_new - 1 > np.iinfo(data.dtype).max
+        ):
+            self.viewer.status = (
+                f"Split: label dtype {np.dtype(data.dtype)} cannot hold "
+                f"{n_new} more ID(s) (max {np.iinfo(data.dtype).max}). "
+                "Convert the labels to a wider integer type first."
+            )
+            return
+
+        from scipy import ndimage as ndi
+        from skimage.segmentation import watershed
+
+        blob = sub == label_id
+        dist = ndi.distance_transform_edt(blob)
+        markers = np.zeros(sub.shape, dtype=np.int32)
+        for i, s in enumerate(seeds):
+            markers[s] = i + 1
+        ws = watershed(-dist, markers, mask=blob)
+
+        # Marker 1 keeps label_id; markers 2..N each become a new ID.
+        restores = []
+        new_ids = []
+        for marker in range(2, len(seeds) + 1):
+            coords = np.nonzero(ws == marker)
+            if not coords[0].size:
+                continue
+            new_id = self._allocate_split_id(labels_layer)
+            if isinstance(data, _DaskFancyIndexWrapper):
+                data[(t, *coords)] = new_id
+            else:
+                sub[coords] = new_id
+            restores.append((coords, label_id))
+            new_ids.append(new_id)
+
+        if not new_ids:
+            self.viewer.status = (
+                "Split: watershed produced no new regions — try seeds "
+                "farther apart."
+            )
+            return
+
+        labels_layer.refresh()
+        self._refresh_track_view(timepoint=t)
+        # A manual edit changes track geometry — re-measure on next preview.
+        # (Also clears any older single-T undo, so set our record after.)
+        self._invalidate_track_stats()
+        ids_str = ", ".join(str(i) for i in new_ids)
+        self._single_t_last = {
+            "t": t,
+            "restores": restores,
+            "desc": (
+                f"{len(new_ids)} region(s) ({ids_str}) merged back into "
+                f"{label_id} (split undone)"
+            ),
+        }
+        self.viewer.status = (
+            f"Split label {label_id} at timepoint {t} into "
+            f"{len(new_ids) + 1} region(s): new label(s) {ids_str}. "
+            "Ctrl+Z merges them back; 'Save Changes and Continue' writes "
+            "them to disk."
+        )
+
+    def _on_click_split(self, layer, label_id, event):
+        """Place (or remove) a split seed; the split runs on 'Apply split'.
+
+        Plain left-click adds one seed per cell of a merged label;
+        Ctrl+left-click removes the most recently placed seed.  A click on a
+        different label or timepoint starts a fresh seed set.  Nothing is
+        written until :meth:`commit_split` (the Apply button) runs.
+        """
+        if self._track_view_layer is not None:
+            self._split_seeds = None
+            self.viewer.status = (
+                "Split works only in the normal frame view — set Track "
+                "view to 'Off' first."
+            )
+            return
+        modifiers = getattr(event, "modifiers", None) or ()
+        if "Control" in modifiers:
+            active = self._split_seeds
+            if active and active["coords"]:
+                active["coords"].pop()
+                if not active["coords"]:
+                    self._split_seeds = None
+                    self.viewer.status = "Split: all seeds removed."
+                else:
+                    self.viewer.status = (
+                        f"Split: removed last seed, {len(active['coords'])} "
+                        "left."
+                    )
+            else:
+                self.viewer.status = "Split: no seed to remove."
+            return
+        if not label_id:  # None (off-canvas) or 0 (background)
+            self.viewer.status = "Split: background clicked, no seed placed."
+            return
+        resolved = self._click_data_coord(layer, label_id, event)
+        if resolved is None:
+            self.viewer.status = (
+                "Split: could not resolve the clicked voxel (needs a label "
+                "movie with a time axis)."
+            )
+            return
+        t, coord = resolved
+
+        active = self._split_seeds
+        if (
+            active is None
+            or active["label_id"] != label_id
+            or active["t"] != t
+        ):
+            active = {"label_id": label_id, "t": t, "coords": []}
+            self._split_seeds = active
+        if coord not in active["coords"]:
+            active["coords"].append(coord)
+        self.viewer.status = (
+            f"Split: {len(active['coords'])} seed(s) on label {label_id} "
+            f"(t={t}). Click one point per cell, then press 'Apply split' "
+            "(Ctrl+click removes the last seed)."
+        )
+
+    def commit_split(self) -> None:
+        """Run the watershed split on the seeds placed so far (Apply button)."""
+        active = self._split_seeds
+        if not active or len(active["coords"]) < 2:
+            self.viewer.status = (
+                "Split: click at least two points (one per cell) on a "
+                "label first."
+            )
+            return
+        if self._track_view_layer is not None:
+            self.viewer.status = (
+                "Split works only in the normal frame view — set Track "
+                "view to 'Off' first."
+            )
+            return
+        label_id = active["label_id"]
+        t = active["t"]
+        seeds = list(active["coords"])
+        self._split_seeds = None
+        self.split_label_at_timepoint(label_id, t, seeds)
+
+    def enable_click_split(self, enabled: bool) -> None:
+        """Toggle click-to-split mode (mutually exclusive with delete /
+        relabel).
+
+        While enabled, click two points inside one under-segmented label to
+        divide it — at the clicked timepoint only — with a seeded watershed;
+        the split-off part gets a fresh globally-unique ID.  Ctrl+Z merges
+        the last split back.  Track view must be off (a split needs precise
+        source voxels, which the projected views don't provide).
+        """
+        if enabled and self._click_split_cb is None:
+            self.enable_click_delete(False)
+            self.enable_click_relabel(False)
+            self._split_seeds = None
+            self._click_split_cb = self._make_click_callback(
+                self._on_click_split
+            )
+            self.viewer.mouse_drag_callbacks.append(self._click_split_cb)
+            self._bind_undo_key(self._find_labels_layer(), True)
+            self.viewer.status = (
+                "Click-to-split ON: click one point inside each cell of a "
+                "merged label, then press 'Apply split' (Ctrl+click removes "
+                "the last seed). Each part after the first gets a new ID; "
+                "Ctrl+Z merges the split back. Turn Track view off to use it."
+            )
+        elif not enabled and self._click_split_cb is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.mouse_drag_callbacks.remove(self._click_split_cb)
+            self._click_split_cb = None
+            self._split_seeds = None
+            if (
+                self._click_delete_cb is None
+                and self._click_relabel_cb is None
+            ):
+                self._bind_undo_key(self._find_labels_layer(), False)
+            self.viewer.status = "Click-to-split OFF."
 
     def set_track_view_mode(self, mode: str) -> None:
         """Switch the track-inspection view: ``"off"``, ``"stack"`` or ``"max"``.
@@ -2347,6 +2686,8 @@ def label_inspector(
         # (widget enabled state) and shadows the parameter's CheckBox.
         if enabled and click_to_relabel["enabled"].value:
             click_to_relabel["enabled"].value = False
+        if enabled and click_to_split["enabled"].value:
+            click_to_split["enabled"].value = False
         inspector.enable_click_delete(enabled)
 
     @magicgui(
@@ -2390,7 +2731,45 @@ def label_inspector(
         )
         if enabled and click_to_delete["enabled"].value:
             click_to_delete["enabled"].value = False
+        if enabled and click_to_split["enabled"].value:
+            click_to_split["enabled"].value = False
         inspector.enable_click_relabel(enabled)
+
+    @magicgui(
+        auto_call=True,
+        enabled={
+            "label": "Click one point per cell to split a merged label",
+            "tooltip": (
+                "For under-segmented labels — several touching cells that "
+                "got one ID. While enabled, left-click one point inside "
+                "each cell of the merged label, then press 'Apply split': a "
+                "seeded watershed divides it at the constrictions between "
+                "the seeds, at the clicked timepoint only. Ctrl+click "
+                "removes the most recently placed seed. The first seed's "
+                "region keeps the original ID; every other region gets a "
+                "new, globally-unique ID. Ctrl+Z merges the split back. All "
+                "seeds must be on the same label and timepoint (a click "
+                "elsewhere restarts). Splits are staged in memory; press "
+                "'Save Changes and Continue' to write them. Only in the "
+                "normal frame view — turn Track view off first."
+            ),
+        },
+    )
+    def click_to_split(enabled: bool = False):
+        """While on, click one point per cell to split a merged label."""
+        if enabled and click_to_delete["enabled"].value:
+            click_to_delete["enabled"].value = False
+        if enabled and click_to_relabel["enabled"].value:
+            click_to_relabel["enabled"].value = False
+        inspector.enable_click_split(enabled)
+
+    @magicgui(
+        call_button="Apply split",
+        labels=False,
+    )
+    def apply_split():
+        """Run the watershed split on the seeds placed in the viewer."""
+        inspector.commit_split()
 
     @magicgui(
         call_button="Apply",
@@ -2468,6 +2847,12 @@ def label_inspector(
     viewer.window.add_dock_widget(save_and_continue, name="Save changes")
     viewer.window.add_dock_widget(click_to_delete, name="Delete label")
     viewer.window.add_dock_widget(click_to_relabel, name="Relabel label")
+    from magicgui.widgets import Container
+
+    split_widget = Container(
+        widgets=[click_to_split, apply_split], labels=False
+    )
+    viewer.window.add_dock_widget(split_widget, name="Split label")
     viewer.window.add_dock_widget(
         delete_low_intensity, name="Delete low-intensity tracks"
     )
