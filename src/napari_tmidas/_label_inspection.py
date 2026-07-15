@@ -1754,9 +1754,9 @@ class LabelInspector:
         self.delete_label_all_timepoints(label_id)
 
     def _on_click_relabel(self, layer, label_id, event):
-        modifiers = {
-            str(m) for m in (getattr(event, "modifiers", None) or ())
-        }
+        # Real events carry vispy Key objects, whose str() is "<Key 'Control'>";
+        # `in` compares via Key.__eq__, which matches both Keys and plain strings.
+        modifiers = getattr(event, "modifiers", None) or ()
         if "Control" in modifiers:
             # Pipette: pick up the clicked label as the target ID.
             if not label_id:

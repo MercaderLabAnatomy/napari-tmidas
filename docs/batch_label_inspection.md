@@ -96,6 +96,10 @@ For each pair displayed:
 - **Click-to-delete**: Left-click a label to remove it from every timepoint
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
 
+**Track-level tools** (napari-tmidas, for tracked time series):
+- **Whole-track 3D views** (see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
+- **Delete low-intensity tracks** (see [Delete Low-Intensity Tracks](#delete-low-intensity-tracks)): remove every track dimmer than a threshold in one step, with a live preview
+
 **Viewing Tips**:
 - Adjust label opacity (right panel) to see image beneath
 - Use different colormaps for better visibility
@@ -152,6 +156,73 @@ larger than RAM — no data is rewritten until you save.
   the file — saved operations can no longer be undone
 - The two modes are mutually exclusive: enabling one switches the other off
 - The active mode persists as you move through image-label pairs
+
+### Whole-Track 3D Inspection
+
+Docked as **Track inspection**, the *Track view* dropdown shows the whole
+movie as a **single 3-D volume** so each track (label ID) appears as one
+connected, clickable object. Switch napari to its 3D display to see entire
+tracks at once, and use the click modes to delete or relabel a whole track
+with a single click. This turns per-timepoint scrubbing into a single
+overview of every track's lifetime.
+
+Three modes:
+
+- **Off** *(default)* — the normal side-by-side layers.
+- **Stack T along Z** — concatenates the timepoints into one lazy `(T*Z, Y, X)`
+  volume (plane `i` = timepoint `i//Z`, slice `i%Z`). **Fully editable**:
+  paint and fill map back to the correct `(t, z)`, so all normal editing works.
+- **Max-project Z per T** — shows one Z-projected plane per timepoint, a
+  `(T, Y, X)` volume in which tracks read as clean tubes. **Painting is
+  disabled** here (a projected pixel has no unique Z origin), and where labels
+  overlap in Z the higher ID wins. The ID-based click tools still work.
+
+**Behavior**:
+
+- Both views read through the same lazy (dask) wrapper as the normal view —
+  no data is copied while scrubbing in 2D. napari's 3D display loads the whole
+  volume into RAM.
+- Click-to-delete / click-to-relabel, **Ctrl+Z** undo, and **Save Changes and
+  Continue** all work exactly as in the normal view; label files stay TZYX.
+- Delete/relabel edits remap the cached 3-D volume in place, so 3-D picking and
+  refreshes cost no extra I/O.
+- The chosen view persists as you move through image-label pairs and is rebuilt
+  over each new pair. Requires a 3-D (TYX) or 4-D (TZYX) label source.
+
+### Delete Low-Intensity Tracks
+
+Docked as **Delete low-intensity tracks**, this tool removes every track
+(label ID) whose raw-image brightness falls below a threshold — across **all
+timepoints** — in one step. It is aimed at tracked data where dim, spurious
+tracks should be culled in bulk rather than clicked away one by one.
+
+**Controls**:
+
+- **Intensity threshold (0–1)** — a track's brightness is the median of its
+  raw voxel intensities, normalized to `0–1` using the raw image's own global
+  min/max. Because normalization is relative to the image, the **same threshold
+  works for 8-bit and 16-bit** images (and for data that only occupies part of
+  its dtype range, e.g. a 12-bit camera). `0` shows all tracks.
+- **Measure channel** — for a multi-channel raw, which channel supplies the
+  intensity: **Mean** averages all channels, or pick a channel index (`0`–`4`,
+  0-based along the raw's channel axis) to score on a single marker. Ignored for
+  single-channel raws.
+
+**Live preview and workflow**:
+
+1. Set the threshold and press **Apply** to preview the deletion.
+2. Re-applying is safe — the previous preview is **restored first**, so each
+   Apply reflects only the current settings rather than compounding. Slide the
+   threshold and Apply again to refine.
+3. The status bar reports how many of the measured tracks were removed (and the
+   deleted IDs, when few).
+4. Deletions are staged in memory and **undoable with Ctrl+Z** (while a click
+   mode is active); press **Save Changes and Continue** to write them to disk.
+
+> **Note**: This in-inspector tool is distinct from the k-medoids
+> [Intensity-Based Label Filtering](intensity_label_filter.md) batch-processing
+> functions — here you set an explicit threshold with a live preview inside the
+> inspector, rather than clustering labels automatically.
 
 ### Automatic Pair Matching
 
@@ -259,6 +330,24 @@ When segmentation detects spurious objects:
    removed from every timepoint instantly
 2. Or use eraser (label = 0) for partial removal
 3. Save corrected labels
+
+### Culling Dim Tracks in Bulk
+
+When tracking produces many faint, spurious tracks:
+1. Use **Delete low-intensity tracks**
+2. (Multi-channel raw) pick the **Measure channel** for the relevant marker
+3. Set the **Intensity threshold** and press **Apply** to preview
+4. Adjust the threshold and Apply again until only real tracks remain
+5. Save changes
+
+### Inspecting Whole Tracks in 3D
+
+To review a track's entire lifetime at once:
+1. Set **Track view** to *Stack T along Z* (editable) or *Max-project Z per T*
+   (tubes)
+2. Switch napari to its 3D display
+3. Rotate to see each track as one connected object
+4. Click-to-delete or click-to-relabel whole tracks, then save
 
 ### Fixing Tracking ID Switches
 

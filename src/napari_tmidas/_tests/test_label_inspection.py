@@ -404,6 +404,17 @@ class TestLabelInspector:
             assert layer.selected_label == 3
             assert np.any(np.asarray(layer.data) == 5)
 
+            # Real canvas events carry vispy Key objects, not strings —
+            # the pipette must recognize those too (str(Key) is
+            # "<Key 'Control'>", so a str()-based check silently fails).
+            from vispy.util import keys
+
+            layer.clicked_value = 5
+            _fire(_FakeEvent(modifiers=(keys.CONTROL,)))
+            assert layer.selected_label == 5
+            assert np.any(np.asarray(layer.data) == 5)
+            layer.selected_label = 3
+
             # Clean click on label 5: relabeled to the pipetted 3 on all T.
             layer.clicked_value = 5
             _fire(_FakeEvent())
