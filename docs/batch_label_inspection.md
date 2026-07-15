@@ -95,6 +95,7 @@ For each pair displayed:
 **Click Modes** (napari-tmidas, see [One-Click Label Editing](#one-click-label-editing-all-timepoints)):
 - **Click-to-delete**: Left-click a label to remove it from every timepoint
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
+- **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
 
 **Track-level tools** (napari-tmidas, for tracked time series):
 - **Whole-track 3D views** (see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
@@ -156,6 +157,37 @@ larger than RAM — no data is rewritten until you save.
   the file — saved operations can no longer be undone
 - The two modes are mutually exclusive: enabling one switches the other off
 - The active mode persists as you move through image-label pairs
+
+### Splitting Merged Labels
+
+Docked as **Split label**, this tool divides an under-segmented label — two
+or more touching cells that a segmenter gave a single ID — into separate
+labels. It is the inverse of Click-to-Relabel's merge, and unlike the other
+click modes it edits **only the clicked timepoint** (each frame's geometry is
+different, so there is no all-timepoints shortcut).
+
+Enable *"Click one point per cell to split a merged label"*, then:
+
+- **Left-click** one point inside each cell of the merged label — one seed per
+  cell. The status bar shows the running seed count.
+- **Ctrl+left-click** removes the most recently placed seed.
+- Press **Apply split**. A seeded watershed on the label's mask cuts it at the
+  constrictions between the seeds. The first seed's region keeps the original
+  ID; every other region gets a new, globally-unique ID.
+
+Notes:
+
+- Two or more seeds are required, all on the **same label and timepoint** — a
+  click on a different label or timepoint starts a fresh seed set. Clustered
+  cells split in one pass: place a seed in each, then Apply once.
+- **Ctrl+Z** merges the whole split back in one step.
+- Splits are staged in memory; press **Save and Continue** to write them —
+  saved splits can no longer be undone.
+- Works in the **normal frame view only** (2D or 3D display) — turn *Track
+  view* off first, since the projected track views cannot resolve a precise
+  source voxel to seed from.
+- Mutually exclusive with Click-to-Delete and Click-to-Relabel; the mode
+  persists as you move through image-label pairs.
 
 ### Whole-Track 3D Inspection
 
@@ -322,6 +354,16 @@ When segmentation over-splits cells:
 3. Click the split-off fragments to merge them into it (all timepoints at once)
 4. Or paint manually with the same label for partial merges
 5. Save changes
+
+### Splitting Merged Objects
+
+When segmentation under-splits — several touching cells share one ID:
+1. Enable **Click-to-split**
+2. Navigate to the timepoint where the objects are merged
+3. Click one point inside each cell (Ctrl+click removes the last seed)
+4. Press **Apply split** — the label divides into one region per seed, each
+   after the first getting a new ID
+5. Repeat at other timepoints as needed, then save changes
 
 ### Removing False Positives
 
