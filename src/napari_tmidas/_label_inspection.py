@@ -559,6 +559,23 @@ class _TrackView:
         """Drop all derived caches after an arbitrary source edit."""
         self._vol = None
 
+    def _planes_of_t(self, t: int):
+        """The view plane indices that show timepoint *t*."""
+        raise NotImplementedError
+
+    def refresh_timepoint(self, t: int) -> None:
+        """Recompute cached planes for timepoint *t* only.
+
+        The cheap alternative to :meth:`invalidate` when a source edit is
+        confined to one timepoint: the materialized volume is patched with
+        that timepoint's planes (served from the source's warm slice
+        cache), so the 3-D display stays interactive.
+        """
+        if self._vol is None:
+            return
+        for i in self._planes_of_t(int(t)):
+            self._vol[i] = self._plane(i)
+
     def apply_mapping(self, mapping: dict) -> None:
         """Update caches in place for a global {old_id: new_id} remap.
 
@@ -657,6 +674,9 @@ class _StackedTrackView(_TrackView):
         t_slice = self._t_slice(t)
         return t_slice[z] if self._source.ndim == 4 else t_slice
 
+    def _planes_of_t(self, t: int):
+        return range(t * self._n_z, (t + 1) * self._n_z)
+
     def __setitem__(self, index, value):
         if not isinstance(index, tuple):
             index = (index,)
@@ -729,6 +749,15 @@ class _MaxProjTrackView(_TrackView):
     def invalidate(self) -> None:
         super().invalidate()
         self._cache.clear()
+
+    def _planes_of_t(self, t: int):
+        return (t,)
+
+    def refresh_timepoint(self, t: int) -> None:
+        # Unlike apply_mapping, this re-projects the timepoint exactly, so
+        # labels that were occluded along Z reappear correctly.
+        self._cache.pop(int(t), None)
+        super().refresh_timepoint(t)
 
     def apply_mapping(self, mapping: dict) -> None:
         """Remap caches in place; projected planes are dropped instead.
@@ -924,6 +953,14 @@ class LabelInspector:
         self.current_index = 0
         self._click_delete_cb = None  # click-to-delete mouse callback
         self._click_relabel_cb = None  # click-to-relabel mouse callback
+        # Scope of the click tools: "all" applies to every timepoint where
+        # the clicked ID exists, "current" only to the clicked timepoint.
+        self.delete_scope = "all"
+        self.relabel_scope = "all"
+        # Most recent single-timepoint click edit, for Ctrl+Z:
+        # {"t": int, "restores": [(coords, old_id), ...], "desc": str}.
+        # Cleared by any later all-T remap so undo order stays correct.
+        self._single_t_last = None
         # Cached per-track raw-intensity stats for the current pair, and the
         # last low-intensity deletion (for live-preview undo). See
         # delete_low_intensity_tracks.
@@ -1309,6 +1346,8 @@ class LabelInspector:
 
         labels_layer.refresh()
         self._refresh_track_view(mapping)
+        # An all-T remap supersedes any pending single-T undo.
+        self._single_t_last = None
 
     def delete_label_all_timepoints(self, label_id: int = None) -> None:
         """Delete *label_id* (default: the selected label) from **all** timepoints."""
@@ -1365,6 +1404,207 @@ class LabelInspector:
             f"Label {old_id} relabeled to {new_id} on all timepoints. "
             "Save to write changes to disk."
         )
+
+    def _remap_one_timepoint(self, labels_layer, mapping: dict, t: int):
+        """Apply {old_id: new_id} *mapping* at timepoint *t* only.
+
+        Unlike the all-T LUT path, the edit is recorded like a paint
+        stroke — a sparse per-slice diff on wrapper-backed labels, an
+        in-place write on numpy — so it saves normally and stays
+        consistent with later all-T remaps (which patch pending diffs).
+
+        Returns the [(coords, old_id), ...] restore records for the
+        single-level Ctrl+Z undo (empty when no ID was present at *t*),
+        or the string ``"all"`` when the labels have no time axis and the
+        remap fell back to the whole array.
+        """
+        data = labels_layer.data
+        if getattr(data, "ndim", 0) < 3:
+            # No time axis to restrict to — the whole array is the one
+            # timepoint (undo goes through the LUT op log instead).
+            self._remap_all_timepoints(labels_layer, mapping)
+            return "all"
+
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            data = _DaskFancyIndexWrapper(data)
+            labels_layer.data = data
+
+        t = int(t)
+        if isinstance(data, _DaskFancyIndexWrapper):
+            t_slice = data._get_outer_slice(0, t)
+        else:
+            t_slice = data[t]
+        # Masks first, writes second: simultaneous mapping semantics.
+        hits = [
+            (np.nonzero(t_slice == k), v, k)
+            for k, v in mapping.items()
+            if int(k) != int(v)
+        ]
+        restores = []
+        for coords, v, k in hits:
+            if not coords[0].size:
+                continue
+            if isinstance(data, _DaskFancyIndexWrapper):
+                data[(t, *coords)] = v
+            else:
+                t_slice[coords] = v
+            restores.append((coords, k))
+        if restores:
+            labels_layer.refresh()
+            self._refresh_track_view(timepoint=t)
+        return restores
+
+    def delete_label_at_timepoint(self, label_id: int, t: int) -> None:
+        """Delete *label_id* from timepoint *t* only."""
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        label_id = int(label_id)
+        if label_id == 0:
+            self.viewer.status = "Select a non-background label first."
+            return
+        restores = self._remap_one_timepoint(labels_layer, {label_id: 0}, t)
+        self._invalidate_track_stats()
+        if restores == "all":
+            self.viewer.status = (
+                f"Label {label_id} removed (no time axis — whole image). "
+                "Save to write changes to disk."
+            )
+            return
+        if not restores:
+            self.viewer.status = (
+                f"Label {label_id} not present at timepoint {t}."
+            )
+            return
+        self._single_t_last = {
+            "t": int(t),
+            "restores": restores,
+            "desc": f"{label_id} restored (deletion undone)",
+        }
+        self.viewer.status = (
+            f"Label {label_id} removed from timepoint {t}. "
+            "Save to write changes to disk."
+        )
+
+    def relabel_label_at_timepoint(
+        self, old_id: int, new_id: int, t: int
+    ) -> None:
+        """Give *old_id* the value *new_id* at timepoint *t* only."""
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        old_id, new_id = int(old_id), int(new_id)
+        if old_id == 0:
+            self.viewer.status = (
+                "Cannot relabel background — click a label instead."
+            )
+            return
+        if old_id == new_id:
+            self.viewer.status = f"Label {old_id} already has this ID."
+            return
+        restores = self._remap_one_timepoint(
+            labels_layer, {old_id: new_id}, t
+        )
+        self._invalidate_track_stats()
+        if restores == "all":
+            self.viewer.status = (
+                f"Label {old_id} relabeled to {new_id} (no time axis — "
+                "whole image). Save to write changes to disk."
+            )
+            return
+        if not restores:
+            self.viewer.status = (
+                f"Label {old_id} not present at timepoint {t}."
+            )
+            return
+        self._single_t_last = {
+            "t": int(t),
+            "restores": restores,
+            "desc": f"{old_id}→{new_id} reverted",
+        }
+        self.viewer.status = (
+            f"Label {old_id} relabeled to {new_id} at timepoint {t}. "
+            "Save to write changes to disk."
+        )
+
+    def _ray_hit_plane(self, layer, label_id, event, dims_displayed):
+        """Axis-0 index of the first voxel carrying *label_id* along the
+        3-D pick ray, or None.
+
+        napari's ``get_value`` already resolved the click to *label_id*
+        via the same ray, so marching it again (~1 sample per voxel of
+        ray length, one vectorized fancy-index read served from the
+        view's caches) recovers *where* along the ray it was hit.
+        """
+        try:
+            # Same world→layer conversions napari's get_value performs
+            # before its own ray cast: dims_displayed arrives in world
+            # dims, position/ray in world coordinates.
+            from napari.layers.utils.layer_utils import (
+                dims_displayed_world_to_layer,
+            )
+
+            start, end = layer.get_ray_intersections(
+                layer.world_to_data(event.position),
+                layer._world_to_data_ray(event.view_direction),
+                dims_displayed_world_to_layer(
+                    dims_displayed,
+                    ndim_world=len(event.position),
+                    ndim_layer=layer.ndim,
+                ),
+                world=False,
+            )
+        except Exception:
+            return None
+        if start is None or end is None:
+            return None
+        start = np.asarray(start, dtype=float)
+        end = np.asarray(end, dtype=float)
+        # Same sampling convention as napari's _get_value_ray: the ray
+        # endpoints are voxel-corner-based (voxel i spans [i, i+1)), so
+        # indices come from truncation, at ~2 samples per voxel of length.
+        n = max(int(2 * np.linalg.norm(end - start)), 2)
+        pts = np.floor(np.linspace(start, end, n)).astype(np.intp)
+        data = layer.data
+        np.clip(pts, 0, np.asarray(data.shape, dtype=np.intp) - 1, out=pts)
+        vals = np.asarray(data[tuple(pts.T)])
+        hit = np.nonzero(vals == label_id)[0]
+        if hit.size == 0:
+            return None
+        return int(pts[hit[0], 0])
+
+    def _clicked_timepoint(self, layer, label_id, event):
+        """Timepoint of the clicked voxel, or None when unresolvable.
+
+        In 2-D display (and for a 4-D layer in 3-D display, where T is
+        the non-displayed axis) the click position carries the axis-0
+        coordinate directly.  For a 3-D layer in 3-D display the pick
+        ray is marched to the voxel that was hit.  Track-view plane
+        indices are mapped back to source timepoints.
+        """
+        data = getattr(layer, "data", None)
+        dims_displayed = list(getattr(event, "dims_displayed", None) or [])
+        if len(dims_displayed) == 3 and getattr(data, "ndim", 0) == 3:
+            plane = self._ray_hit_plane(layer, label_id, event, dims_displayed)
+        else:
+            try:
+                plane = int(round(float(layer.world_to_data(event.position)[0])))
+            except Exception:
+                return None
+        if plane is None:
+            return None
+        if isinstance(data, _StackedTrackView):
+            t = plane // data._n_z
+        else:  # max-projection view (plane == t) or the regular layer
+            t = plane
+        n_t = data._n_t if isinstance(data, _TrackView) else data.shape[0]
+        return min(max(t, 0), n_t - 1)
 
     def _iter_label_raw_slices(self, labels_data, raw):
         """Yield aligned (label_slice, raw_slice) numpy pairs, outer-dim-wise.
@@ -1650,9 +1890,13 @@ class LabelInspector:
 
         Called when the loaded pair changes or the labels are edited by
         another tool, so a subsequent low-intensity preview re-measures.
+        Also drops the pending single-timepoint undo record — its coords
+        would be stale on another pair.  (The single-T click tools set
+        their record *after* calling this.)
         """
         self._track_stats = None
         self._low_intensity_last = None
+        self._single_t_last = None
 
     def _on_undo_key(self, _provider=None):
         """Ctrl+Z while click-to-delete / click-to-relabel mode is on.
@@ -1669,6 +1913,21 @@ class LabelInspector:
         if layer is None:
             return
         data = getattr(layer, "data", None)
+        # Single-timepoint click edits are recorded like paint strokes, not
+        # LUT ops; when one is the most recent operation (all-T remaps clear
+        # the record), write its voxels back the same way.
+        info = self._single_t_last
+        if info is not None and data is not None:
+            self._single_t_last = None
+            t = info["t"]
+            for coords, old_id in info["restores"]:
+                data[(t, *coords)] = old_id
+            layer.refresh()
+            self._refresh_track_view(timepoint=t)
+            self.viewer.status = (
+                f"Undo: label {info['desc']} at timepoint {t}."
+            )
+            return
         if isinstance(data, _DaskFancyIndexWrapper):
             mapping = data.undo_remap()
             if mapping:
@@ -1751,7 +2010,16 @@ class LabelInspector:
                 "Click-to-delete: background clicked, nothing removed."
             )
             return
-        self.delete_label_all_timepoints(label_id)
+        if self.delete_scope != "current":
+            self.delete_label_all_timepoints(label_id)
+            return
+        t = self._clicked_timepoint(layer, label_id, event)
+        if t is None:
+            self.viewer.status = (
+                "Click-to-delete: could not resolve the clicked timepoint."
+            )
+            return
+        self.delete_label_at_timepoint(label_id, t)
 
     def _on_click_relabel(self, layer, label_id, event):
         # Real events carry vispy Key objects, whose str() is "<Key 'Control'>";
@@ -1775,16 +2043,28 @@ class LabelInspector:
                 "Click-to-relabel: background clicked, nothing relabeled."
             )
             return
-        self.relabel_label_all_timepoints(
-            label_id, int(layer.selected_label)
+        if self.relabel_scope != "current":
+            self.relabel_label_all_timepoints(
+                label_id, int(layer.selected_label)
+            )
+            return
+        t = self._clicked_timepoint(layer, label_id, event)
+        if t is None:
+            self.viewer.status = (
+                "Click-to-relabel: could not resolve the clicked timepoint."
+            )
+            return
+        self.relabel_label_at_timepoint(
+            label_id, int(layer.selected_label), t
         )
 
     def enable_click_delete(self, enabled: bool) -> None:
         """Toggle click-to-delete mode (mutually exclusive with relabel).
 
         While enabled, a plain left-click (no drag — panning is unaffected)
-        on a label deletes that label from **all** timepoints via the fast
-        LUT path, and Ctrl+Z undoes the last deletion.  This replaces
+        on a label deletes that label — from **all** timepoints via the fast
+        LUT path, or only the clicked timepoint when ``delete_scope`` is
+        ``"current"`` — and Ctrl+Z undoes the last deletion.  This replaces
         napari's bucket-with-ndim-4 workflow, which materializes the entire
         array before filling.
         """
@@ -1796,8 +2076,9 @@ class LabelInspector:
             self.viewer.mouse_drag_callbacks.append(self._click_delete_cb)
             self._bind_undo_key(self._find_labels_layer(), True)
             self.viewer.status = (
-                "Click-to-delete ON: click a label to remove it "
-                "from all timepoints (Ctrl+Z undoes the last deletion)."
+                "Click-to-delete ON: click a label to remove it — from all "
+                "timepoints or only the clicked one, per 'Apply to' "
+                "(Ctrl+Z undoes the last deletion)."
             )
         elif not enabled and self._click_delete_cb is not None:
             with contextlib.suppress(ValueError):
@@ -1811,8 +2092,9 @@ class LabelInspector:
         """Toggle click-to-relabel mode (mutually exclusive with delete).
 
         While enabled, a plain left-click on a label assigns it the layer's
-        currently selected label ID on **all** timepoints via the fast LUT
-        path (merging it into any existing label with that ID).
+        currently selected label ID (merging it into any existing label
+        with that ID) — on **all** timepoints via the fast LUT path, or
+        only the clicked timepoint when ``relabel_scope`` is ``"current"``.
         Ctrl+left-click pipettes: it sets the selected label ID from the
         clicked label instead of relabeling.  Ctrl+Z undoes the last
         relabel.
@@ -1826,7 +2108,8 @@ class LabelInspector:
             self._bind_undo_key(self._find_labels_layer(), True)
             self.viewer.status = (
                 "Click-to-relabel ON: Ctrl+click a label to pick up its ID, "
-                "then click labels to relabel them to it on all timepoints "
+                "then click labels to relabel them to it — on all "
+                "timepoints or only the clicked one, per 'Apply to' "
                 "(Ctrl+Z undoes the last relabel)."
             )
         elif not enabled and self._click_relabel_cb is not None:
@@ -1927,13 +2210,16 @@ class LabelInspector:
                 layer.visible = was_visible
         self._track_hidden = []
 
-    def _refresh_track_view(self, mapping: dict = None) -> None:
+    def _refresh_track_view(
+        self, mapping: dict = None, timepoint: int = None
+    ) -> None:
         """Redraw the track-view layer after a label edit.
 
         When the edit is a global {old_id: new_id} *mapping* (delete /
         relabel), the view's caches are updated in place — no I/O, so 3-D
-        stays interactive.  For arbitrary edits (undo, restores) the
-        caches are dropped and rebuilt lazily.
+        stays interactive.  When it is confined to one *timepoint*, only
+        that timepoint's planes are recomputed.  For arbitrary edits
+        (undo, restores) the caches are dropped and rebuilt lazily.
         """
         layer = self._track_view_layer
         if layer is None:
@@ -1942,6 +2228,8 @@ class LabelInspector:
         if isinstance(data, _TrackView):
             if mapping:
                 data.apply_mapping(mapping)
+            elif timepoint is not None:
+                data.refresh_timepoint(timepoint)
             else:
                 data.invalidate()
         with contextlib.suppress(Exception):
@@ -2024,19 +2312,37 @@ def label_inspector(
     @magicgui(
         auto_call=True,
         enabled={
-            "label": "Click a label to delete it from all timepoints",
+            "label": "Click a label to delete it",
             "tooltip": (
                 "While enabled, left-click any label in the viewer to "
-                "remove it from every timepoint instantly. Ctrl+Z undoes "
-                "the last deletion. Click-drag (pan/zoom) and clicks on "
+                "remove it instantly — from every timepoint or only the "
+                "clicked one, per 'Apply to'. Ctrl+Z undoes the last "
+                "deletion. Click-drag (pan/zoom) and clicks on "
                 "background do nothing. Deletions are staged in memory; "
                 "press 'Save Changes and Continue' to write them to the "
                 "file — saved deletions can no longer be undone."
             ),
         },
+        scope={
+            "label": "Apply to",
+            "widget_type": "ComboBox",
+            "choices": ["All timepoints", "Clicked timepoint only"],
+            "tooltip": (
+                "'All timepoints' removes the clicked ID from the whole "
+                "movie (the fast track-wide path). 'Clicked timepoint "
+                "only' removes it just at the timepoint you clicked — in "
+                "the track views the click's plane determines that "
+                "timepoint."
+            ),
+        },
     )
-    def click_to_delete(enabled: bool = False):
-        """While on, left-click a label in the viewer to delete it from all T."""
+    def click_to_delete(
+        enabled: bool = False, scope: str = "All timepoints"
+    ):
+        """While on, left-click a label in the viewer to delete it."""
+        inspector.delete_scope = (
+            "current" if scope.startswith("Clicked") else "all"
+        )
         # NB: index by name — `.enabled` is FunctionGui's own bool property
         # (widget enabled state) and shadows the parameter's CheckBox.
         if enabled and click_to_relabel["enabled"].value:
@@ -2050,7 +2356,8 @@ def label_inspector(
             "tooltip": (
                 "While enabled, Ctrl+left-click a label to pipette its ID, "
                 "then plain left-click other labels to relabel them to that "
-                "ID on every timepoint (merging them into it). The target "
+                "ID (merging them into it) — on every timepoint or only "
+                "the clicked one, per 'Apply to'. The target "
                 "ID is napari's selected label, so you can also pick it "
                 "with napari's pipette (color picker) tool — switch back "
                 "to the pan/zoom tool (camera symbol) before clicking — or "
@@ -2061,9 +2368,26 @@ def label_inspector(
                 "relabels can no longer be undone."
             ),
         },
+        scope={
+            "label": "Apply to",
+            "widget_type": "ComboBox",
+            "choices": ["All timepoints", "Clicked timepoint only"],
+            "tooltip": (
+                "'All timepoints' relabels the clicked ID across the whole "
+                "movie (the fast track-wide path). 'Clicked timepoint "
+                "only' relabels it just at the timepoint you clicked — in "
+                "the track views the click's plane determines that "
+                "timepoint."
+            ),
+        },
     )
-    def click_to_relabel(enabled: bool = False):
-        """While on, left-click a label to give it the pipetted ID on all T."""
+    def click_to_relabel(
+        enabled: bool = False, scope: str = "All timepoints"
+    ):
+        """While on, left-click a label to give it the pipetted ID."""
+        inspector.relabel_scope = (
+            "current" if scope.startswith("Clicked") else "all"
+        )
         if enabled and click_to_delete["enabled"].value:
             click_to_delete["enabled"].value = False
         inspector.enable_click_relabel(enabled)
@@ -2072,7 +2396,7 @@ def label_inspector(
         call_button="Apply",
         threshold={
             "label": "Intensity threshold (0–1)",
-            "widget_type": "FloatSlider",
+            "widget_type": "FloatSpinBox",
             "min": 0.0,
             "max": 1.0,
             "step": 0.01,
@@ -2141,11 +2465,9 @@ def label_inspector(
             }.get(mode, "off")
         )
 
-    viewer.window.add_dock_widget(save_and_continue)
-    viewer.window.add_dock_widget(click_to_delete, name="Delete label (all T)")
-    viewer.window.add_dock_widget(
-        click_to_relabel, name="Relabel label (all T)"
-    )
+    viewer.window.add_dock_widget(save_and_continue, name="Save changes")
+    viewer.window.add_dock_widget(click_to_delete, name="Delete label")
+    viewer.window.add_dock_widget(click_to_relabel, name="Relabel label")
     viewer.window.add_dock_widget(
         delete_low_intensity, name="Delete low-intensity tracks"
     )
