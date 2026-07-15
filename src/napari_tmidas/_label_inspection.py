@@ -532,9 +532,9 @@ class _TrackView:
         self._source = source
         self.dtype = source.dtype
         self.ndim = 3
-        self._n_t = source.shape[0]
+        self.n_t = source.shape[0]
         # A TYX movie has an implicit Z of size 1.
-        self._n_z = source.shape[1] if source.ndim == 4 else 1
+        self.n_z = source.shape[1] if source.ndim == 4 else 1
         # Materialized full view, built lazily by __array__ when napari's
         # 3-D display first asks for it.  While present, ALL reads
         # (including 3-D click pick-rays, which would otherwise re-read
@@ -667,15 +667,15 @@ class _StackedTrackView(_TrackView):
 
     def __init__(self, source):
         super().__init__(source)
-        self.shape = (self._n_t * self._n_z, *source.shape[-2:])
+        self.shape = (self.n_t * self.n_z, *source.shape[-2:])
 
     def _plane(self, i: int) -> np.ndarray:
-        t, z = divmod(int(i), self._n_z)
+        t, z = divmod(int(i), self.n_z)
         t_slice = self._t_slice(t)
         return t_slice[z] if self._source.ndim == 4 else t_slice
 
     def _planes_of_t(self, t: int):
-        return range(t * self._n_z, (t + 1) * self._n_z)
+        return range(t * self.n_z, (t + 1) * self.n_z)
 
     def __setitem__(self, index, value):
         if not isinstance(index, tuple):
@@ -690,7 +690,7 @@ class _StackedTrackView(_TrackView):
         if isinstance(first, (int, np.integer)) and all(
             isinstance(ix, (int, np.integer, slice)) for ix in index[1:]
         ):
-            t, z = divmod(int(first), self._n_z)
+            t, z = divmod(int(first), self.n_z)
             self._source[(t, z, *index[1:])] = value
             return
         # napari paint / fill: tuple of equal-length 1-D coord arrays.
@@ -698,7 +698,7 @@ class _StackedTrackView(_TrackView):
             isinstance(ix, np.ndarray) and ix.ndim == 1 for ix in index
         ):
             pp, yy, xx = (np.asarray(ix, dtype=np.intp) for ix in index)
-            tt, zz = np.divmod(pp, self._n_z)
+            tt, zz = np.divmod(pp, self.n_z)
             vals = None if np.ndim(value) == 0 else np.asarray(value)
             for t in np.unique(tt):
                 m = tt == t
@@ -731,7 +731,7 @@ class _MaxProjTrackView(_TrackView):
 
     def __init__(self, source):
         super().__init__(source)
-        self.shape = (self._n_t, *source.shape[-2:])
+        self.shape = (self.n_t, *source.shape[-2:])
         self._cache: OrderedDict = OrderedDict()
 
     def _plane(self, i: int) -> np.ndarray:
@@ -1567,9 +1567,19 @@ class LabelInspector:
                 dims_displayed_world_to_layer,
             )
 
+            # Layer._world_to_data_ray is private (proxy-blocked for
+            # plugins from napari 0.7), so transform the direction as
+            # the difference of two transformed points instead.
+            view_dir = np.asarray(event.view_direction, dtype=float)
+            r1 = np.asarray(layer.world_to_data(view_dir), dtype=float)
+            r0 = np.asarray(
+                layer.world_to_data(np.zeros_like(view_dir)), dtype=float
+            )
+            data_ray = (r1 - r0) / np.linalg.norm(r1 - r0)
+
             start, end = layer.get_ray_intersections(
                 layer.world_to_data(event.position),
-                layer._world_to_data_ray(event.view_direction),
+                data_ray,
                 dims_displayed_world_to_layer(
                     dims_displayed,
                     ndim_world=len(event.position),
@@ -1625,10 +1635,10 @@ class LabelInspector:
         if plane is None:
             return None
         if isinstance(data, _StackedTrackView):
-            t = plane // data._n_z
+            t = plane // data.n_z
         else:  # max-projection view (plane == t) or the regular layer
             t = plane
-        n_t = data._n_t if isinstance(data, _TrackView) else data.shape[0]
+        n_t = data.n_t if isinstance(data, _TrackView) else data.shape[0]
         return min(max(t, 0), n_t - 1)
 
     def _iter_label_raw_slices(self, labels_data, raw):
