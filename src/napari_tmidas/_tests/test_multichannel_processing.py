@@ -75,6 +75,43 @@ class TestChannelDetection:
         assert num_channels == 2
         assert channel_axis == 2
 
+    def test_detect_tiff_tzyx_is_single_channel(self, tmp_path):
+        """A TZYX TIFF has no channel axis: the T axis must not be read as
+        channels even though its length falls in the heuristic's 2-16 range."""
+        image = np.random.randint(
+            0, 255, size=(11, 12, 32, 32), dtype=np.uint16
+        )
+        path = tmp_path / "tzyx.tif"
+        tifffile.imwrite(path, image, imagej=True, metadata={"axes": "TZYX"})
+
+        num_channels, channel_axis = detect_channels_for_file(str(path), image)
+        assert num_channels == 1
+        assert channel_axis is None
+
+    def test_resolve_cellpose_dim_order_tzyx_all_channels(self, tmp_path):
+        """'all' on a genuine single-channel TZYX must resolve, not raise."""
+        image = np.random.randint(
+            0, 255, size=(11, 12, 32, 32), dtype=np.uint16
+        )
+        path = tmp_path / "tzyx_all.tif"
+        tifffile.imwrite(path, image, imagej=True, metadata={"axes": "TZYX"})
+
+        assert (
+            resolve_cellpose_dim_order(
+                str(path), image, channel_param="all",
+                dimension_order_hint="Auto",
+            )
+            == "TZYX"
+        )
+        # Explicit hint is honored end-to-end.
+        assert (
+            resolve_cellpose_dim_order(
+                str(path), image, channel_param="all",
+                dimension_order_hint="ZYX",
+            )
+            == "ZYX"
+        )
+
     def test_resolve_cellpose_dim_order_tiff_tzcyx(self, tmp_path):
         """Cellpose dim_order should strip C from TIFF axes metadata."""
         image = np.random.randint(

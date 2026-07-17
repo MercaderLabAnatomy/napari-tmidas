@@ -490,16 +490,15 @@ def detect_channels_from_zarr_path(zarr_path: str) -> Tuple[int, Optional[int]]:
                 break
 
         if channel_axis is None:
+            # OME-NGFF requires every axis to be named, so axes metadata
+            # without a channel axis is authoritative: treat as single
+            # channel instead of letting the shape heuristic mistake a
+            # time or Z axis for channels.
             _channel_detection_log(
-                "Channel detection: No channel axis found in OME axes metadata",
+                "Channel detection: No channel axis in OME axes metadata; "
+                "treating as single channel",
                 verbose_only=True,
             )
-            # Try shape heuristics on the first dataset array
-            datasets = ms.get("datasets", [])
-            if datasets and root is not None:
-                path = datasets[0].get("path")
-                arr = root[path]
-                return _detect_channels_from_shape(arr.shape)
             return (1, None)
 
         # Get num_channels from the array at the first resolution level
@@ -660,7 +659,14 @@ def detect_channels_from_tiff_path(
                 verbose_only=True,
             )
             if axes and len(axes) == len(shape):
-                channel_axis = axes.find("C")
+                # Explicit, length-matched axes metadata is authoritative:
+                # find a channel ('C') or sample ('S', e.g. RGB) axis.
+                channel_axis = -1
+                for code in ("C", "S"):
+                    pos = axes.find(code)
+                    if pos >= 0:
+                        channel_axis = pos
+                        break
                 if channel_axis >= 0:
                     num_channels = shape[channel_axis]
                     _channel_detection_log(
@@ -669,6 +675,16 @@ def detect_channels_from_tiff_path(
                         verbose_only=True,
                     )
                     return (num_channels, channel_axis)
+
+                # Metadata explicitly lists axes but none is a channel axis
+                # (e.g. TZYX): trust it as single-channel rather than letting
+                # the shape heuristic mistake T or Z for channels.
+                _channel_detection_log(
+                    "Channel detection: TIFF metadata has no channel axis "
+                    f"(axes={axes}); treating as single channel",
+                    verbose_only=True,
+                )
+                return (1, None)
 
             if shape:
                 return _detect_channels_from_shape(shape)
@@ -709,11 +725,22 @@ def detect_channels_for_file(
         num_channels, channel_axis = detect_channels_from_zarr_path(filepath)
         if num_channels > 1:
             return (num_channels, channel_axis)
+        # Authoritative OME axes without a channel axis => single channel.
+        # Trust it instead of falling through to the shape heuristic, which
+        # would mistake a time or Z axis for channels.
+        zarr_axes = detect_axes_from_zarr_path(filepath)
+        if zarr_axes and "C" not in zarr_axes.upper():
+            return (1, None)
 
     if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
         num_channels, channel_axis = detect_channels_from_tiff_path(filepath)
         if num_channels > 1:
             return (num_channels, channel_axis)
+        # Same reasoning for TIFF: length-matched axes metadata with no
+        # channel/sample axis is authoritative single-channel.
+        tiff_axes = detect_axes_from_tiff_path(filepath)
+        if tiff_axes and not ({"C", "S"} & set(tiff_axes.upper())):
+            return (1, None)
 
     if image_data is None:
         image_data = load_image_file(filepath)
@@ -2577,6 +2604,11 @@ class ProcessingWorker(QThread):
                     channel_param,
                     dim_order_hint,
                 )
+                # The resolved dim_order is already channel-free and correct;
+                # drop the raw hint so the generic dimension_order->dim_order
+                # remapping below cannot overwrite it (e.g. re-inserting a C
+                # axis that Cellpose does not expect).
+                processing_params.pop("dimension_order", None)
 
             # Filter parameters based on function signature
             # Check if function accepts **kwargs or has specific parameters
