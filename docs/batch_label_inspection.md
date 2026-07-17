@@ -203,7 +203,8 @@ Three modes:
 - **Off** *(default)* — the normal side-by-side layers.
 - **Stack T along Z** — concatenates the timepoints into one lazy `(T*Z, Y, X)`
   volume (plane `i` = timepoint `i//Z`, slice `i%Z`). **Fully editable**:
-  paint and fill map back to the correct `(t, z)`, so all normal editing works.
+  paint and fill map back to the correct `(t, z)`, so all normal editing works
+  (unless the view had to be downsampled to fit GPU memory — see below).
 - **Max-project Z per T** — shows one Z-projected plane per timepoint, a
   `(T, Y, X)` volume in which tracks read as clean tubes. **Painting is
   disabled** here (a projected pixel has no unique Z origin), and where labels
@@ -213,7 +214,16 @@ Three modes:
 
 - Both views read through the same lazy (dask) wrapper as the normal view —
   no data is copied while scrubbing in 2D. napari's 3D display loads the whole
-  volume into RAM.
+  volume into RAM **and uploads it to the GPU as one 3-D texture**.
+- Movies whose full view volume would exceed the GPU budget (4 GiB by
+  default, override with the `NAPARI_TMIDAS_TRACK_VIEW_GB` environment
+  variable) are **automatically YX-downsampled** by the smallest integer
+  step that fits — e.g. a `33×75×2720×2720` uint32 movie (a ~68 GiB stacked
+  volume) is shown at step 5, ~2.8 GiB. Label IDs, the click tools, Ctrl+Z
+  and saving are unaffected (the layer scale compensates, and the file stays
+  full resolution); only painting is disabled in a downsampled view, since a
+  strided pixel cannot be written back losslessly. The status bar reports
+  when a view is downsampled.
 - Click-to-delete / click-to-relabel, **Ctrl+Z** undo, and **Save Changes and
   Continue** all work exactly as in the normal view; label files stay TZYX.
 - Delete/relabel edits remap the cached 3-D volume in place, so 3-D picking and

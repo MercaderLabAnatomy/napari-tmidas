@@ -522,9 +522,17 @@ class _TrackView:
     pending remaps and paint edits.  Label IDs are unchanged, so the
     ID-based tools (click-to-delete / click-to-relabel, Ctrl+Z undo, save)
     work identically through the view.
+
+    ``yx_step`` > 1 subsamples every plane ``[::step, ::step]`` so the
+    materialized 3-D volume fits in GPU memory for large movies (napari
+    uploads it as a single 3-D texture; see :func:`_pick_track_view_step`).
+    Nearest-neighbor striding keeps label IDs intact, and the layer scale
+    compensates, so world-coordinate clicking still resolves the right
+    ID — only painting is disabled (a strided pixel cannot be written
+    back losslessly).  The underlying data stays full resolution.
     """
 
-    def __init__(self, source):
+    def __init__(self, source, yx_step: int = 1):
         if getattr(source, "ndim", 0) not in (3, 4):
             raise ValueError(
                 "Track view needs a 3-D (TYX) or 4-D (TZYX) label source."
@@ -533,6 +541,11 @@ class _TrackView:
         self.dtype = source.dtype
         self.ndim = 3
         self.n_t = source.shape[0]
+        self.yx_step = max(1, int(yx_step))
+        # ceil(size / step) per YX axis — what `plane[::step]` yields.
+        self._yx_shape = tuple(
+            -(-int(s) // self.yx_step) for s in source.shape[-2:]
+        )
         # A TYX movie has an implicit Z of size 1.
         self.n_z = source.shape[1] if source.ndim == 4 else 1
         # Materialized full view, built lazily by __array__ when napari's
@@ -554,6 +567,12 @@ class _TrackView:
 
     def _plane(self, i: int) -> np.ndarray:
         raise NotImplementedError
+
+    def _stride(self, plane: np.ndarray) -> np.ndarray:
+        """Apply the YX subsampling step to a full-resolution plane."""
+        if self.yx_step == 1:
+            return plane
+        return plane[:: self.yx_step, :: self.yx_step]
 
     def invalidate(self) -> None:
         """Drop all derived caches after an arbitrary source edit."""
@@ -665,19 +684,28 @@ class _StackedTrackView(_TrackView):
     saved) like any other edit.
     """
 
-    def __init__(self, source):
-        super().__init__(source)
-        self.shape = (self.n_t * self.n_z, *source.shape[-2:])
+    def __init__(self, source, yx_step: int = 1):
+        super().__init__(source, yx_step)
+        self.shape = (self.n_t * self.n_z, *self._yx_shape)
 
     def _plane(self, i: int) -> np.ndarray:
         t, z = divmod(int(i), self.n_z)
         t_slice = self._t_slice(t)
-        return t_slice[z] if self._source.ndim == 4 else t_slice
+        return self._stride(
+            t_slice[z] if self._source.ndim == 4 else t_slice
+        )
 
     def _planes_of_t(self, t: int):
         return range(t * self.n_z, (t + 1) * self.n_z)
 
     def __setitem__(self, index, value):
+        if self.yx_step != 1:
+            raise TypeError(
+                "This track view is YX-subsampled to fit in GPU memory "
+                "and therefore read-only: a strided pixel cannot be "
+                "written back losslessly. Use the ID-based click tools, "
+                "or paint in the normal view (Track view 'Off')."
+            )
         if not isinstance(index, tuple):
             index = (index,)
         # Keep the materialized 3-D volume in sync with paint edits.
@@ -729,9 +757,9 @@ class _MaxProjTrackView(_TrackView):
 
     _CACHE_MAX_PLANES = 32
 
-    def __init__(self, source):
-        super().__init__(source)
-        self.shape = (self.n_t, *source.shape[-2:])
+    def __init__(self, source, yx_step: int = 1):
+        super().__init__(source, yx_step)
+        self.shape = (self.n_t, *self._yx_shape)
         self._cache: OrderedDict = OrderedDict()
 
     def _plane(self, i: int) -> np.ndarray:
@@ -741,6 +769,8 @@ class _MaxProjTrackView(_TrackView):
             return self._cache[i]
         t_slice = self._t_slice(i)
         plane = t_slice.max(axis=0) if self._source.ndim == 4 else t_slice
+        # Copy so the cache doesn't pin the full-resolution plane alive.
+        plane = np.ascontiguousarray(self._stride(plane))
         while len(self._cache) >= self._CACHE_MAX_PLANES:
             self._cache.popitem(last=False)
         self._cache[i] = plane
@@ -780,6 +810,39 @@ class _MaxProjTrackView(_TrackView):
             "click-to-delete / click-to-relabel (they work on label IDs), "
             "or switch the track view to 'Stack T along Z' to paint."
         )
+
+
+# Budget for the materialized track-view volume.  napari's 3-D display
+# uploads the whole (planes, Y, X) volume as ONE 3-D GPU texture; past
+# GPU memory the upload fails mid-frame and vispy's command queue is
+# left corrupted (every later frame dies with "Cannot SIZE object ...
+# does not exist").  4 GiB fits comfortably on common 8 GB GPUs;
+# override with the NAPARI_TMIDAS_TRACK_VIEW_GB env var.
+_TRACK_VIEW_BUDGET_BYTES = int(
+    float(os.environ.get("NAPARI_TMIDAS_TRACK_VIEW_GB", 4)) * 1024**3
+)
+
+
+def _pick_track_view_step(n_planes, n_y, n_x, itemsize, budget=None):
+    """Smallest YX subsampling step that fits the track-view volume in
+    *budget* bytes (the plane count is never reduced — T continuity is
+    the whole point of the view)."""
+    budget = _TRACK_VIEW_BUDGET_BYTES if budget is None else int(budget)
+    full = int(n_planes) * int(n_y) * int(n_x) * int(itemsize)
+    if full <= budget or budget <= 0:
+        return 1
+    # The step shrinks two axes, so start at ceil(sqrt(excess)); ceil
+    # rounding in the strided shape can leave it one step short.
+    step = max(1, int(np.ceil(np.sqrt(full / budget))))
+    while (
+        int(n_planes)
+        * -(-int(n_y) // step)
+        * -(-int(n_x) // step)
+        * int(itemsize)
+        > budget
+    ):
+        step += 1
+    return step
 
 
 def _load_label(path: str):
@@ -2483,6 +2546,10 @@ class LabelInspector:
         scrubbing and share the underlying label data, so the ID-based
         click tools, Ctrl+Z undo and saving keep working unchanged.  The
         mode persists across pairs, like the click modes.
+
+        Movies whose full view volume would not fit in GPU memory (napari's
+        3-D display uploads it as one 3-D texture) are automatically YX
+        subsampled — see :func:`_pick_track_view_step`.
         """
         mode = str(mode).strip().lower()
         if mode not in ("off", "stack", "max"):
@@ -2504,23 +2571,37 @@ class LabelInspector:
                 "labels layer."
             )
             return
+        n_z = data.shape[1] if data.ndim == 4 else 1
+        n_planes = (
+            data.shape[0] * n_z
+            if self.track_view_mode == "stack"
+            else data.shape[0]
+        )
+        step = _pick_track_view_step(
+            n_planes,
+            data.shape[-2],
+            data.shape[-1],
+            np.dtype(data.dtype).itemsize,
+        )
         if self.track_view_mode == "stack":
-            view = _StackedTrackView(data)
+            view = _StackedTrackView(data, yx_step=step)
             desc = "T stacked along Z"
         else:
-            view = _MaxProjTrackView(data)
+            view = _MaxProjTrackView(data, yx_step=step)
             desc = "Z max-projected per T"
         # Reuse the labels layer's spatial scale so the view keeps the
-        # right YX aspect; the stacked axis reuses the Z spacing.
+        # right YX aspect; the stacked axis reuses the Z spacing.  A
+        # subsampled view stretches its YX scale by the step, so world
+        # coordinates (and the click tools) are unaffected.
         try:
             lscale = [float(s) for s in labels_layer.scale]
         except Exception:
             lscale = [1.0] * data.ndim
         if data.ndim == 4:
             axis0 = lscale[1] if self.track_view_mode == "stack" else 1.0
-            view_scale = [axis0, lscale[2], lscale[3]]
+            view_scale = [axis0, lscale[2] * step, lscale[3] * step]
         else:
-            view_scale = [1.0, lscale[1], lscale[2]]
+            view_scale = [1.0, lscale[1] * step, lscale[2] * step]
         # Hide the regular layers while the track view is active — mixing
         # a (T*Z)YX volume with TZYX layers in one dims model is confusing.
         for layer in list(self.viewer.layers):
@@ -2532,7 +2613,7 @@ class LabelInspector:
         self._track_view_layer = self.viewer.add_labels(
             view, scale=view_scale, name=f"Track view ({desc})"
         )
-        if self.track_view_mode == "max":
+        if self.track_view_mode == "max" or step > 1:
             # Best effort — napari may re-enable this on display changes;
             # the view's read-only __setitem__ is the hard backstop.
             with contextlib.suppress(Exception):
@@ -2542,10 +2623,22 @@ class LabelInspector:
             or self._click_relabel_cb is not None
         ):
             self._bind_undo_key(self._find_labels_layer(), True)
+        downsample_note = (
+            (
+                f" YX subsampled x{step} so 3D fits in GPU memory "
+                f"(full volume would be "
+                f"{n_planes * data.shape[-2] * data.shape[-1] * np.dtype(data.dtype).itemsize / 1024**3:.1f}"
+                " GiB); click tools work as usual, painting is off, the "
+                "file stays full resolution."
+            )
+            if step > 1
+            else ""
+        )
         self.viewer.status = (
-            f"Track view ON ({desc}, {view.shape[0]} planes). Toggle "
-            "napari's 3D display to see whole tracks; click modes and "
-            "Ctrl+Z work as usual. Set 'Off' to restore the normal view."
+            f"Track view ON ({desc}, {view.shape[0]} planes)."
+            f"{downsample_note} Toggle napari's 3D display to see whole "
+            "tracks; click modes and Ctrl+Z work as usual. Set 'Off' to "
+            "restore the normal view."
         )
 
     def _remove_track_view(self) -> None:
@@ -2838,7 +2931,10 @@ def label_inspector(
                 "is disabled (a projected pixel has no unique Z origin) "
                 "and where labels overlap in Z the higher ID wins. Both "
                 "views load lazily while scrubbing in 2D; napari's 3D "
-                "display loads the whole volume into RAM. Edits, Ctrl+Z "
+                "display loads the whole volume into RAM and GPU memory, "
+                "so very large movies are automatically shown YX-"
+                "downsampled (label IDs, click tools and the saved file "
+                "are unaffected; painting is disabled then). Edits, Ctrl+Z "
                 "and 'Save Changes and Continue' work exactly as in the "
                 "normal view. 'Off' restores the normal layers."
             ),

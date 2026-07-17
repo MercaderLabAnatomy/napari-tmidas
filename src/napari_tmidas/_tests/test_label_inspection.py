@@ -1194,6 +1194,117 @@ class TestTrackInspection:
             assert viewer.layers == [main]
             assert main.visible is True
 
+    def test_pick_track_view_step(self):
+        """The YX step is the smallest that fits the volume in budget."""
+        from napari_tmidas._label_inspection import _pick_track_view_step
+
+        gib = 1024**3
+        # Fits exactly: no subsampling.
+        assert _pick_track_view_step(10, 64, 64, 4, budget=10 * 64 * 64 * 4) == 1
+        # The reported crash: 33 T x 75 Z planes of 2720x2720 uint32
+        # is ~68 GiB — napari uploads it as ONE 3-D texture and the GPU
+        # allocation failure corrupts vispy's command queue.
+        step = _pick_track_view_step(33 * 75, 2720, 2720, 4, budget=4 * gib)
+        assert step > 1
+        assert (
+            33 * 75 * (-(-2720 // step)) ** 2 * 4 <= 4 * gib
+        ), "chosen step must actually fit the budget"
+        assert (
+            33 * 75 * (-(-2720 // (step - 1))) ** 2 * 4 > 4 * gib
+        ), "step must be the smallest that fits"
+
+    def test_subsampled_views_geometry_reads_and_readonly(self):
+        """A yx_step > 1 view strides every plane, keeps IDs and the
+        edit plumbing intact, and rejects paint (not losslessly
+        writable back)."""
+        import pytest
+
+        from napari_tmidas._label_inspection import (
+            _MaxProjTrackView,
+            _StackedTrackView,
+        )
+
+        base = np.arange(2 * 2 * 5 * 5, dtype=np.uint32).reshape(2, 2, 5, 5)
+        wrapper = self._wrapper(base)
+        view = _StackedTrackView(wrapper, yx_step=2)
+
+        assert view.shape == (4, 3, 3)  # ceil(5/2) per YX axis
+        for i in range(4):
+            np.testing.assert_array_equal(
+                view[i], base[i // 2, i % 2, ::2, ::2]
+            )
+        np.testing.assert_array_equal(
+            np.asarray(view), base.reshape(4, 5, 5)[:, ::2, ::2]
+        )
+        # Pick-ray fancy reads are in view coordinates.
+        vals = view[np.array([0, 3]), np.array([1, 2]), np.array([0, 1])]
+        np.testing.assert_array_equal(
+            vals, [base[0, 0, 2, 0], base[1, 1, 4, 2]]
+        )
+        with pytest.raises(TypeError):
+            view[0, 0, 0] = 9
+        # Remaps still update the materialized volume in place.
+        first = int(base[0, 0, 0, 0])
+        wrapper.remap_values({first: 42})
+        view.apply_mapping({first: 42})
+        assert np.asarray(view)[0, 0, 0] == 42
+
+        proj = _MaxProjTrackView(wrapper, yx_step=2)
+        assert proj.shape == (2, 3, 3)
+        np.testing.assert_array_equal(
+            np.asarray(proj)[1], base[1].max(axis=0)[::2, ::2]
+        )
+
+    def test_apply_track_view_subsamples_when_over_budget(self):
+        """Oversized movies get an automatically subsampled view whose
+        layer scale compensates, so world-coordinate clicks still hit."""
+        from napari_tmidas._label_inspection import LabelInspector
+
+        class _FakeLabels:
+            def __init__(self, data, name="", scale=None):
+                self.data = data
+                self.name = name
+                self.scale = scale or [1.0] * getattr(data, "ndim", 1)
+                self.visible = True
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+        class _FakeViewer:
+            def __init__(self):
+                self.layers = []
+                self.status = ""
+                self.mouse_drag_callbacks = []
+
+            def add_labels(self, data, scale=None, name=""):
+                layer = _FakeLabels(data, name=name, scale=scale)
+                self.layers.append(layer)
+                return layer
+
+        base = np.zeros((2, 3, 8, 8), dtype=np.uint32)
+        wrapper = self._wrapper(base)
+        viewer = _FakeViewer()
+        main = _FakeLabels(wrapper, scale=[1.0, 2.0, 1.5, 1.5])
+        viewer.layers.append(main)
+        inspector = LabelInspector(viewer)
+
+        # Full stacked volume is 2*3*8*8*4 = 1536 B; a 400 B budget
+        # needs step 2 (6*4*4*4 = 384 B).
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels), \
+             patch(
+                 "napari_tmidas._label_inspection._TRACK_VIEW_BUDGET_BYTES",
+                 400,
+             ):
+            inspector.set_track_view_mode("stack")
+            view_layer = inspector._track_view_layer
+            assert view_layer.data.yx_step == 2
+            assert view_layer.data.shape == (6, 4, 4)
+            # YX scale stretched by the step; stacked axis keeps Z spacing.
+            assert view_layer.scale == [2.0, 3.0, 3.0]
+            assert "subsampled x2" in viewer.status
+            inspector.set_track_view_mode("off")
+
 
 class TestLabelInspectorWidget:
     def test_widget_creation(self):
