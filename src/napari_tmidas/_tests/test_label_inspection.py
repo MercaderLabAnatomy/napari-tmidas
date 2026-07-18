@@ -425,8 +425,83 @@ class TestLabelInspector:
         inspector.enable_click_relabel(False)
         assert len(self.viewer.mouse_drag_callbacks) == 0
 
+    def test_merge_neighbors_at_timepoint(self):
+        """Every label touching the clicked one merges into it, at that T only."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+
+            def refresh(self):
+                pass
+
+        # Center label 1, four face-neighbors (2,3,4,5) touching it, plus a
+        # detached label 6 that must be left alone. Timepoint 1 is empty, so
+        # a merge at t=0 must not touch it.
+        base = np.zeros((2, 5, 5), dtype=np.uint32)
+        base[0, 2, 2] = 1
+        base[0, 1, 2] = 2
+        base[0, 3, 2] = 3
+        base[0, 2, 1] = 4
+        base[0, 2, 3] = 5
+        base[0, 0, 0] = 6  # not touching label 1
+        wrapper = _DaskFancyIndexWrapper(da.from_array(base, chunks=(1, 5, 5)))
+        layer = _FakeLabels(wrapper)
+
+        self.viewer.layers = [layer]
+        self.viewer.mouse_drag_callbacks = []
+
+        inspector = LabelInspector(self.viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.merge_neighbors_at_timepoint(1, 0)
+
+            result = np.asarray(layer.data)
+            # Neighbors 2-5 became 1; the detached 6 survives.
+            for merged in (2, 3, 4, 5):
+                assert not np.any(result[0] == merged)
+            assert result[0, 1, 2] == 1
+            assert result[0, 3, 2] == 1
+            assert result[0, 2, 1] == 1
+            assert result[0, 2, 3] == 1
+            assert result[0, 0, 0] == 6
+            # t=1 untouched.
+            assert not np.any(result[1] != 0)
+
+            # Ctrl+Z reverts the merge exactly.
+            inspector._on_undo_key()
+            restored = np.asarray(layer.data)
+            assert restored[0, 1, 2] == 2
+            assert restored[0, 3, 2] == 3
+            assert restored[0, 2, 1] == 4
+            assert restored[0, 2, 3] == 5
+
+    def test_merge_neighbors_no_touching(self):
+        """A label with no neighbors leaves the data unchanged."""
+        base = np.zeros((1, 5, 5), dtype=np.uint32)
+        base[0, 2, 2] = 1
+        base[0, 0, 0] = 6
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+
+            def refresh(self):
+                pass
+
+        layer = _FakeLabels(base)
+        self.viewer.layers = [layer]
+        self.viewer.mouse_drag_callbacks = []
+
+        inspector = LabelInspector(self.viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.merge_neighbors_at_timepoint(1, 0)
+        assert np.array_equal(np.asarray(layer.data), base)
+
     def test_click_modes_mutually_exclusive(self):
-        """Enabling one click mode disables the other."""
+        """Enabling one click mode disables the others."""
         self.viewer.layers = []
         self.viewer.mouse_drag_callbacks = []
 
@@ -442,7 +517,12 @@ class TestLabelInspector:
         assert inspector._click_delete_cb is not None
         assert len(self.viewer.mouse_drag_callbacks) == 1
 
-        inspector.enable_click_delete(False)
+        inspector.enable_click_merge(True)
+        assert inspector._click_delete_cb is None
+        assert inspector._click_merge_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_merge(False)
         assert len(self.viewer.mouse_drag_callbacks) == 0
 
     def test_undo_remap(self):

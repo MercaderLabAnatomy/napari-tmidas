@@ -96,6 +96,7 @@ For each pair displayed:
 - **Click-to-delete**: Left-click a label to remove it from every timepoint
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
 - **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
+- **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint
 
 **Track-level tools** (napari-tmidas, for tracked time series):
 - **Whole-track 3D views** (see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
@@ -186,8 +187,33 @@ Notes:
 - Works in the **normal frame view only** (2D or 3D display) — turn *Track
   view* off first, since the projected track views cannot resolve a precise
   source voxel to seed from.
-- Mutually exclusive with Click-to-Delete and Click-to-Relabel; the mode
-  persists as you move through image-label pairs.
+- Mutually exclusive with the other click modes; the mode persists as you
+  move through image-label pairs.
+
+### Merging Touching Neighbors
+
+Docked as **Merge touching neighbors**, this tool is the fix for
+*over*-segmentation — one cell broken into several touching IDs — and the
+counterpart to [Splitting Merged Labels](#splitting-merged-labels). Like the
+split tool it edits **only the clicked timepoint**.
+
+Enable *"Click a label to merge its touching neighbors into it"*, then
+**left-click** any fragment of the cell. Every label that shares a border with
+the clicked one — a shared face, edge or corner all count as touching — is
+relabeled to the clicked ID at that timepoint.
+
+Notes:
+
+- Only **direct** neighbors merge, not a neighbor's neighbors. Re-click the
+  now-larger label to grow the region another ring outward, so you stay in
+  control of how far a merge reaches.
+- **Ctrl+Z** reverts the whole merge in one step.
+- Merges are staged in memory; press **Save and Continue** to write them —
+  saved merges can no longer be undone.
+- Works in the **normal frame view only** — turn *Track view* off first, since
+  touching is a per-slice spatial notion the projected views do not preserve.
+- Mutually exclusive with the other click modes; the mode persists as you
+  move through image-label pairs.
 
 ### Whole-Track 3D Inspection
 
@@ -364,6 +390,11 @@ When segmentation over-splits cells:
 3. Click the split-off fragments to merge them into it (all timepoints at once)
 4. Or paint manually with the same label for partial merges
 5. Save changes
+
+For a single over-segmented cell whose fragments differ frame to frame, enable
+**Click-to-merge-neighbors** instead and click one fragment: every label
+touching it fuses into the clicked ID at that timepoint, no pipetting needed
+(re-click to reach further out).
 
 ### Splitting Merged Objects
 

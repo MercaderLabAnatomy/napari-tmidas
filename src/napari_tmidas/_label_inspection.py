@@ -1021,6 +1021,7 @@ class LabelInspector:
         self.delete_scope = "all"
         self.relabel_scope = "all"
         self._click_split_cb = None  # click-to-split mouse callback
+        self._click_merge_cb = None  # click-to-merge-neighbors mouse callback
         # Seeds accumulated for a pending split, or None:
         # {"label_id": int, "t": int, "coords": [tuple, ...]}.  Plain-click
         # commits once two or more seeds exist; Ctrl+click adds more first.
@@ -1331,6 +1332,7 @@ class LabelInspector:
             self._click_delete_cb is not None
             or self._click_relabel_cb is not None
             or self._click_split_cb is not None
+            or self._click_merge_cb is not None
         ):
             self._bind_undo_key(new_labels_layer, True)
 
@@ -2169,6 +2171,7 @@ class LabelInspector:
         if enabled and self._click_delete_cb is None:
             self.enable_click_relabel(False)
             self.enable_click_split(False)
+            self.enable_click_merge(False)
             self._click_delete_cb = self._make_click_callback(
                 self._on_click_delete
             )
@@ -2186,6 +2189,7 @@ class LabelInspector:
             if (
                 self._click_relabel_cb is None
                 and self._click_split_cb is None
+                and self._click_merge_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-delete OFF."
@@ -2204,6 +2208,7 @@ class LabelInspector:
         if enabled and self._click_relabel_cb is None:
             self.enable_click_delete(False)
             self.enable_click_split(False)
+            self.enable_click_merge(False)
             self._click_relabel_cb = self._make_click_callback(
                 self._on_click_relabel
             )
@@ -2224,6 +2229,7 @@ class LabelInspector:
             if (
                 self._click_delete_cb is None
                 and self._click_split_cb is None
+                and self._click_merge_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-relabel OFF."
@@ -2510,6 +2516,7 @@ class LabelInspector:
         if enabled and self._click_split_cb is None:
             self.enable_click_delete(False)
             self.enable_click_relabel(False)
+            self.enable_click_merge(False)
             self._split_seeds = None
             self._click_split_cb = self._make_click_callback(
                 self._on_click_split
@@ -2530,9 +2537,168 @@ class LabelInspector:
             if (
                 self._click_delete_cb is None
                 and self._click_relabel_cb is None
+                and self._click_merge_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-split OFF."
+
+    # ------------------------------------------------------------------
+    # Click-to-merge-neighbors (fuse an over-segmented cell's fragments)
+    # ------------------------------------------------------------------
+    def merge_neighbors_at_timepoint(self, label_id, t) -> None:
+        """Merge every label touching *label_id* at timepoint *t* into it.
+
+        For over-segmented cells split across several IDs: click one
+        fragment and all labels sharing a border with it — at the clicked
+        timepoint only — are relabeled to the clicked ID.  Adjacency is
+        full connectivity (a shared face, edge or corner counts), computed
+        on the label's spatial slice at *t*.  Only direct neighbors merge,
+        not a neighbor's neighbors, so re-clicking the (now larger) label
+        grows the region another ring outward.  The edit is a
+        single-timepoint pixel write, recorded like a paint stroke so it
+        saves normally and Ctrl+Z reverts the merge.
+        """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        label_id = int(label_id)
+        if label_id == 0:
+            self.viewer.status = (
+                "Select a non-background label to merge into."
+            )
+            return
+
+        data = labels_layer.data
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            data = _DaskFancyIndexWrapper(data)
+            labels_layer.data = data
+
+        t = int(t)
+        if isinstance(data, _DaskFancyIndexWrapper):
+            sub = data._get_outer_slice(0, t)
+        elif getattr(data, "ndim", 0) < 3:
+            sub = np.asarray(data)  # no time axis — whole array is the slice
+        else:
+            sub = np.asarray(data[t])
+
+        mask = sub == label_id
+        if not mask.any():
+            self.viewer.status = (
+                f"Label {label_id} not present at timepoint {t}."
+            )
+            return
+
+        from scipy import ndimage as ndi
+
+        # Full connectivity: a shared face, edge or corner all count as
+        # touching. The one-pixel dilation band around the label collects
+        # every neighboring ID in a single vectorized read.
+        structure = ndi.generate_binary_structure(mask.ndim, mask.ndim)
+        border = ndi.binary_dilation(mask, structure=structure) & ~mask
+        neighbors = [
+            int(n)
+            for n in np.unique(sub[border])
+            if int(n) != 0 and int(n) != label_id
+        ]
+        if not neighbors:
+            self.viewer.status = (
+                f"Label {label_id} has no touching neighbors at "
+                f"timepoint {t}."
+            )
+            return
+
+        mapping = {n: label_id for n in neighbors}
+        restores = self._remap_one_timepoint(labels_layer, mapping, t)
+        self._invalidate_track_stats()
+        ids_str = ", ".join(str(n) for n in neighbors)
+        if restores == "all":
+            self.viewer.status = (
+                f"Merged neighbor(s) {ids_str} into label {label_id} "
+                "(no time axis — whole image). Save to write changes to disk."
+            )
+            return
+        self._single_t_last = {
+            "t": int(t),
+            "restores": restores,
+            "desc": (
+                f"{len(neighbors)} neighbor(s) ({ids_str}) split back out "
+                f"of {label_id} (merge undone)"
+            ),
+        }
+        self.viewer.status = (
+            f"Merged {len(neighbors)} neighbor(s) ({ids_str}) into label "
+            f"{label_id} at timepoint {t}. Ctrl+Z reverts; 'Save Changes "
+            "and Continue' writes it to disk."
+        )
+
+    def _on_click_merge(self, layer, label_id, event):
+        """Merge every label touching the clicked one, at the clicked
+        timepoint. Track view must be off (touching is a per-slice notion)."""
+        if self._track_view_layer is not None:
+            self.viewer.status = (
+                "Merge neighbors works only in the normal frame view — set "
+                "Track view to 'Off' first."
+            )
+            return
+        if not label_id:  # None (off-canvas) or 0 (background)
+            self.viewer.status = (
+                "Merge neighbors: background clicked, nothing merged."
+            )
+            return
+        data = getattr(layer, "data", None)
+        if getattr(data, "ndim", 0) < 3:
+            t = 0  # no time axis — merge acts on the whole array
+        else:
+            t = self._clicked_timepoint(layer, label_id, event)
+            if t is None:
+                self.viewer.status = (
+                    "Merge neighbors: could not resolve the clicked "
+                    "timepoint."
+                )
+                return
+        self.merge_neighbors_at_timepoint(label_id, t)
+
+    def enable_click_merge(self, enabled: bool) -> None:
+        """Toggle click-to-merge-neighbors mode (mutually exclusive with
+        delete / relabel / split).
+
+        While enabled, a plain left-click on a label merges every label
+        touching it — at the clicked timepoint only — into the clicked ID,
+        fusing an over-segmented cell's fragments in one click.  Ctrl+Z
+        reverts the last merge.  Track view must be off (touching is a
+        per-slice spatial notion the projected views don't preserve).
+        """
+        if enabled and self._click_merge_cb is None:
+            self.enable_click_delete(False)
+            self.enable_click_relabel(False)
+            self.enable_click_split(False)
+            self._click_merge_cb = self._make_click_callback(
+                self._on_click_merge
+            )
+            self.viewer.mouse_drag_callbacks.append(self._click_merge_cb)
+            self._bind_undo_key(self._find_labels_layer(), True)
+            self.viewer.status = (
+                "Click-to-merge-neighbors ON: click a label to merge every "
+                "label touching it (at the clicked timepoint) into it. "
+                "Re-click to grow another ring outward; Ctrl+Z reverts. "
+                "Turn Track view off to use it."
+            )
+        elif not enabled and self._click_merge_cb is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.mouse_drag_callbacks.remove(self._click_merge_cb)
+            self._click_merge_cb = None
+            if (
+                self._click_delete_cb is None
+                and self._click_relabel_cb is None
+                and self._click_split_cb is None
+            ):
+                self._bind_undo_key(self._find_labels_layer(), False)
+            self.viewer.status = "Click-to-merge-neighbors OFF."
 
     def set_track_view_mode(self, mode: str) -> None:
         """Switch the track-inspection view: ``"off"``, ``"stack"`` or ``"max"``.
@@ -2791,6 +2957,8 @@ def label_inspector(
             click_to_relabel["enabled"].value = False
         if enabled and click_to_split["enabled"].value:
             click_to_split["enabled"].value = False
+        if enabled and click_to_merge["enabled"].value:
+            click_to_merge["enabled"].value = False
         inspector.enable_click_delete(enabled)
 
     @magicgui(
@@ -2836,6 +3004,8 @@ def label_inspector(
             click_to_delete["enabled"].value = False
         if enabled and click_to_split["enabled"].value:
             click_to_split["enabled"].value = False
+        if enabled and click_to_merge["enabled"].value:
+            click_to_merge["enabled"].value = False
         inspector.enable_click_relabel(enabled)
 
     @magicgui(
@@ -2864,6 +3034,8 @@ def label_inspector(
             click_to_delete["enabled"].value = False
         if enabled and click_to_relabel["enabled"].value:
             click_to_relabel["enabled"].value = False
+        if enabled and click_to_merge["enabled"].value:
+            click_to_merge["enabled"].value = False
         inspector.enable_click_split(enabled)
 
     @magicgui(
@@ -2873,6 +3045,35 @@ def label_inspector(
     def apply_split():
         """Run the watershed split on the seeds placed in the viewer."""
         inspector.commit_split()
+
+    @magicgui(
+        auto_call=True,
+        enabled={
+            "label": "Click a label to merge its touching neighbors into it",
+            "tooltip": (
+                "For over-segmented cells — one cell broken into several "
+                "touching IDs. While enabled, left-click any fragment and "
+                "every label sharing a border with it (a shared face, edge "
+                "or corner) is merged into the clicked ID, at the clicked "
+                "timepoint only. Only direct neighbors merge, so re-click "
+                "the now-larger label to grow the region another ring "
+                "outward. Ctrl+Z reverts the last merge. Click-drag "
+                "(pan/zoom) and clicks on background do nothing. Merges are "
+                "staged in memory; press 'Save Changes and Continue' to "
+                "write them. Only in the normal frame view — turn Track "
+                "view off first."
+            ),
+        },
+    )
+    def click_to_merge(enabled: bool = False):
+        """While on, click a label to merge every touching neighbor into it."""
+        if enabled and click_to_delete["enabled"].value:
+            click_to_delete["enabled"].value = False
+        if enabled and click_to_relabel["enabled"].value:
+            click_to_relabel["enabled"].value = False
+        if enabled and click_to_split["enabled"].value:
+            click_to_split["enabled"].value = False
+        inspector.enable_click_merge(enabled)
 
     @magicgui(
         call_button="Apply",
@@ -2959,6 +3160,9 @@ def label_inspector(
         widgets=[click_to_split, apply_split], labels=False
     )
     viewer.window.add_dock_widget(split_widget, name="Split label")
+    viewer.window.add_dock_widget(
+        click_to_merge, name="Merge touching neighbors"
+    )
     viewer.window.add_dock_widget(
         delete_low_intensity, name="Delete low-intensity tracks"
     )
