@@ -3410,6 +3410,18 @@ class FileResultsWidget(QWidget):
         # Update description
         description = function_info.get("description", "")
 
+        # GPU-distributable functions (e.g. Trackastra, HOCT) manage their own
+        # per-GPU worker pool at start_batch_processing() time and ignore the
+        # UI's thread-count value entirely. Detect this from the function
+        # object itself (the `supports_gpu_distribution` attribute) rather
+        # than name/description matching, so the spinbox doesn't misleadingly
+        # show an editable CPU-derived thread count (e.g. 16) for them.
+        processing_func = function_info.get("func")
+        supports_gpu_distribution = bool(
+            processing_func is not None
+            and getattr(processing_func, "supports_gpu_distribution", False)
+        )
+
         # Check if this is a folder-processing function that needs single threading
         is_folder_function = (
             "folder" in function_name.lower()
@@ -3423,8 +3435,10 @@ class FileResultsWidget(QWidget):
             or "ultrack" in function_name.lower()  # Memory-intensive tracking
         )
 
-        # Disable threading controls for folder functions
-        if is_folder_function:
+        # Disable threading controls for folder functions and for
+        # GPU-distributable functions (whose actual concurrency is the
+        # detected GPU count, not this spinbox's value).
+        if is_folder_function or supports_gpu_distribution:
             self._thread_locked_by_function = True
             self.thread_count.setValue(1)
             # More specific tooltip for ultrack
@@ -3432,14 +3446,22 @@ class FileResultsWidget(QWidget):
                 self.thread_count.setToolTip(
                     "This function is memory-intensive and must run with 1 thread to avoid crashes."
                 )
+            elif supports_gpu_distribution:
+                self.thread_count.setToolTip(
+                    "This function runs one worker per available GPU "
+                    "automatically; the thread count here is not used."
+                )
             else:
                 self.thread_count.setToolTip(
                     "This function processes entire folders and must run with 1 thread only."
                 )
 
-            # Add warning to description if not already present
+            # Add warning to description if not already present (only for
+            # actual folder functions; GPU-distributable functions aren't
+            # single-threaded, they're distributed across GPUs instead).
             if (
-                "IMPORTANT:" not in description
+                is_folder_function
+                and "IMPORTANT:" not in description
                 and "WARNING:" not in description
             ):
                 description += "\nThis function has to run single-threaded."
