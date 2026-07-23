@@ -34,6 +34,7 @@ _SUPPORTED_IMAGE_SUFFIXES = (".tif", ".tiff", ".zarr")
 _GPU_POOL_LOCK = threading.Lock()
 _GPU_POOL = None  # queue.Queue of GPU id strings (built lazily)
 _GPU_IDS = None  # list of detected GPU id strings ([] = don't pin)
+_GPU_POOL_WORKERS_PER_GPU = None  # repeat count baked into the current pool
 
 
 def _detect_gpu_ids():
@@ -73,15 +74,26 @@ def _detect_gpu_ids():
     return []
 
 
-def _get_gpu_pool():
-    """Return (pool, gpu_ids), building the shared pool once."""
-    global _GPU_POOL, _GPU_IDS
+def _get_gpu_pool(workers_per_gpu: int = 1):
+    """Return (pool, gpu_ids), (re)building the shared pool as needed.
+
+    Each GPU id is enqueued ``workers_per_gpu`` times, so up to that many
+    concurrent jobs can share a single card (useful when a GPU has enough
+    VRAM to run several Trackastra inferences at once). The pool is rebuilt
+    if a batch run requests a different ``workers_per_gpu`` than the cached
+    one; this only happens between runs, since every file in one batch
+    shares the same parameter value.
+    """
+    global _GPU_POOL, _GPU_IDS, _GPU_POOL_WORKERS_PER_GPU
+    workers_per_gpu = max(1, int(workers_per_gpu))
     with _GPU_POOL_LOCK:
-        if _GPU_POOL is None:
+        if _GPU_POOL is None or _GPU_POOL_WORKERS_PER_GPU != workers_per_gpu:
             _GPU_IDS = _detect_gpu_ids()
             _GPU_POOL = queue.Queue()
             for gpu_id in _GPU_IDS:
-                _GPU_POOL.put(gpu_id)
+                for _ in range(workers_per_gpu):
+                    _GPU_POOL.put(gpu_id)
+            _GPU_POOL_WORKERS_PER_GPU = workers_per_gpu
         return _GPU_POOL, _GPU_IDS
 
 
@@ -950,6 +962,13 @@ else:
             "default": "",
             "description": "Path to a Gurobi license file (.lic) for the 'ilp' mode solver. Leave empty to auto-detect ~/gurobi.lic; only needed to override the bundled size-limited pip license. Ignored by 'greedy' modes.",
         },
+        "workers_per_gpu": {
+            "type": int,
+            "default": 1,
+            "min": 1,
+            "max": 8,
+            "description": "Number of concurrent Trackastra jobs to run per GPU. Increase if a single card has enough VRAM to run more than one tracking job at once (multi-GPU workstations benefit most).",
+        },
         "label_pattern": {
             "type": str,
             "default": "_labels.tif",
@@ -965,6 +984,7 @@ def trackastra_tracking(
     dimension_order: str = "Auto",
     batch_size: str = "Auto",
     gurobi_license: str = "",
+    workers_per_gpu: int = 1,
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
     _output_folder: str = None,
@@ -1008,6 +1028,8 @@ def trackastra_tracking(
         solver. Leave empty to auto-detect ~/gurobi.lic (or an already-exported
         GRB_LICENSE_FILE); only needed to override the bundled size-limited pip
         license that ships in the conda env. Ignored by the greedy modes.
+    workers_per_gpu : int
+        Number of concurrent Trackastra jobs to run per GPU (default: 1).
     label_pattern : str
         To identify label images
 
@@ -1150,7 +1172,9 @@ def trackastra_tracking(
 
     # Acquire a GPU from the shared pool so concurrent files spread across cards
     # (blocks until one is free; no-op when no GPUs are detected/pinning is off).
-    pool, gpu_ids = _get_gpu_pool()
+    # Each GPU appears `workers_per_gpu` times in the pool, so that many jobs
+    # can share it.
+    pool, gpu_ids = _get_gpu_pool(workers_per_gpu)
     gpu_id = pool.get() if gpu_ids else None
     run_env = os.environ.copy()
 
@@ -1227,7 +1251,8 @@ trackastra_tracking.skip_load = True
 trackastra_tracking._loads_from_path = True
 
 # Each file is tracked in its own subprocess pinned to one GPU (see the GPU
-# pool above), so multiple files can run concurrently across GPUs. This marker
-# lets the batch widget raise the worker thread count to the GPU count instead
-# of forcing single-threaded execution.
+# pool above), so multiple files can run concurrently across GPUs (and, via
+# the `workers_per_gpu` parameter, multiple concurrent files per GPU). This
+# marker lets the batch widget raise the worker thread count to
+# n_gpus * workers_per_gpu instead of forcing single-threaded execution.
 trackastra_tracking.supports_gpu_distribution = True

@@ -57,6 +57,14 @@ Tracking algorithm mode:
   - Does not allow cell divisions
   - Use when cells don't divide during imaging
 
+### `workers_per_gpu` (int, default: 1, min: 1, max: 8)
+Number of concurrent Trackastra jobs to run per GPU. The default runs one
+file at a time per card; raise it if a single GPU has enough VRAM to run
+more than one tracking job simultaneously. Batch runs use
+`n_gpus × workers_per_gpu` concurrent workers in total (the "Number of
+threads" control in the UI is not used for this function — it is replaced by
+this automatic per-GPU distribution).
+
 ### `label_pattern` (string, default: "_labels.tif")
 Pattern to identify label images in filenames.
 

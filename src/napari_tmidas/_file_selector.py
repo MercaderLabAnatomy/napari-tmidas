@@ -3733,12 +3733,23 @@ class FileResultsWidget(QWidget):
                 n_gpus = len(detect_gpu_ids())
             except Exception:
                 n_gpus = 0
-            worker_thread_count = max(1, n_gpus)
-            self.viewer.status = (
-                f"Distributing across {worker_thread_count} GPU(s)"
-                if n_gpus > 1
-                else "Processing with a single thread (1 GPU)"
-            )
+            # Functions that expose a `workers_per_gpu` parameter (e.g.
+            # Trackastra, HOCT) let the user run more than one job per card
+            # when VRAM allows it, so the effective worker count is
+            # n_gpus * workers_per_gpu, not just n_gpus.
+            try:
+                workers_per_gpu = max(1, int(param_values.get("workers_per_gpu", 1)))
+            except (TypeError, ValueError):
+                workers_per_gpu = 1
+            worker_thread_count = max(1, n_gpus * workers_per_gpu)
+            if n_gpus > 1 or workers_per_gpu > 1:
+                self.viewer.status = (
+                    f"Distributing across {n_gpus} GPU(s), "
+                    f"{workers_per_gpu} worker(s) per GPU "
+                    f"({worker_thread_count} total)"
+                )
+            else:
+                self.viewer.status = "Processing with a single thread (1 GPU)"
         # GPU-based processing should use single thread (unless use_cpu=True)
         elif "use_cpu" in param_values and not param_values["use_cpu"]:
             worker_thread_count = 1

@@ -14,7 +14,7 @@ maintaining consistent object IDs throughout the time series.
 - **2D and 3D Support**: Handles both TYX and TZYX time-lapse data
 - **Tiled Inference**: Automatically tiles large volumes to avoid GPU out-of-memory errors
 - **Automatic Environment Management**: Creates a dedicated conda environment for HOCT
-- **Multi-GPU Aware**: Runs one worker per available GPU (not one per CPU thread) so concurrent files spread across cards, matching the Trackastra/Cellpose pattern
+- **Multi-GPU Aware**: Runs one or more workers per available GPU (configurable via `workers_per_gpu`, not the CPU thread-count control) so concurrent files spread across cards, matching the Trackastra/Cellpose pattern
 
 ## Installation
 
@@ -67,6 +67,14 @@ Path to a Gurobi license file (`.lic`) used by HOCT's ILP solver. Leave
 empty to auto-detect `~/gurobi.lic` (or an already-exported
 `GRB_LICENSE_FILE`); only needed to override the bundled size-limited pip
 license.
+
+### `workers_per_gpu` (int, default: 1, min: 1, max: 8)
+Number of concurrent HOCT jobs to run per GPU (only relevant when
+`device="cuda"`). The default runs one file at a time per card; raise it if a
+single GPU has enough VRAM to run more than one tracking job simultaneously.
+Batch runs use `n_gpus × workers_per_gpu` concurrent workers in total (the
+"Number of threads" control in the UI is not used for this function — it is
+replaced by this automatic per-GPU distribution).
 
 ### `label_pattern` (string, default: "_labels.tif")
 Pattern to identify label images in filenames.
