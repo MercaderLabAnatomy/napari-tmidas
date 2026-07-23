@@ -836,6 +836,7 @@ if not hasattr(track_graph, 'nodes'):
 out_shape = tuple(int(s) for s in mask.shape)
 n_timepoints = out_shape[0]
 out_dtype = np.uint32
+out_axes = "TZYX" if len(out_shape) == 4 else "TYX"
 bytes_total = int(np.prod(out_shape, dtype=np.int64)) * np.dtype(out_dtype).itemsize
 use_bigtiff = bytes_total > 2 * 1024**3
 
@@ -911,6 +912,8 @@ if frame_relabel is not None:
         data=_iter_relabeled_pages(),
         shape=out_shape,
         dtype=out_dtype,
+        ome=True,
+        metadata={{'axes': out_axes}},
         compression=tiff_compression,
         photometric='minisblack',
         bigtiff=use_bigtiff,
@@ -926,6 +929,8 @@ else:
     imwrite(
         '{output_path}',
         masks_tracked.astype(out_dtype),
+        ome=True,
+        metadata={{'axes': out_axes}},
         compression=tiff_compression,
         bigtiff=use_bigtiff,
     )

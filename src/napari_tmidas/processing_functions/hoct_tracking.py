@@ -338,13 +338,18 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
     frame_shape = first_frame.shape
     n_timepoints = len(mask_files)
     out_shape = (n_timepoints,) + frame_shape
-    out_dtype = first_frame.dtype
+    # Napari only auto-detects a Labels layer for certain (unsigned) integer
+    # dtypes; HOCT's CTC exporter writes int64 masks, so cast to uint32 to
+    # match the convention used by write_labels_with_source_metadata and the
+    # Trackastra tracker.
+    out_dtype = np.uint32
+    axes = "TZYX" if len(frame_shape) == 3 else "TYX"
     bytes_total = int(np.prod(out_shape, dtype=np.int64)) * np.dtype(out_dtype).itemsize
     use_bigtiff = bytes_total > 2 * 1024**3
 
     def _iter_pages():
         for mask_file in mask_files:
-            frame = tifffile.imread(str(mask_file))
+            frame = tifffile.imread(str(mask_file)).astype(out_dtype, copy=False)
             if frame.ndim <= 2:
                 yield frame
             else:
@@ -355,6 +360,8 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
         data=_iter_pages(),
         shape=out_shape,
         dtype=out_dtype,
+        ome=True,
+        metadata={"axes": axes},
         compression="zlib",
         photometric="minisblack",
         bigtiff=use_bigtiff,
