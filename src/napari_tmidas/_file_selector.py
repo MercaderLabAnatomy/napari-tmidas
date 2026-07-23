@@ -3730,7 +3730,7 @@ class FileResultsWidget(QWidget):
                     from napari_tmidas.processing_functions.trackastra_tracking import (
                         _detect_gpu_ids as detect_gpu_ids,
                     )
-                n_gpus = len(detect_gpu_ids())
+                n_gpus = len(detect_gpu_ids(param_values.get("gpus")))
             except Exception:
                 n_gpus = 0
             # Functions that expose a `workers_per_gpu` parameter (e.g.

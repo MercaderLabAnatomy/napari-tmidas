@@ -38,16 +38,24 @@ _GPU_POOL_LOCK = threading.Lock()
 _GPU_POOL = None  # queue.Queue of GPU id strings (built lazily)
 _GPU_IDS = None  # list of detected GPU id strings ([] = don't pin)
 _GPU_POOL_WORKERS_PER_GPU = None  # repeat count baked into the current pool
+_GPU_POOL_KEY = None  # (workers_per_gpu, gpus_override) baked into the current pool
 
 
-def _detect_gpu_ids():
+def _detect_gpu_ids(gpus_override: str = None):
     """Detect GPU ids to distribute across. Honours overrides.
 
-    - ``HOCT_GPUS`` (e.g. "0,1", or "none"/"" to disable pinning)
+    - ``gpus_override`` (the function's own ``gpus`` parameter), e.g. "0" or
+      "0,1", or "none"/"cpu"/"" to disable pinning
+    - else ``HOCT_GPUS`` env var, same syntax
     - else ``CUDA_VISIBLE_DEVICES`` if already set
     - else counts physical GPUs via ``nvidia-smi -L``
     Returns a list of id strings; empty means do not pin a device.
     """
+    if gpus_override is not None and gpus_override.strip() != "":
+        if gpus_override.strip().lower() in ("none", "cpu"):
+            return []
+        return [g.strip() for g in gpus_override.split(",") if g.strip() != ""]
+
     override = os.environ.get("HOCT_GPUS")
     if override is not None:
         if override.strip().lower() in ("", "none", "cpu"):
@@ -77,26 +85,28 @@ def _detect_gpu_ids():
     return []
 
 
-def _get_gpu_pool(workers_per_gpu: int = 1):
+def _get_gpu_pool(workers_per_gpu: int = 1, gpus_override: str = None):
     """Return (pool, gpu_ids), (re)building the shared pool as needed.
 
     Each GPU id is enqueued ``workers_per_gpu`` times, so up to that many
     concurrent jobs can share a single card (useful when a GPU has enough
     VRAM to run several HOCT inferences at once). The pool is rebuilt if a
-    batch run requests a different ``workers_per_gpu`` than the cached one;
-    this only happens between runs, since every file in one batch shares the
-    same parameter value.
+    batch run requests a different ``workers_per_gpu``/``gpus_override``
+    than the cached one; this only happens between runs, since every file in
+    one batch shares the same parameter values.
     """
-    global _GPU_POOL, _GPU_IDS, _GPU_POOL_WORKERS_PER_GPU
+    global _GPU_POOL, _GPU_IDS, _GPU_POOL_WORKERS_PER_GPU, _GPU_POOL_KEY
     workers_per_gpu = max(1, int(workers_per_gpu))
+    cache_key = (workers_per_gpu, gpus_override)
     with _GPU_POOL_LOCK:
-        if _GPU_POOL is None or _GPU_POOL_WORKERS_PER_GPU != workers_per_gpu:
-            _GPU_IDS = _detect_gpu_ids()
+        if _GPU_POOL is None or _GPU_POOL_KEY != cache_key:
+            _GPU_IDS = _detect_gpu_ids(gpus_override)
             _GPU_POOL = queue.Queue()
             for gpu_id in _GPU_IDS:
                 for _ in range(workers_per_gpu):
                     _GPU_POOL.put(gpu_id)
             _GPU_POOL_WORKERS_PER_GPU = workers_per_gpu
+            _GPU_POOL_KEY = cache_key
         return _GPU_POOL, _GPU_IDS
 
 
@@ -418,6 +428,11 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
             "default": "",
             "description": "Path to a Gurobi license file (.lic) for HOCT's ILP solver. Leave empty to auto-detect ~/gurobi.lic; only needed to override the bundled size-limited pip license.",
         },
+        "gpus": {
+            "type": str,
+            "default": "",
+            "description": "Comma-separated GPU ids to use (e.g. '0' or '0,1'). Leave empty to auto-detect and use all available GPUs. Set to 'cpu' or 'none' to disable GPU pinning. Each pinned GPU runs its own subprocess that loads the full raw+segmentation arrays into RAM, so restrict this on large datasets to limit memory use, not just VRAM.",
+        },
         "workers_per_gpu": {
             "type": int,
             "default": 1,
@@ -443,6 +458,7 @@ def hoct_tracking(
     tile: str = "auto",
     scale: str = "",
     gurobi_license: str = "",
+    gpus: str = "",
     workers_per_gpu: int = 1,
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
@@ -492,6 +508,12 @@ def hoct_tracking(
         Optional path to a Gurobi license file (.lic) used by HOCT's ILP
         solver. Leave empty to auto-detect ~/gurobi.lic (or an
         already-exported GRB_LICENSE_FILE).
+    gpus : str
+        Comma-separated GPU ids to pin to (e.g. '0' or '0,1'). Empty
+        auto-detects and uses all available GPUs; 'cpu'/'none' disables
+        pinning. Restricting this bounds how many concurrent HOCT
+        subprocesses run, which bounds RAM use as well as VRAM, since each
+        pinned GPU loads its own full copy of the raw + segmentation arrays.
     workers_per_gpu : int
         Number of concurrent HOCT jobs to run per GPU (default: 1). Only
         used when device='cuda'.
@@ -511,15 +533,15 @@ def hoct_tracking(
 
         if image.ndim < 3:
             print(
-                "Input is not a time series (needs at least 3 dimensions). Returning unchanged."
+                "Input is not a time series (needs at least 3 dimensions). Skipping."
             )
-            return image
+            return None
 
         if image.shape[0] < 2:
             print(
-                "Input has only one timepoint. Need at least 2 for tracking. Returning unchanged."
+                "Input has only one timepoint. Need at least 2 for tracking. Skipping."
             )
-            return image
+            return None
     else:
         _src_tag = os.path.basename(_source_filepath) if _source_filepath else "?"
         print(
@@ -537,8 +559,8 @@ def hoct_tracking(
 
     # Ensure HOCT environment exists and the CLI is usable.
     if not HoctEnvManager.ensure_env_ready():
-        print("Failed to prepare HOCT environment. Returning unchanged.")
-        return image
+        print("Failed to prepare HOCT environment. Skipping.")
+        return None
 
     # Get source file path. Prefer explicit worker-provided path.
     img_path = _source_filepath
@@ -552,8 +574,8 @@ def hoct_tracking(
                 break
 
     if img_path is None:
-        print("Could not determine input file path. Returning unchanged.")
-        return image
+        print("Could not determine input file path. Skipping.")
+        return None
 
     temp_dir = Path(os.path.dirname(img_path))
     basename = os.path.basename(img_path)
@@ -569,8 +591,8 @@ def hoct_tracking(
             print(
                 f"  Tried removing '{label_pattern}' to get base '{raw_base}' and checking: {raw_candidates}"
             )
-            print("HOCT requires a matching raw image. Returning unchanged.")
-            return image
+            print("HOCT requires a matching raw image. Skipping.")
+            return None
         print(
             f"[{os.path.basename(img_path)}] Processing label file: "
             "using matched raw-label pair for tracking"
@@ -584,7 +606,7 @@ def hoct_tracking(
         )
         if not os.path.exists(mask_path):
             print(f"No label file found for {img_path}")
-            return image
+            return None
 
     mask_filename = os.path.basename(mask_path)
     if mask_filename.endswith(label_pattern):
@@ -660,7 +682,7 @@ def hoct_tracking(
     gpu_id = None
     pool = None
     if device == "cuda":
-        pool, gpu_ids = _get_gpu_pool(workers_per_gpu)
+        pool, gpu_ids = _get_gpu_pool(workers_per_gpu, gpus)
         gpu_id = pool.get() if gpu_ids else None
 
     label_tag = os.path.basename(mask_path)
@@ -678,12 +700,12 @@ def hoct_tracking(
             print(f"[{label_tag}] Released GPU {gpu_id}")
 
     if result.returncode != 0:
-        print("HOCT error:")
+        print(f"HOCT error (exit code {result.returncode}):")
         print(result.stdout)
         print(result.stderr)
-        print("Returning original image unchanged.")
+        print("Skipping — no output will be saved.")
         shutil.rmtree(ctc_dir, ignore_errors=True)
-        return image
+        return None
 
     print(result.stdout)
 
@@ -691,7 +713,7 @@ def hoct_tracking(
         out_shape = _assemble_ctc_output(ctc_dir, output_path)
     except Exception as exc:
         print(f"Failed to assemble HOCT CTC output: {exc}")
-        return image
+        return None
     finally:
         shutil.rmtree(ctc_dir, ignore_errors=True)
 

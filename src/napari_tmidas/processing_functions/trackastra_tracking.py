@@ -35,16 +35,24 @@ _GPU_POOL_LOCK = threading.Lock()
 _GPU_POOL = None  # queue.Queue of GPU id strings (built lazily)
 _GPU_IDS = None  # list of detected GPU id strings ([] = don't pin)
 _GPU_POOL_WORKERS_PER_GPU = None  # repeat count baked into the current pool
+_GPU_POOL_KEY = None  # (workers_per_gpu, gpus_override) baked into the current pool
 
 
-def _detect_gpu_ids():
+def _detect_gpu_ids(gpus_override: str = None):
     """Detect GPU ids to distribute across. Honours overrides.
 
-    - ``TRACKASTRA_GPUS`` (e.g. "0,1", or "none"/"" to disable pinning)
+    - ``gpus_override`` (the function's own ``gpus`` parameter), e.g. "0" or
+      "0,1", or "none"/"cpu"/"" to disable pinning
+    - else ``TRACKASTRA_GPUS`` env var, same syntax
     - else ``CUDA_VISIBLE_DEVICES`` if already set
     - else counts physical GPUs via ``nvidia-smi -L``
     Returns a list of id strings; empty means do not pin a device.
     """
+    if gpus_override is not None and gpus_override.strip() != "":
+        if gpus_override.strip().lower() in ("none", "cpu"):
+            return []
+        return [g.strip() for g in gpus_override.split(",") if g.strip() != ""]
+
     override = os.environ.get("TRACKASTRA_GPUS")
     if override is not None:
         if override.strip().lower() in ("", "none", "cpu"):
@@ -74,26 +82,28 @@ def _detect_gpu_ids():
     return []
 
 
-def _get_gpu_pool(workers_per_gpu: int = 1):
+def _get_gpu_pool(workers_per_gpu: int = 1, gpus_override: str = None):
     """Return (pool, gpu_ids), (re)building the shared pool as needed.
 
     Each GPU id is enqueued ``workers_per_gpu`` times, so up to that many
     concurrent jobs can share a single card (useful when a GPU has enough
     VRAM to run several Trackastra inferences at once). The pool is rebuilt
-    if a batch run requests a different ``workers_per_gpu`` than the cached
-    one; this only happens between runs, since every file in one batch
-    shares the same parameter value.
+    if a batch run requests a different ``workers_per_gpu``/``gpus_override``
+    than the cached one; this only happens between runs, since every file in
+    one batch shares the same parameter values.
     """
-    global _GPU_POOL, _GPU_IDS, _GPU_POOL_WORKERS_PER_GPU
+    global _GPU_POOL, _GPU_IDS, _GPU_POOL_WORKERS_PER_GPU, _GPU_POOL_KEY
     workers_per_gpu = max(1, int(workers_per_gpu))
+    cache_key = (workers_per_gpu, gpus_override)
     with _GPU_POOL_LOCK:
-        if _GPU_POOL is None or _GPU_POOL_WORKERS_PER_GPU != workers_per_gpu:
-            _GPU_IDS = _detect_gpu_ids()
+        if _GPU_POOL is None or _GPU_POOL_KEY != cache_key:
+            _GPU_IDS = _detect_gpu_ids(gpus_override)
             _GPU_POOL = queue.Queue()
             for gpu_id in _GPU_IDS:
                 for _ in range(workers_per_gpu):
                     _GPU_POOL.put(gpu_id)
             _GPU_POOL_WORKERS_PER_GPU = workers_per_gpu
+            _GPU_POOL_KEY = cache_key
         return _GPU_POOL, _GPU_IDS
 
 
@@ -962,6 +972,11 @@ else:
             "default": "",
             "description": "Path to a Gurobi license file (.lic) for the 'ilp' mode solver. Leave empty to auto-detect ~/gurobi.lic; only needed to override the bundled size-limited pip license. Ignored by 'greedy' modes.",
         },
+        "gpus": {
+            "type": str,
+            "default": "",
+            "description": "Comma-separated GPU ids to use (e.g. '0' or '0,1'). Leave empty to auto-detect and use all available GPUs. Set to 'cpu' or 'none' to disable GPU pinning. Each pinned GPU runs its own subprocess that loads the full raw+segmentation arrays into RAM, so restrict this on large datasets to limit memory use, not just VRAM.",
+        },
         "workers_per_gpu": {
             "type": int,
             "default": 1,
@@ -984,6 +999,7 @@ def trackastra_tracking(
     dimension_order: str = "Auto",
     batch_size: str = "Auto",
     gurobi_license: str = "",
+    gpus: str = "",
     workers_per_gpu: int = 1,
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
@@ -1028,6 +1044,12 @@ def trackastra_tracking(
         solver. Leave empty to auto-detect ~/gurobi.lic (or an already-exported
         GRB_LICENSE_FILE); only needed to override the bundled size-limited pip
         license that ships in the conda env. Ignored by the greedy modes.
+    gpus : str
+        Comma-separated GPU ids to pin to (e.g. '0' or '0,1'). Empty
+        auto-detects and uses all available GPUs; 'cpu'/'none' disables
+        pinning. Restricting this bounds how many concurrent Trackastra
+        subprocesses run, which bounds RAM use as well as VRAM, since each
+        pinned GPU loads its own full copy of the raw + segmentation arrays.
     workers_per_gpu : int
         Number of concurrent Trackastra jobs to run per GPU (default: 1).
     label_pattern : str
@@ -1174,7 +1196,7 @@ def trackastra_tracking(
     # (blocks until one is free; no-op when no GPUs are detected/pinning is off).
     # Each GPU appears `workers_per_gpu` times in the pool, so that many jobs
     # can share it.
-    pool, gpu_ids = _get_gpu_pool(workers_per_gpu)
+    pool, gpu_ids = _get_gpu_pool(workers_per_gpu, gpus)
     gpu_id = pool.get() if gpu_ids else None
     run_env = os.environ.copy()
 
