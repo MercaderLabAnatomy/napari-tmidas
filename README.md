@@ -20,7 +20,7 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 ## ✨ Key Features
 
 🤖 **AI Methods Built-In**
-- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra, Ultrack)
+- Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra, HOCT, Ultrack)
 - Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
 🔄 **Universal File Conversion**
@@ -67,6 +67,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 | 🔬 **Cellpose** | Cell/nucleus segmentation | [Guide](docs/cellpose_segmentation.md) |
 | 🎨 **Convpaint** | Custom semantic/instance segmentation | [Guide](docs/convpaint_prediction.md) |
 | 📈 **Trackastra** | Transformer-based cell tracking | [Guide](docs/trackastra_tracking.md) |
+| 🧬 **HOCT** | Transformer-based cell tracking (Higher-Order Cell Tracking Transformer) | [Guide](docs/hoct_tracking.md) |
 | 🔗 **Ultrack** | Cell tracking based on segmentation ensemble | [Guide](docs/ultrack_tracking.md) |
 
 ### Core Workflows
@@ -173,7 +174,7 @@ Found a bug or have a feature request? [Open an issue](https://github.com/Mercad
 Built with [napari](https://github.com/napari/napari) and powered by:
 
 **AI/ML Methods:**
-- [Cellpose](https://github.com/MouseLand/cellpose) • [Convpaint](https://github.com/guiwitz/napari-convpaint) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [Ultrack](https://github.com/royerlab/ultrack) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
+- [Cellpose](https://github.com/MouseLand/cellpose) • [Convpaint](https://github.com/guiwitz/napari-convpaint) • [VisCy](https://github.com/mehta-lab/VisCy) • [CAREamics](https://github.com/CAREamics/careamics) • [Spotiflow](https://github.com/weigertlab/spotiflow) • [Trackastra](https://github.com/weigertlab/trackastra) • [HOCT](https://github.com/royerlab/hoct) • [Ultrack](https://github.com/royerlab/ultrack) • [SAM2](https://github.com/facebookresearch/segment-anything-2)
 
 **Core Scientific Stack:**
 - [NumPy](https://numpy.org/) • [scikit-image](https://scikit-image.org/) • [PyTorch](https://pytorch.org/)

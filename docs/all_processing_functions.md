@@ -117,6 +117,7 @@ These functions require deep-learning models or dedicated conda environments. Fo
 | **Convpaint Prediction** | `_convpaint_labels` | Semantic/instance segmentation with a pretrained Convpaint model. See [convpaint_prediction.md](convpaint_prediction.md) |
 | **CAREamics Denoise (N2V/CARE)** | `_denoised` | Denoising with Noise2Void or CARE models. See [careamics_denoising.md](careamics_denoising.md) |
 | **Spotiflow Spot Detection** | `_spot_labels` | Fluorescence spot detection using Spotiflow. See [spotiflow_detection.md](spotiflow_detection.md) |
+| **Track Cells with HOCT** | `_hoct_tracked` | Cell tracking using the HOCT deep-learning transformer tracker. See [hoct_tracking.md](hoct_tracking.md) |
 | **Track Cells with Trackastra** | `_tracked` | Cell tracking using the TrackAstra deep-learning tracker. See [trackastra_tracking.md](trackastra_tracking.md) |
 | **Track Cells with Ultrack (Segmentation Ensemble)** | `_ultrack` | Cell tracking from a segmentation ensemble via Ultrack. See [ultrack_tracking.md](ultrack_tracking.md) |
 | **VisCy Virtual Staining** | `_virtual_stain` | Virtual staining of phase/DIC images using VSCyto3D. See [viscy_virtual_staining.md](viscy_virtual_staining.md) |

@@ -3692,16 +3692,23 @@ class FileResultsWidget(QWidget):
             self.viewer.status = (
                 "Processing with a single thread (function is not thread-safe)"
             )
-        # GPU-distributable functions (e.g. Trackastra) run one subprocess per
-        # file, each pinned to its own GPU, so run as many concurrently as there
-        # are GPUs to spread the batch across all cards.
+        # GPU-distributable functions (e.g. Trackastra, HOCT) run one subprocess
+        # per file, each pinned to its own GPU, so run as many concurrently as
+        # there are GPUs to spread the batch across all cards. Each such module
+        # defines its own `_detect_gpu_ids` (honouring its own env var override,
+        # e.g. TRACKASTRA_GPUS vs HOCT_GPUS), so resolve it from the processing
+        # function's own module rather than hardcoding one tracker's module.
         elif getattr(processing_func, "supports_gpu_distribution", False):
             try:
-                from napari_tmidas.processing_functions.trackastra_tracking import (
-                    _detect_gpu_ids,
-                )
+                import importlib
 
-                n_gpus = len(_detect_gpu_ids())
+                func_module = importlib.import_module(processing_func.__module__)
+                detect_gpu_ids = getattr(func_module, "_detect_gpu_ids", None)
+                if detect_gpu_ids is None:
+                    from napari_tmidas.processing_functions.trackastra_tracking import (
+                        _detect_gpu_ids as detect_gpu_ids,
+                    )
+                n_gpus = len(detect_gpu_ids())
             except Exception:
                 n_gpus = 0
             worker_thread_count = max(1, n_gpus)
