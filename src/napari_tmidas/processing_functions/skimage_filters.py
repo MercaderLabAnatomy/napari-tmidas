@@ -31,6 +31,62 @@ except ImportError:
 
 from napari_tmidas._registry import BatchProcessingRegistry
 
+# Dimension-order strings offered by the "dimension_order" dropdown widget.
+_DIMENSION_ORDER_AXES = frozenset(
+    {"YX", "CYX", "TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX", "TCZYX"}
+)
+
+
+def _iter_dimension_blocks(image: np.ndarray, dimension_order: str):
+    """
+    Yield (index, block) pairs for per-slice connected-component labeling.
+
+    T and C are independent axes (each timepoint/channel is looped over
+    separately), while Z is kept together with Y,X in a single block so a
+    3D object spanning multiple Z slices gets one label instead of a
+    different label per slice.
+
+    Raises ValueError if dimension_order can't be resolved for a >2D image:
+    guessing wrong here doesn't crash, it silently mislabels data (merging
+    labels across time/channel, or splitting one 3D object into many), so
+    the caller needs to pick the correct dimension order explicitly.
+    """
+    if image.ndim <= 2:
+        yield (), image
+        return
+
+    axes = str(dimension_order or "").upper()
+    if axes not in _DIMENSION_ORDER_AXES or len(axes) != image.ndim:
+        # A hint like "TCZYX" stays stale after a single channel is
+        # extracted upstream, leaving the image channel-free while the hint
+        # still lists "C" -- strip it and re-check before giving up.
+        stripped = axes.replace("C", "")
+        if stripped in _DIMENSION_ORDER_AXES and len(stripped) == image.ndim:
+            axes = stripped
+        else:
+            raise ValueError(
+                f"Cannot determine how to label a {image.ndim}D image from "
+                f"dimension_order={dimension_order!r}. Please select the "
+                "correct dimension order (e.g. TYX, ZYX, TZYX, TCZYX, ...) "
+                "from the dimension order dropdown, so 3D objects spanning "
+                "Z slices are labeled correctly instead of being split into "
+                "one label per slice."
+            )
+
+    independent_positions = [i for i, a in enumerate(axes) if a in ("T", "C")]
+    if not independent_positions:
+        yield (), image
+        return
+
+    independent_shape = [image.shape[i] for i in independent_positions]
+    for combo in np.ndindex(*independent_shape):
+        index = [slice(None)] * image.ndim
+        for pos, val in zip(independent_positions, combo):
+            index[pos] = val
+        index = tuple(index)
+        yield index, image[index]
+
+
 if SKIMAGE_AVAILABLE:
 
     def _resolve_resize_target(shape_yx, scale_factor):
@@ -210,8 +266,10 @@ if SKIMAGE_AVAILABLE:
             },
             "max_workers": {
                 "type": int,
-                "default": 4,
-                "description": "Maximum number of parallel workers (default: 4). Lower values use less memory but are slower. Range: 1-16",
+                "default": 1,
+                "min": 1,
+                "max": 16,
+                "description": "Maximum number of parallel workers (default: 1). Higher values use more memory but are faster. Range: 1-16",
             },
             "channel": {
                 "type": str,
@@ -225,7 +283,7 @@ if SKIMAGE_AVAILABLE:
         image: np.ndarray,
         clip_limit: float = 0.01,
         kernel_size: int = 0,
-        max_workers: int = max(1, (os.cpu_count() or 4) // 4),
+        max_workers: int = 1,
         _source_filepath: str = None,
         channel: str = "all",
     ) -> np.ndarray:
@@ -247,8 +305,8 @@ if SKIMAGE_AVAILABLE:
         kernel_size : int
             Size of the contextual regions (0 = auto-calculate based on image size)
         max_workers : int
-            Maximum number of parallel workers for processing large datasets (default: 4)
-            Lower values reduce memory usage, higher values increase speed
+            Maximum number of parallel workers for processing large datasets (default: 1)
+            Higher values increase speed but use more memory
         _source_filepath : str, optional
             Internal parameter for Zarr-aware processing (passed automatically)
 
@@ -411,90 +469,27 @@ if SKIMAGE_AVAILABLE:
                             If YX or Auto: processes as single 2D image
 
         Returns:
-            Binary image with same shape as input (255=foreground, 0=background)
+            Binary label image with same shape as input (1=foreground,
+            0=background). uint32 so napari/the save pipeline recognize it
+            as a Labels layer (see is_label_image), matching the sibling
+            "Otsu Thresholding (instance)" and "Manual Thresholding"
+            functions' label-typed output.
         """
-        image = skimage.img_as_ubyte(image)  # convert to 8-bit
+        # threshold_otsu works on any numeric dtype directly; forcing an
+        # 8-bit downcast here would quantize away most of the dynamic range
+        # for uint16 microscopy data (whose true max is often far below
+        # 65535) and measurably shift the computed threshold.
 
         # Handle different dimension orders
-        if dimension_order in ["TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX"]:
-            # Process frame-by-frame or slice-by-slice
-            result = np.zeros_like(image, dtype=np.uint8)
-
-            # Determine which axes to iterate over
-            if len(image.shape) == 3:  # TYX or ZYX
-                for i in range(image.shape[0]):
-                    thresh = skimage.filters.threshold_otsu(image[i])
-                    result[i] = np.where(image[i] > thresh, 255, 0).astype(
-                        np.uint8
-                    )
-            elif len(image.shape) == 4:  # TCYX, TZYX, ZCYX
-                for i in range(image.shape[0]):
-                    for j in range(image.shape[1]):
-                        thresh = skimage.filters.threshold_otsu(image[i, j])
-                        result[i, j] = np.where(
-                            image[i, j] > thresh, 255, 0
-                        ).astype(np.uint8)
-            elif len(image.shape) == 5:  # TZCYX
-                for i in range(image.shape[0]):
-                    for j in range(image.shape[1]):
-                        for k in range(image.shape[2]):
-                            thresh = skimage.filters.threshold_otsu(
-                                image[i, j, k]
-                            )
-                            result[i, j, k] = np.where(
-                                image[i, j, k] > thresh, 255, 0
-                            ).astype(np.uint8)
-            else:
-                # Fallback for unexpected shapes
-                thresh = skimage.filters.threshold_otsu(image)
-                result = np.where(image > thresh, 255, 0).astype(np.uint8)
-
-            return result
-        elif dimension_order == "CYX":
-            # Process each channel independently
-            if len(image.shape) >= 3:
-                result = np.zeros_like(image, dtype=np.uint8)
-                for i in range(image.shape[0]):
-                    thresh = skimage.filters.threshold_otsu(image[i])
-                    result[i] = np.where(image[i] > thresh, 255, 0).astype(
-                        np.uint8
-                    )
-                return result
-            else:
-                # Fallback if not actually multi-channel
-                thresh = skimage.filters.threshold_otsu(image)
-                return np.where(image > thresh, 255, 0).astype(np.uint8)
-        else:
-            # YX or Auto: process as single image
-            thresh = skimage.filters.threshold_otsu(image)
-            return np.where(image > thresh, 255, 0).astype(np.uint8)
-
-    # instance segmentation
-    @BatchProcessingRegistry.register(
-        name="Otsu Thresholding (instance)",
-        suffix="_otsu_labels",
-        description="Threshold image using Otsu's method to obtain a multi-label image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice.",
-    )
-    def otsu_thresholding_instance(
-        image: np.ndarray, dimension_order: str = "Auto"
-    ) -> np.ndarray:
-        """
-        Threshold image using Otsu's method to create instance labels.
-
-        Args:
-            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
-            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
-                            If TYX/ZYX/TCYX/TZYX: processes each frame/slice independently
-                            If CYX: processes each channel independently
-                            If YX or Auto: processes as single 2D image
-
-        Returns:
-            Label image with same shape as input (0=background, 1,2,3...=objects)
-        """
-        image = skimage.img_as_ubyte(image)  # convert to 8-bit
-
-        # Handle different dimension orders
-        if dimension_order in ["TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX"]:
+        if dimension_order in [
+            "TYX",
+            "ZYX",
+            "TCYX",
+            "TZYX",
+            "ZCYX",
+            "TZCYX",
+            "TCZYX",
+        ]:
             # Process frame-by-frame or slice-by-slice
             result = np.zeros_like(image, dtype=np.uint32)
 
@@ -502,16 +497,14 @@ if SKIMAGE_AVAILABLE:
             if len(image.shape) == 3:  # TYX or ZYX
                 for i in range(image.shape[0]):
                     thresh = skimage.filters.threshold_otsu(image[i])
-                    result[i] = skimage.measure.label(
-                        image[i] > thresh
-                    ).astype(np.uint32)
+                    result[i] = (image[i] > thresh).astype(np.uint32)
             elif len(image.shape) == 4:  # TCYX, TZYX, ZCYX
                 for i in range(image.shape[0]):
                     for j in range(image.shape[1]):
                         thresh = skimage.filters.threshold_otsu(image[i, j])
-                        result[i, j] = skimage.measure.label(
-                            image[i, j] > thresh
-                        ).astype(np.uint32)
+                        result[i, j] = (image[i, j] > thresh).astype(
+                            np.uint32
+                        )
             elif len(image.shape) == 5:  # TZCYX
                 for i in range(image.shape[0]):
                     for j in range(image.shape[1]):
@@ -519,15 +512,13 @@ if SKIMAGE_AVAILABLE:
                             thresh = skimage.filters.threshold_otsu(
                                 image[i, j, k]
                             )
-                            result[i, j, k] = skimage.measure.label(
+                            result[i, j, k] = (
                                 image[i, j, k] > thresh
                             ).astype(np.uint32)
             else:
                 # Fallback for unexpected shapes
                 thresh = skimage.filters.threshold_otsu(image)
-                result = skimage.measure.label(image > thresh).astype(
-                    np.uint32
-                )
+                result = (image > thresh).astype(np.uint32)
 
             return result
         elif dimension_order == "CYX":
@@ -536,18 +527,63 @@ if SKIMAGE_AVAILABLE:
                 result = np.zeros_like(image, dtype=np.uint32)
                 for i in range(image.shape[0]):
                     thresh = skimage.filters.threshold_otsu(image[i])
-                    result[i] = skimage.measure.label(
-                        image[i] > thresh
-                    ).astype(np.uint32)
+                    result[i] = (image[i] > thresh).astype(np.uint32)
                 return result
             else:
                 # Fallback if not actually multi-channel
                 thresh = skimage.filters.threshold_otsu(image)
-                return skimage.measure.label(image > thresh).astype(np.uint32)
+                return (image > thresh).astype(np.uint32)
         else:
             # YX or Auto: process as single image
             thresh = skimage.filters.threshold_otsu(image)
-            return skimage.measure.label(image > thresh).astype(np.uint32)
+            return (image > thresh).astype(np.uint32)
+
+    # instance segmentation
+    @BatchProcessingRegistry.register(
+        name="Otsu Thresholding (instance)",
+        suffix="_otsu_labels",
+        description="Threshold image using Otsu's method to obtain a multi-label image. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice. For multichannel images, select which channel to process.",
+        parameters={
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
+        },
+    )
+    def otsu_thresholding_instance(
+        image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
+    ) -> np.ndarray:
+        """
+        Threshold image using Otsu's method to create instance labels.
+
+        Args:
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            T and C axes are processed independently (each
+                            timepoint/channel gets its own Otsu threshold and
+                            labels restart at 1). Z is kept together with
+                            Y,X so a 3D object spanning multiple Z slices
+                            keeps a single label. YX/Auto (2D only):
+                            processed as a single image.
+            channel: For multichannel images, restrict processing to a single channel
+                    (extracted upstream before this function runs).
+
+        Returns:
+            Label image with same shape as input (0=background, 1,2,3...=objects)
+        """
+        # threshold_otsu works on any numeric dtype directly; forcing an
+        # 8-bit downcast here would quantize away most of the dynamic range
+        # for uint16 microscopy data (whose true max is often far below
+        # 65535) and measurably shift the computed threshold.
+        result = np.zeros_like(image, dtype=np.uint32)
+        for index, block in _iter_dimension_blocks(image, dimension_order):
+            thresh = skimage.filters.threshold_otsu(block)
+            result[index] = skimage.measure.label(
+                block > thresh, connectivity=block.ndim
+            ).astype(np.uint32)
+        return result
 
     # simple thresholding
     @BatchProcessingRegistry.register(
@@ -574,13 +610,18 @@ if SKIMAGE_AVAILABLE:
         image: np.ndarray, threshold: int = 128, channel: str = "all"
     ) -> np.ndarray:
         """
-        Threshold image using a fixed threshold
+        Threshold image using a fixed threshold.
+
+        Returns a binary label image (1=foreground, 0=background) rather
+        than a 0/255 intensity image, so it's recognized as a Labels layer
+        (uint32, see is_label_image) instead of a plain Image layer,
+        matching the sibling "Otsu Thresholding (semantic/instance)"
+        functions.
         """
-        # convert to 8-bit
+        # convert to 8-bit so `threshold` (0-255) means the same thing
+        # regardless of the input's original dtype/range
         image = skimage.img_as_ubyte(image)
-        # Return 255 for values above threshold, 0 for values below
-        # This ensures the binary image is visible when viewed as a regular image
-        return np.where(image > threshold, 255, 0).astype(np.uint8)
+        return (image > threshold).astype(np.uint32)
 
     # remove small objects
     @BatchProcessingRegistry.register(
@@ -683,51 +724,29 @@ if SKIMAGE_AVAILABLE:
         # Use skimage's invert function which handles all data types properly
         return skimage.util.invert(image_copy)
 
-    @BatchProcessingRegistry.register(
-        name="Semantic to Instance Segmentation",
-        suffix="_instance",
-        description="Convert semantic segmentation masks to instance segmentation labels using connected components",
-    )
-    def semantic_to_instance(image: np.ndarray) -> np.ndarray:
-        """
-        Convert semantic segmentation masks to instance segmentation labels.
-
-        This function takes a binary or multi-class semantic segmentation mask and
-        converts it to an instance segmentation by finding connected components.
-        Each connected region receives a unique label.
-
-        Parameters:
-        -----------
-        image : numpy.ndarray
-            Input semantic segmentation mask
-
-        Returns:
-        --------
-        numpy.ndarray
-            Instance segmentation with unique labels for each connected component
-        """
-        # Create a copy to avoid modifying the original
-        instance_mask = image.copy()
-
-        # If the input is multi-class, process each class separately
-        if np.max(instance_mask) > 1:
+    def _semantic_to_instance_block(mask_block: np.ndarray) -> np.ndarray:
+        """Connected-component labeling for a single 2D or 3D (ZYX) mask block."""
+        connectivity = mask_block.ndim
+        if np.max(mask_block) > 1:
             # Get unique non-zero class values
-            class_values = np.unique(instance_mask)
+            class_values = np.unique(mask_block)
             class_values = class_values[
                 class_values > 0
             ]  # Remove background (0)
 
             # Create an empty output mask
-            result = np.zeros_like(instance_mask, dtype=np.uint32)
+            result = np.zeros_like(mask_block, dtype=np.uint32)
 
             # Process each class
             label_offset = 0
             for class_val in class_values:
                 # Create binary mask for this class
-                binary_mask = (instance_mask == class_val).astype(np.uint8)
+                binary_mask = (mask_block == class_val).astype(np.uint8)
 
                 # Find connected components
-                labeled = skimage.measure.label(binary_mask, connectivity=2)
+                labeled = skimage.measure.label(
+                    binary_mask, connectivity=connectivity
+                )
 
                 # Skip if no components found
                 if np.max(labeled) == 0:
@@ -741,11 +760,60 @@ if SKIMAGE_AVAILABLE:
 
                 # Update offset for next class
                 label_offset = np.max(result)
+
+            return result
         else:
             # For binary masks, just find connected components
-            result = skimage.measure.label(instance_mask > 0, connectivity=2)
+            return skimage.measure.label(
+                mask_block > 0, connectivity=connectivity
+            ).astype(np.uint32)
 
-        return result.astype(np.uint32)
+    @BatchProcessingRegistry.register(
+        name="Semantic to Instance Segmentation",
+        suffix="_instance",
+        description="Convert semantic segmentation masks to instance segmentation labels using connected components. Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice. For multichannel images, select which channel to process.",
+        parameters={
+            "channel": {
+                "type": str,
+                "default": "all",
+                "widget_type": "channel_selector",
+                "description": "Select which channel to process (automatically detected from multichannel images)",
+            },
+        },
+    )
+    def semantic_to_instance(
+        image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
+    ) -> np.ndarray:
+        """
+        Convert semantic segmentation masks to instance segmentation labels.
+
+        This function takes a binary or multi-class semantic segmentation mask and
+        converts it to an instance segmentation by finding connected components.
+        Each connected region receives a unique label.
+
+        Args:
+            image: Input mask (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                            T and C axes are processed independently (labels
+                            restart per timepoint/channel). Z is kept
+                            together with Y,X so a 3D object spanning
+                            multiple Z slices keeps a single label. YX/Auto
+                            (2D only): processed as a single block.
+            channel: For multichannel images, restrict processing to a single channel
+                    (extracted upstream before this function runs).
+
+        Returns:
+            Instance segmentation with unique labels for each connected component
+            (labels restart per timepoint/channel when processed independently)
+        """
+        # Create a copy to avoid modifying the original
+        instance_mask = image.copy()
+        result = np.zeros_like(instance_mask, dtype=np.uint32)
+        for index, block in _iter_dimension_blocks(
+            instance_mask, dimension_order
+        ):
+            result[index] = _semantic_to_instance_block(block)
+        return result
 
     # Note: Old "Extract Region Properties" function removed
     # Use "Extract Regionprops to CSV" from regionprops_analysis.py instead
@@ -774,19 +842,45 @@ else:
 @BatchProcessingRegistry.register(
     name="Binary to Labels",
     suffix="_labels",
-    description="Convert binary images to label images (connected components)",
+    description="Convert binary images to label images (connected components). Supports dimension_order hint (TYX, ZYX, etc.) to process frame-by-frame or slice-by-slice. For multichannel images, select which channel to process.",
+    parameters={
+        "channel": {
+            "type": str,
+            "default": "all",
+            "widget_type": "channel_selector",
+            "description": "Select which channel to process (automatically detected from multichannel images)",
+        },
+    },
 )
-def binary_to_labels(image: np.ndarray) -> np.ndarray:
+def binary_to_labels(
+    image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
+) -> np.ndarray:
     """
-    Convert binary images to label images (connected components)
+    Convert binary images to label images (connected components).
+
+    Args:
+        image: Input binary image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+        dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
+                        T and C axes are processed independently (labels
+                        restart per timepoint/channel). Z is kept together
+                        with Y,X so a 3D object spanning multiple Z slices
+                        keeps a single label instead of one per slice.
+                        YX/Auto (2D only): processed as a single block.
+        channel: For multichannel images, restrict processing to a single channel
+                (extracted upstream before this function runs).
+
+    Returns:
+        Label image with unique labels per connected component
+        (labels restart per timepoint/channel when processed independently)
     """
     # Make a copy of the input image to avoid modifying the original
     label_image = image.copy()
-
-    # Convert binary image to label image using connected components
-    label_image = skimage.measure.label(label_image, connectivity=2)
-
-    return label_image
+    result = np.zeros_like(label_image, dtype=np.uint32)
+    for index, block in _iter_dimension_blocks(label_image, dimension_order):
+        result[index] = skimage.measure.label(
+            block, connectivity=block.ndim
+        ).astype(np.uint32)
+    return result
 
 
 @BatchProcessingRegistry.register(
@@ -842,8 +936,8 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
         "dim_order": {
             "type": str,
             "default": "auto",
-            "options": ["auto", "YX", "ZYX", "TYX", "TZYX"],
-            "description": "Input dimension order. 'auto' maps ndim 2->YX, 3->ZYX, 4->TZYX.",
+            "options": ["auto", "YX", "ZYX", "TYX", "TZYX", "TCZYX"],
+            "description": "Input dimension order. 'auto' maps ndim 2->YX, 3->ZYX, 4->TZYX, 5->TCZYX.",
         },
         "channel": {
             "type": str,
@@ -1520,10 +1614,118 @@ if SKIMAGE_AVAILABLE:
 
         return result
 
+    def _spatial_window_size_tuple(dimension_order, ndim, size):
+        """
+        Build a per-axis window size: `size` on axes a local filter should
+        span spatially, 1 on axes that must stay independent (T, C, ...).
+        Mirrors the branching used for the median filter in scipy_filters.py
+        so TYX/TCYX/etc. stacks are filtered per-slice, not blended across
+        T/C. A window of 1 along an axis is odd (a threshold_local
+        requirement) and, for the Gaussian method, corresponds to sigma=0
+        i.e. no smoothing along that axis.
+        """
+        if dimension_order in ["TYX", "CYX"] and ndim == 3:
+            return (1, size, size)
+        elif dimension_order in ["TCYX", "TZYX", "ZCYX"] and ndim == 4:
+            return (1, 1, size, size)
+        elif dimension_order in ["TZCYX", "TCZYX"] and ndim == 5:
+            return (1, 1, 1, size, size)
+        elif dimension_order == "ZYX" and ndim == 3:
+            return (size, size, size)
+        elif ndim >= 3:
+            # Auto or an unrecognized hint on data with more than 2 axes:
+            # assume the last two axes are spatial (Y, X) and everything
+            # before them (T, C, Z, ...) stays independent. Filtering across
+            # those leading axes by default would blend unrelated
+            # frames/channels together, and for Zarr chunks with size 1
+            # along those axes (typical for TCZYX layouts) a >0 map_overlap
+            # depth on them is invalid and raises.
+            return (1,) * (ndim - 2) + (size, size)
+        else:
+            # YX (2D): filter every axis
+            return (size,) * ndim
+
+    def _clamp_overlap_depth(image, depth, label):
+        """
+        dask.array.map_overlap requires depth to be smaller than the chunk
+        size along that axis, or it raises. The dimension-aware window
+        sizing above already keeps depth at 0 on axes that must stay
+        independent, but as a last-resort safety net for parameter
+        combinations it doesn't cover (e.g. a large window on an axis that
+        happens to have small chunks), clamp instead of crashing.
+        """
+        clamped = dict(depth)
+        for axis, d in depth.items():
+            if d <= 0:
+                continue
+            min_chunk = min(image.chunks[axis])
+            max_allowed = max(0, min_chunk - 1)
+            if d > max_allowed:
+                print(
+                    f"Warning: {label} overlap depth {d} on axis {axis} "
+                    f"exceeds smallest chunk size {min_chunk}; clamping to "
+                    f"{max_allowed} (results near chunk boundaries on this "
+                    "axis may be slightly less accurate)."
+                )
+                clamped[axis] = max_allowed
+        return clamped
+
+    def _adaptive_threshold_bright_dask(
+        image, block_size: int, offset: float, dimension_order: str
+    ):
+        """
+        Chunk-wise version of adaptive_threshold_bright using map_overlap,
+        so only a halo around each chunk is exchanged instead of loading the
+        whole array into memory.
+        """
+        import dask.array as da
+
+        if image.dtype != np.uint8:
+            image = image.map_blocks(skimage.img_as_ubyte, dtype=np.uint8)
+
+        size_tuple = _spatial_window_size_tuple(
+            dimension_order, image.ndim, block_size
+        )
+
+        # threshold_local's default method is 'gaussian', with
+        # sigma = (block_size - 1) / 6 and a truncation radius of
+        # 4 * sigma (skimage.filters.gaussian's default truncate=4.0).
+        # That halo is wider than block_size // 2, so it's computed
+        # explicitly here rather than reusing the median filter's
+        # `size // 2` rule of thumb.
+        depth = {}
+        for axis, axis_size in enumerate(size_tuple):
+            if axis_size <= 1:
+                depth[axis] = 0
+            else:
+                sigma = (axis_size - 1) / 6.0
+                depth[axis] = int(4.0 * sigma + 0.5)
+        depth = _clamp_overlap_depth(image, depth, "adaptive threshold")
+
+        print(
+            f"Applying adaptive threshold to Dask array with shape "
+            f"{image.shape}, chunks {image.chunks}, window={size_tuple}, "
+            f"overlap depth={depth}"
+        )
+
+        def _threshold_block(block):
+            threshold = skimage.filters.threshold_local(
+                block, block_size=size_tuple, offset=offset
+            )
+            return ((block > threshold) * 255).astype(np.uint8)
+
+        return da.map_overlap(
+            _threshold_block,
+            image,
+            depth=depth,
+            boundary="reflect",
+            dtype=np.uint8,
+        )
+
     @BatchProcessingRegistry.register(
         name="Adaptive Threshold (Bright Bias)",
         suffix="_adaptive_bright",
-        description="Adaptive thresholding biased to keep bright regions. For multichannel images, select which channel(s) to process.",
+        description="Adaptive thresholding biased to keep bright regions. Supports dimension_order hint (TYX, ZYX, etc.) so multi-dimensional stacks are thresholded per-slice instead of blending the neighborhood across T/C. For multichannel images, select which channel(s) to process.",
         parameters={
             "block_size": {
                 "type": int,
@@ -1548,7 +1750,12 @@ if SKIMAGE_AVAILABLE:
         },
     )
     def adaptive_threshold_bright(
-        image: np.ndarray, block_size: int = 35, offset: float = -10.0, channel: str = "all"
+        image: np.ndarray,
+        block_size: int = 35,
+        offset: float = -10.0,
+        dimension_order: str = "Auto",
+        channel: str = "all",
+        _source_filepath: str = None,
     ) -> np.ndarray:
         """
         Apply adaptive thresholding with bias toward bright regions.
@@ -1559,14 +1766,21 @@ if SKIMAGE_AVAILABLE:
 
         Parameters:
         -----------
-        image : numpy.ndarray
-            Input image array
+        image : numpy.ndarray or dask.array
+            Input image array (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.). Can be a
+            Dask array, in which case chunks are thresholded in place (with a
+            halo) via map_overlap instead of loading the whole array.
         block_size : int
             Size of the local neighborhood for threshold calculation. Must be odd.
             Larger values consider broader neighborhoods.
         offset : float
             Value subtracted from the local mean. Negative values (like -10)
             lower the threshold, keeping more bright pixels.
+        dimension_order : str
+            Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.).
+            If TYX/CYX/TCYX/etc.: the neighborhood is computed per frame/channel
+            (2D, or 3D for ZYX) instead of spanning across T/C, which would
+            otherwise blend unrelated frames into each other's local threshold.
 
         Returns:
         --------
@@ -1577,13 +1791,23 @@ if SKIMAGE_AVAILABLE:
         if block_size % 2 == 0:
             block_size += 1
 
+        is_dask = hasattr(image, "chunks") and hasattr(image, "map_blocks")
+        if is_dask:
+            return _adaptive_threshold_bright_dask(
+                image, block_size, offset, dimension_order
+            )
+
         # Convert to uint8 if needed
         if image.dtype != np.uint8:
             image = skimage.img_as_ubyte(image)
 
+        size_tuple = _spatial_window_size_tuple(
+            dimension_order, image.ndim, block_size
+        )
+
         # Apply adaptive thresholding
         threshold = skimage.filters.threshold_local(
-            image, block_size=block_size, offset=offset
+            image, block_size=size_tuple, offset=offset
         )
 
         # Create binary mask

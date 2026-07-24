@@ -45,6 +45,77 @@ def _get_multiscales(attrs: dict) -> list:
     return []
 
 
+def _extract_tiff_physical_scale(source_path: str, axes: str) -> dict:
+    """TIFF counterpart of the zarr branch in _extract_source_physical_scale
+    below: reads OME PhysicalSize{X,Y,Z} from an OME-TIFF's own XML metadata
+    (mirrors _reader.py's _ome_scale_for_series, but from a path rather than
+    an already-open TiffFile, and keyed by axis letter to match this
+    module's dict contract)."""
+    try:
+        with tifffile.TiffFile(source_path) as tf:
+            if not getattr(tf, "is_ome", False) or not tf.ome_metadata:
+                return {}
+            pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"][
+                "Pixels"
+            ]
+            if isinstance(pixels, list):
+                pixels = pixels[0]
+    except Exception:
+        return {}
+    if not isinstance(pixels, dict):
+        return {}
+    result = {}
+    for ax_char in axes:
+        ax_upper = ax_char.upper()
+        if ax_upper in ("X", "Y", "Z"):
+            val = pixels.get(f"PhysicalSize{ax_upper}")
+            if val is not None:
+                with suppress(TypeError, ValueError):
+                    result[ax_upper] = float(val)
+    return result
+
+
+def _extract_source_physical_scale(source_path: Optional[str], axes: str) -> dict:
+    """
+    Return {"X": scale, "Y": scale, "Z": scale} (only for axes present in
+    `axes`) read from the source's level-0 OME metadata, or {} if
+    unavailable. Used to embed correct voxel spacing in OME-TIFF output so
+    it displays at the same physical extent as the source in viewers that
+    don't otherwise know the two files should share a scale.
+    """
+    if not source_path:
+        return {}
+    if source_path.lower().endswith((".tif", ".tiff")):
+        return _extract_tiff_physical_scale(source_path, axes)
+    attrs = _read_root_attrs(source_path)
+    multiscales = _get_multiscales(attrs)
+    if not multiscales:
+        return {}
+    src_ms = multiscales[0]
+    if not isinstance(src_ms, dict):
+        return {}
+    src_axis_names = [
+        str(a.get("name") if isinstance(a, dict) else a).lower()
+        for a in src_ms.get("axes", [])
+    ]
+    src_datasets = src_ms.get("datasets", [])
+    if not src_datasets:
+        return {}
+    for ctf in src_datasets[0].get("coordinateTransformations", []):
+        if not isinstance(ctf, dict) or ctf.get("type") != "scale":
+            continue
+        scale = ctf.get("scale")
+        if not (isinstance(scale, list) and len(scale) == len(src_axis_names)):
+            continue
+        result = {}
+        for ax_char in axes:
+            ax_lower = ax_char.lower()
+            if ax_lower in ("x", "y", "z") and ax_lower in src_axis_names:
+                result[ax_char.upper()] = scale[src_axis_names.index(ax_lower)]
+        return result
+    return {}
+
+
 def write_labels_with_source_metadata(
     labels: Any,
     source_path: Optional[str],
@@ -99,6 +170,11 @@ def write_labels_with_source_metadata(
         )
 
         # Align output per-level coordinate transforms to source metadata.
+        # Source and output axes can differ (e.g. a channel axis dropped
+        # during processing), so transforms are rebuilt per-axis by name
+        # rather than copied wholesale — copying a 5-value TCZYX scale onto
+        # a 4-axis TZYX output would silently misassign Z's scale to the
+        # dropped channel's slot.
         out_zattrs_path = os.path.join(output_path, ".zattrs")
         out_zarr_json_path = os.path.join(output_path, "zarr.json")
         if (os.path.exists(out_zattrs_path) or os.path.exists(out_zarr_json_path)) and src_datasets:
@@ -118,17 +194,59 @@ def write_labels_with_source_metadata(
                     target_path = out_zarr_json_path
                     write_back_as_zarr_json = True
 
-                out_ms_list = out_attrs.get("multiscales", [])
-                if isinstance(out_ms_list, list) and out_ms_list:
+                # _get_multiscales handles both the flat ``multiscales`` key
+                # and the NGFF-v0.5-style ``ome.multiscales`` nesting that
+                # zarr_format=3 output actually uses; a plain
+                # out_attrs.get("multiscales") misses the latter and makes
+                # this whole block a silent no-op.
+                out_ms_list = _get_multiscales(out_attrs)
+                if out_ms_list:
                     out_ms = out_ms_list[0]
                     out_ds = out_ms.get("datasets", [])
+
+                    src_axis_names = [
+                        str(
+                            a.get("name") if isinstance(a, dict) else a
+                        ).lower()
+                        for a in (
+                            src_ms.get("axes", [])
+                            if isinstance(src_ms, dict)
+                            else []
+                        )
+                    ]
+
+                    def _aligned_scale(src_ctf_list):
+                        for ctf in src_ctf_list:
+                            if (
+                                not isinstance(ctf, dict)
+                                or ctf.get("type") != "scale"
+                            ):
+                                continue
+                            src_scale = ctf.get("scale")
+                            if not (
+                                isinstance(src_scale, list)
+                                and len(src_scale) == len(src_axis_names)
+                            ):
+                                continue
+                            return [
+                                src_scale[src_axis_names.index(ax_char)]
+                                if ax_char in src_axis_names
+                                else 1.0
+                                for ax_char in axes
+                            ]
+                        return None
 
                     for i, ds in enumerate(out_ds):
                         if i >= len(src_datasets):
                             break
                         src_ctf = src_datasets[i].get("coordinateTransformations")
-                        if isinstance(src_ctf, list) and src_ctf:
-                            ds["coordinateTransformations"] = src_ctf
+                        if not (isinstance(src_ctf, list) and src_ctf):
+                            continue
+                        aligned_scale = _aligned_scale(src_ctf)
+                        if aligned_scale is not None:
+                            ds["coordinateTransformations"] = [
+                                {"type": "scale", "scale": aligned_scale}
+                            ]
 
                     if write_back_as_zarr_json:
                         with open(target_path, encoding="utf-8") as f:
@@ -161,6 +279,13 @@ def write_labels_with_source_metadata(
         fallback = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
         axes = fallback.get(labels_ndim, "YX")
 
+    ome_metadata = {"axes": axes}
+    for ax_name, ax_scale in _extract_source_physical_scale(
+        source_path, axes
+    ).items():
+        ome_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+        ome_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
+
     output_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(output_dir, exist_ok=True)
     tmp_output_path = os.path.join(
@@ -175,7 +300,7 @@ def write_labels_with_source_metadata(
                 np.asarray(labels, dtype=labels_dtype),
                 dtype=labels_dtype,
                 ome=True,
-                metadata={"axes": axes},
+                metadata=ome_metadata,
                 compression="zlib",
                 photometric="minisblack",
                 bigtiff=use_bigtiff,
@@ -197,7 +322,7 @@ def write_labels_with_source_metadata(
                 shape=labels_shape,
                 dtype=labels_dtype,
                 ome=True,
-                metadata={"axes": axes},
+                metadata=ome_metadata,
                 compression="zlib",
                 photometric="minisblack",
                 bigtiff=use_bigtiff,

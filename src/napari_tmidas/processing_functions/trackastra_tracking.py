@@ -964,7 +964,7 @@ else:
         "dimension_order": {
             "type": str,
             "default": "Auto",
-            "options": ["Auto", "TYX", "TZYX", "TCZYX", "TCYX"],
+            "options": ["Auto", "TYX", "TZYX", "TCZYX", "TZCYX", "TCYX"],
             "description": "Dimension order hint for raw images (e.g., TCZYX for time-Z-channel-Y-X). Helps with channel detection when loading label files.",
         },
         "batch_size": {

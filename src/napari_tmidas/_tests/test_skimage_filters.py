@@ -42,19 +42,20 @@ class TestSkimageFilters:
         assert result.dtype == image.dtype
 
     def test_simple_thresholding_returns_uint32(self):
-        """Test that manual thresholding returns uint8 with value 255 for proper display"""
+        """Manual thresholding returns a uint32 binary label image (1=foreground,
+        0=background) so it's recognized as a Labels layer, not an Image layer."""
         image = np.array([[0, 100, 200], [50, 150, 255]], dtype=np.uint8)
 
         result = simple_thresholding(image, threshold=128)
 
-        # Check dtype is uint8
-        assert result.dtype == np.uint8
+        # Check dtype is uint32 (label-typed, see is_label_image)
+        assert result.dtype == np.uint32
 
-        # Check values are binary (0 or 255)
-        assert set(np.unique(result)).issubset({0, 255})
+        # Check values are binary (0 or 1)
+        assert set(np.unique(result)).issubset({0, 1})
 
         # Check correct thresholding
-        expected = np.array([[0, 0, 255], [0, 255, 255]], dtype=np.uint8)
+        expected = np.array([[0, 0, 1], [0, 1, 1]], dtype=np.uint32)
         np.testing.assert_array_equal(result, expected)
 
     def test_simple_thresholding_different_thresholds(self):
@@ -63,16 +64,16 @@ class TestSkimageFilters:
 
         # Test with low threshold
         result_low = simple_thresholding(image, threshold=50)
-        assert result_low.dtype == np.uint8
+        assert result_low.dtype == np.uint32
         assert (
-            np.sum(result_low == 255) > np.prod(result_low.shape) * 0.8
+            np.sum(result_low == 1) > np.prod(result_low.shape) * 0.8
         )  # Most pixels above 50
 
         # Test with high threshold
         result_high = simple_thresholding(image, threshold=200)
-        assert result_high.dtype == np.uint8
+        assert result_high.dtype == np.uint32
         assert (
-            np.sum(result_high == 255) < np.prod(result_high.shape) * 0.3
+            np.sum(result_high == 1) < np.prod(result_high.shape) * 0.3
         )  # Most pixels below 200
 
 

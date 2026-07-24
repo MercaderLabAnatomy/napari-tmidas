@@ -185,8 +185,13 @@ from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 
 sys.path.append("src/napari_tmidas")
+from napari_tmidas._reader import tiff_reader_function
 from napari_tmidas.processing_functions import (
     discover_and_load_processing_functions,
+)
+from napari_tmidas.processing_functions.ome_output_utils import (
+    _extract_source_physical_scale,
+    write_labels_with_source_metadata,
 )
 
 # Import cancellation functions for subprocess-based processing
@@ -211,13 +216,68 @@ except ImportError:
 
 try:
     import dask.array as da
+    from dask.callbacks import Callback as _DaskCallback
 
     DASK_AVAILABLE = True
 except ImportError:
     DASK_AVAILABLE = False
+    _DaskCallback = None
     print(
         "Tip: Install dask for better performance with large datasets: pip install dask"
     )
+
+
+if DASK_AVAILABLE:
+
+    class _ChunkProgressCallback(_DaskCallback):
+        """
+        Prints discrete "label: NN% (done/total chunks)" lines as a Dask
+        graph is computed, instead of dask.diagnostics.ProgressBar's
+        carriage-return redraws.
+
+        Files are processed concurrently in a ThreadPoolExecutor (see
+        ProcessingWorker below), each calling .compute() in its own thread.
+        A redrawing single-line bar (or dask's global Callback.register())
+        would garble across threads sharing one stdout line. Passing this
+        callback explicitly via ``compute(callbacks=[cb.pair])`` instead of
+        the `with callback:` global-registration form keeps it scoped to
+        this one compute() call, so concurrent files' progress lines
+        interleave cleanly rather than corrupting each other.
+        """
+
+        def __init__(self, label: str, milestone_pct: int = 10):
+            self.label = label
+            self.milestone_pct = milestone_pct
+            self._total = 0
+            self._done = 0
+            self._last_pct = -1
+            super().__init__()
+
+        @property
+        def pair(self):
+            """This callback normalized to the 5-tuple compute(callbacks=...) expects."""
+            return self._callback
+
+        def _start_state(self, dsk, state):
+            self._total = len(state["ready"]) + len(state["waiting"])
+            self._done = 0
+            self._last_pct = -1
+            if self._total:
+                print(f"[{self.label}] processing {self._total} chunks...")
+
+        def _posttask(self, key, result, dsk, state, worker_id):
+            if not self._total:
+                return
+            self._done += 1
+            pct = int(100 * self._done / self._total)
+            if (
+                pct >= self._last_pct + self.milestone_pct
+                or self._done == self._total
+            ):
+                self._last_pct = pct
+                print(
+                    f"[{self.label}] {pct}% ({self._done}/{self._total} chunks)"
+                )
 
 
 def is_label_image(image: np.ndarray) -> bool:
@@ -901,6 +961,48 @@ def detect_channels_in_image(image_data: Union[np.ndarray, list]) -> Tuple[int, 
     return _detect_channels_from_shape(image_data.shape)
 
 
+def _resolve_output_dim_order(
+    dimension_order_hint: str, channel_was_extracted: bool, ndim: int
+) -> str:
+    """
+    Resolve the correct axes string for a processed output array.
+
+    Blindly slicing a fixed "TCZYX" template (the previous approach) only
+    happens to be correct when the output is genuinely 5-D TCZYX; for any
+    other ndim it mislabels axes (e.g. a channel-free (T, Z, Y, X) array
+    would get "TCZY" — Z mislabeled as a channel, X missing entirely). This
+    derives the axes from the user's actual dimension_order hint instead,
+    stripping "C" when a single channel was already extracted upstream.
+    """
+    hint = str(dimension_order_hint or "Auto").upper()
+    if hint not in ("AUTO", "NONE", ""):
+        resolved = hint.replace("C", "") if channel_was_extracted else hint
+        if len(resolved) == ndim:
+            return resolved
+
+    return {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}.get(ndim, "YX")
+
+
+def _resolve_output_scale(source_path: Optional[str], axes: str) -> tuple:
+    """
+    Per-axis physical scale for a "regular" (non-label) processed output,
+    aligned to `axes` (e.g. "TCZYX"), defaulting to 1.0 on axes without a
+    known physical size (T, C, ...).
+
+    write_labels_with_source_metadata already does this for label outputs
+    via _extract_source_physical_scale — without it here, a processed
+    image's saved scale silently resets to isotropic (1,1,1,...), so it no
+    longer occupies the same physical extent as the source when the two are
+    viewed together (see _label_inspection.py's per-axis `label_scale`,
+    which exists for exactly this reason: two arrays only look the same
+    "size" in a viewer if their scale is set correctly, not just their
+    pixel shape).
+    """
+    axes = str(axes or "").upper()
+    scale_by_axis = _extract_source_physical_scale(source_path, axes)
+    return tuple(scale_by_axis.get(ax, 1.0) for ax in axes)
+
+
 def save_as_zarr(
     data: np.ndarray,
     filepath: str,
@@ -1316,6 +1418,44 @@ class ProcessedFilesTableWidget(QTableWidget):
             first_dim = meaningful_dims[0]
             return first_dim > 10
 
+    def _promote_label_dtype_layers(self, layers):
+        """
+        napari-ome-zarr's reader (and this app's other loaders) decide
+        Image vs Labels from OME-NGFF metadata or a filename heuristic, not
+        from dtype — so label-typed arrays (int32/uint32/int64/uint64,
+        written by cellpose/Otsu-instance/binary-to-labels/etc.) reopen as
+        plain Image layers unless the source has the dedicated NGFF
+        `image-label` metadata convention, which this app's own zarr writer
+        does not produce. Swap any such Image layer for an equivalent
+        Labels layer after the fact, so segmentation results are recognized
+        correctly regardless of how/where they were written.
+        """
+        from napari.layers import Image as _NapariImage
+
+        promoted = []
+        for layer in layers:
+            if isinstance(layer, _NapariImage) and is_label_image(
+                layer.data
+            ):
+                idx = self.viewer.layers.index(layer)
+                name, data, scale, translate = (
+                    layer.name,
+                    layer.data,
+                    layer.scale,
+                    layer.translate,
+                )
+                self.viewer.layers.remove(layer)
+                new_layer = self.viewer.add_labels(
+                    data, name=name, scale=scale, translate=translate
+                )
+                new_idx = self.viewer.layers.index(new_layer)
+                if new_idx != idx:
+                    self.viewer.layers.move(new_idx, idx)
+                promoted.append(new_layer)
+            else:
+                promoted.append(layer)
+        return promoted
+
         return False
 
     def _load_original_image(self, filepath: str):
@@ -1350,8 +1490,14 @@ class ProcessedFilesTableWidget(QTableWidget):
                     # Track the added layers
                     if layers:
                         if isinstance(layers, list):
+                            layers = self._promote_label_dtype_layers(
+                                layers
+                            )
                             self.current_original_images.extend(layers)
                         else:
+                            (layers,) = self._promote_label_dtype_layers(
+                                [layers]
+                            )
                             self.current_original_images.append(layers)
 
                         # Check if we should enable 3D view
@@ -1379,8 +1525,24 @@ class ProcessedFilesTableWidget(QTableWidget):
                     )
 
             # Fallback for non-zarr files or if napari-ome-zarr fails
-            # Load image using the unified loader function
-            image_data = load_image_file(filepath)
+            # For TIFF, use the scale-aware reader directly (returns the
+            # same (data, add_kwargs, layer_type) list format the
+            # isinstance(..., list) branch below already handles) instead
+            # of load_image_file()'s bare tifffile.imread(), which drops
+            # OME PhysicalSize metadata entirely — otherwise an OME-TIFF
+            # with real voxel spacing loads at scale=(1,1,1,...) here, a
+            # different physical extent than the same data opened as zarr.
+            if filepath.lower().endswith((".tif", ".tiff")) and _HAS_TIFFFILE:
+                try:
+                    image_data = tiff_reader_function(filepath)
+                except Exception as e:
+                    print(
+                        f"Scale-aware TIFF reader failed: {e}, falling back to load_image_file"
+                    )
+                    image_data = load_image_file(filepath)
+            else:
+                # Load image using the unified loader function
+                image_data = load_image_file(filepath)
 
             # Handle multi-layer data from OME-Zarr or enhanced basic loading
             if isinstance(image_data, list):
@@ -1417,6 +1579,15 @@ class ProcessedFilesTableWidget(QTableWidget):
                         layer_type = "image"
 
                     base_filename = os.path.basename(filepath)
+
+                    # A label-typed array (uint32/int32/etc.) reported as
+                    # "image" by the reader is misclassified — see
+                    # _promote_label_dtype_layers for why the readers get
+                    # this wrong. Route it to add_labels below instead
+                    # (and skip the channel_axis-splitting heuristic, which
+                    # doesn't apply to discrete label IDs).
+                    if layer_type == "image" and is_label_image(data):
+                        layer_type = "labels"
 
                     if layer_type == "image":
                         # Check if this is a multi-channel image that needs to be split using channel_axis
@@ -1663,6 +1834,9 @@ class ProcessedFilesTableWidget(QTableWidget):
                     # Track the added layers and rename them as processed
                     if layers:
                         if isinstance(layers, list):
+                            layers = self._promote_label_dtype_layers(
+                                layers
+                            )
                             for layer in layers:
                                 layer.name = f"Processed {layer.name}"
                                 # Force level-0 in case napari still treats
@@ -1671,6 +1845,9 @@ class ProcessedFilesTableWidget(QTableWidget):
                                     layer.data_level = 0
                                 self.current_processed_images.append(layer)
                         else:
+                            (layers,) = self._promote_label_dtype_layers(
+                                [layers]
+                            )
                             layers.name = f"Processed {layers.name}"
                             self.current_processed_images.append(layers)
 
@@ -1716,8 +1893,24 @@ class ProcessedFilesTableWidget(QTableWidget):
                     )
 
             # Fallback for non-zarr files or if napari-ome-zarr fails
-            # Load image using the unified loader function
-            image_data = load_image_file(filepath)
+            # For TIFF, use the scale-aware reader directly (returns the
+            # same (data, add_kwargs, layer_type) list format the
+            # isinstance(..., list) branch below already handles) instead
+            # of load_image_file()'s bare tifffile.imread(), which drops
+            # OME PhysicalSize metadata entirely — otherwise an OME-TIFF
+            # with real voxel spacing loads at scale=(1,1,1,...) here, a
+            # different physical extent than the same data opened as zarr.
+            if filepath.lower().endswith((".tif", ".tiff")) and _HAS_TIFFFILE:
+                try:
+                    image_data = tiff_reader_function(filepath)
+                except Exception as e:
+                    print(
+                        f"Scale-aware TIFF reader failed: {e}, falling back to load_image_file"
+                    )
+                    image_data = load_image_file(filepath)
+            else:
+                # Load image using the unified loader function
+                image_data = load_image_file(filepath)
 
             # Handle multi-layer data from OME-Zarr or enhanced basic loading
             if isinstance(image_data, list):
@@ -1755,6 +1948,15 @@ class ProcessedFilesTableWidget(QTableWidget):
 
                     # Ensure proper naming and colormaps for processed images
                     filename = os.path.basename(filepath)
+
+                    # A label-typed array (uint32/int32/etc.) reported as
+                    # "image" by the reader is misclassified — see
+                    # _promote_label_dtype_layers for why the readers get
+                    # this wrong. Route it to add_labels below instead
+                    # (and skip the channel_axis-splitting heuristic, which
+                    # doesn't apply to discrete label IDs).
+                    if layer_type == "image" and is_label_image(data):
+                        layer_type = "labels"
 
                     if layer_type == "image":
                         # Check if this is a multi-channel image that needs to be split using channel_axis
@@ -2349,7 +2551,7 @@ class ProcessingWorker(QThread):
         self.output_suffix = output_suffix
         self.output_format = output_format  # 'tiff' or 'zarr'
         self.stop_requested = False
-        self.thread_count = max(1, (os.cpu_count() or 4) // 2)  # Default value
+        self.thread_count = 1  # Safe default; overridden by the UI's thread-count spinbox
 
     def stop(self):
         """Request the worker to stop processing"""
@@ -2531,7 +2733,10 @@ class ProcessingWorker(QThread):
                 print("Converting dask array to numpy for processing...")
                 # For very large arrays, we might want to process in chunks
                 try:
-                    image = image.compute()
+                    progress_cb = _ChunkProgressCallback(
+                        f"{os.path.basename(filepath)} (load)"
+                    )
+                    image = image.compute(callbacks=[progress_cb.pair])
                 except MemoryError:
                     print(
                         "Memory error computing dask array, trying chunked processing..."
@@ -2551,6 +2756,7 @@ class ProcessingWorker(QThread):
             channel_param = (self.param_values or {}).get("channel", None)
             if isinstance(channel_param, str) and not channel_param.strip():
                 channel_param = None
+            channel_axis_removed = False
             if (
                 channel_param is not None
                 and channel_param != "all"
@@ -2558,14 +2764,13 @@ class ProcessingWorker(QThread):
                 and hasattr(image, "shape")
             ):
                 try:
-                    from napari_tmidas._file_selector import detect_channels_for_file
-
                     num_ch, ch_axis = detect_channels_for_file(filepath, image)
 
                     ch_idx = int(channel_param)
                     if num_ch > 1 and ch_axis is not None and ch_axis >= 0:
                         if 0 <= ch_idx < num_ch:
                             image = np.take(image, ch_idx, axis=ch_axis)
+                            channel_axis_removed = True
                             print(
                                 f"Channel {ch_idx} extracted "
                                 f"(axis {ch_axis}): new shape {image.shape}"
@@ -2577,6 +2782,14 @@ class ProcessingWorker(QThread):
                             )
                 except Exception as _ce:
                     print(f"Warning: channel extraction failed: {_ce}")
+
+            # Dimension-order hint as selected in the UI, used below to write
+            # correct axes metadata on saved outputs (see
+            # _resolve_output_dim_order): reflects the *input's* axis order,
+            # so "C" must be stripped when a single channel was extracted.
+            dimension_order_hint = (self.param_values or {}).get(
+                "dimension_order", "Auto"
+            )
 
             # Apply processing with parameters
             # Always pass source path, output folder and suffix so functions
@@ -2684,7 +2897,12 @@ class ProcessingWorker(QThread):
                     f"Computing Dask result (shape: {processed_result.shape})..."
                 )
                 try:
-                    processed_result = processed_result.compute()
+                    progress_cb = _ChunkProgressCallback(
+                        f"{os.path.basename(filepath)} (process)"
+                    )
+                    processed_result = processed_result.compute(
+                        callbacks=[progress_cb.pair]
+                    )
                     print("Dask computation complete!")
                 except MemoryError as e:
                     print(f"Memory error during Dask computation: {e}")
@@ -2824,29 +3042,24 @@ class ProcessingWorker(QThread):
                             f"Layer {idx + 1} data range: {data_min} to {data_max}"
                         )
 
-                        # For very large files, use BigTIFF format
-                        use_bigtiff = size_gb > 2.0
-
                         # Layer subdivision outputs should always be saved as uint32
                         # to ensure Napari auto-detects them as labels
                         save_dtype = np.uint32
+                        resolved_dim_order = _resolve_output_dim_order(
+                            dimension_order_hint, channel_axis_removed, img.ndim
+                        )
 
                         print(
-                            f"Saving layer {layer_name} as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                            f"Saving layer {layer_name} as {save_dtype.__name__} "
+                            f"(dim_order={resolved_dim_order})"
                         )
-                        if self.output_format == "zarr":
-                            save_as_zarr(
-                                img.astype(save_dtype),
-                                output_path,
-                                axes="TCZYX"[: img.ndim],
-                            )
-                        else:
-                            tifffile.imwrite(
-                                output_path,
-                                img.astype(save_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
+                        write_labels_with_source_metadata(
+                            img.astype(save_dtype),
+                            filepath,
+                            output_path,
+                            self.output_format,
+                            resolved_dim_order,
+                        )
 
                         processed_files.append(output_path)
                 else:
@@ -2884,6 +3097,9 @@ class ProcessingWorker(QThread):
 
                         # Check if this is a label image based on dtype
                         is_label = is_label_image(img)
+                        resolved_dim_order = _resolve_output_dim_order(
+                            dimension_order_hint, channel_axis_removed, img.ndim
+                        )
 
                         if is_label:
                             # For labels, always use uint32 to ensure Napari recognizes them
@@ -2891,21 +3107,16 @@ class ProcessingWorker(QThread):
                             save_dtype = np.uint32
 
                             print(
-                                f"Label image detected, saving as {save_dtype.__name__} with bigtiff={use_bigtiff}"
+                                f"Label image detected, saving as {save_dtype.__name__} "
+                                f"(dim_order={resolved_dim_order})"
                             )
-                            if self.output_format == "zarr":
-                                save_as_zarr(
-                                    img.astype(save_dtype),
-                                    output_path,
-                                    axes="TCZYX"[: img.ndim],
-                                )
-                            else:
-                                tifffile.imwrite(
-                                    output_path,
-                                    img.astype(save_dtype),
-                                    compression="zlib",
-                                    bigtiff=use_bigtiff,
-                                )
+                            write_labels_with_source_metadata(
+                                img.astype(save_dtype),
+                                filepath,
+                                output_path,
+                                self.output_format,
+                                resolved_dim_order,
+                            )
                         else:
                             print(
                                 f"Regular image, saving with dtype {image_dtype} and bigtiff={use_bigtiff}"
@@ -2914,14 +3125,30 @@ class ProcessingWorker(QThread):
                                 save_as_zarr(
                                     img.astype(image_dtype),
                                     output_path,
-                                    axes="TCZYX"[: img.ndim],
+                                    axes=resolved_dim_order,
+                                    scale=_resolve_output_scale(
+                                        filepath, resolved_dim_order
+                                    ),
                                 )
                             else:
+                                tiff_metadata = {"axes": resolved_dim_order}
+                                for ax_name, ax_scale in _extract_source_physical_scale(
+                                    filepath, resolved_dim_order
+                                ).items():
+                                    tiff_metadata[
+                                        f"PhysicalSize{ax_name}"
+                                    ] = ax_scale
+                                    tiff_metadata[
+                                        f"PhysicalSize{ax_name}Unit"
+                                    ] = "um"
                                 tifffile.imwrite(
                                     output_path,
                                     img.astype(image_dtype),
+                                    ome=True,
+                                    photometric="minisblack",
                                     compression="zlib",
                                     bigtiff=use_bigtiff,
+                                    metadata=tiff_metadata,
                                 )
 
                         processed_files.append(output_path)
@@ -2990,19 +3217,37 @@ class ProcessingWorker(QThread):
 
             # Check if the first dimension should be treated as channels
             # Respect dimension_order hint if provided, otherwise use heuristic (2-4 channels for RGB/RGBA)
-            dimension_order_hint = processing_params.get(
-                "dimension_order", "Auto"
-            )
+            # (dimension_order_hint was already resolved above, from the raw
+            # UI selection, before any per-function parameter filtering.)
 
             # Only split if dimension_order indicates channels (CYX, TCYX, etc. with C first)
             # or if Auto and shape suggests channels (2-4)
             is_multi_channel = False
-            if dimension_order_hint in [
+            if function_name == "split_channels":
+                # split_channels() always moves the channel axis to
+                # position 0 of its returned array (see basic.py), no
+                # matter where the channel axis sat in the source
+                # metadata/dimension order. The dimension_order-hint and
+                # Auto heuristics below assume axis 0 keeps the *source's*
+                # meaning, which breaks for zarr layouts where the channel
+                # axis isn't first (e.g. OME-Zarr TCZYX, channel at axis 1)
+                # — metadata_says_channels would require ch_axis == 0 and
+                # silently skip splitting, saving the whole stack as one
+                # file. Trust the function's own contract instead.
+                is_multi_channel = (
+                    processed_image.ndim > 2 and processed_image.shape[0] > 1
+                )
+                print(
+                    f"split_channels output: treating axis 0 as channels, "
+                    f"will split {processed_image.shape[0]} channels"
+                )
+            elif dimension_order_hint in [
                 "CYX",
                 "CZYX",
                 "TCYX",
                 "ZCYX",
                 "TZCYX",
+                "TCZYX",
             ]:
                 # User explicitly said first dim is channels - split it
                 is_multi_channel = (
@@ -3018,16 +3263,64 @@ class ProcessingWorker(QThread):
                     f"dimension_order='{dimension_order_hint}' indicates time/Z dimension, will NOT split channels"
                 )
             elif dimension_order_hint == "Auto":
-                # Auto mode: use old heuristic (2-4 suggests channels)
-                is_multi_channel = (
-                    processed_image.ndim > 2
-                    and processed_image.shape[0] <= 4
-                    and processed_image.shape[0] > 1
-                )
-                if is_multi_channel:
-                    print(
-                        f"Auto mode: shape[0]={processed_image.shape[0]} <= 4, assuming channels"
+                # Auto mode: rather than guessing from axis-0 size alone (a
+                # short T or Z axis, e.g. a 3-timepoint test crop, was being
+                # mistaken for channels and split apart — silently dropping
+                # that whole dimension from the saved output), first check
+                # the same metadata-based channel detection already used
+                # for channel extraction above. Splitting below always
+                # indexes axis 0 (`processed_image[i]`), so that alone is
+                # only trusted when metadata actually places the channel
+                # axis there.
+                if channel_axis_removed:
+                    # A single channel was already extracted upstream from
+                    # `image`; nothing left to split.
+                    is_multi_channel = False
+                else:
+                    try:
+                        num_ch, ch_axis = detect_channels_for_file(filepath)
+                    except Exception as _de:
+                        num_ch, ch_axis = 1, None
+                        print(
+                            f"Warning: channel detection for Auto split failed: {_de}"
+                        )
+                    metadata_says_channels = (
+                        num_ch > 1
+                        and ch_axis == 0
+                        and processed_image.ndim > 2
+                        and processed_image.shape[0] == num_ch
                     )
+                    # Input metadata can't describe axes a processing
+                    # function invents on its own (e.g. one that stacks
+                    # several derived variants of a single-channel input
+                    # into a new leading axis) — the size heuristic is the
+                    # only signal available there, so it's kept as a
+                    # fallback, but only when the output actually gained a
+                    # dimension the input didn't have.
+                    gained_leading_axis = (
+                        image is not None
+                        and hasattr(image, "ndim")
+                        and processed_image.ndim > image.ndim
+                    )
+                    if metadata_says_channels:
+                        is_multi_channel = True
+                        print(
+                            f"Auto mode: metadata indicates {num_ch} channels "
+                            "at axis 0, will split"
+                        )
+                    elif (
+                        gained_leading_axis
+                        and processed_image.ndim > 2
+                        and 1 < processed_image.shape[0] <= 4
+                    ):
+                        is_multi_channel = True
+                        print(
+                            f"Auto mode: output gained a new leading axis "
+                            f"(shape[0]={processed_image.shape[0]} <= 4) not "
+                            "present in the input, assuming channels"
+                        )
+                    else:
+                        is_multi_channel = False
 
             if is_multi_channel:
                 # Save each channel as a separate image
@@ -3068,6 +3361,12 @@ class ProcessingWorker(QThread):
 
                     # Check if this is a label image based on dtype
                     is_label = is_label_image(channel_image)
+                    # Axis 0 (channel) was just stripped by indexing
+                    # processed_image[i] above, regardless of whether the
+                    # input channel was already extracted upstream.
+                    resolved_dim_order = _resolve_output_dim_order(
+                        dimension_order_hint, True, channel_image.ndim
+                    )
 
                     if is_label:
                         # For labels, always use uint32 to ensure Napari recognizes them
@@ -3075,21 +3374,16 @@ class ProcessingWorker(QThread):
                         save_dtype = np.uint32
 
                         print(
-                            f"Label image detected, saving as {save_dtype.__name__}"
+                            f"Label image detected, saving as {save_dtype.__name__} "
+                            f"(dim_order={resolved_dim_order})"
                         )
-                        if self.output_format == "zarr":
-                            save_as_zarr(
-                                channel_image.astype(save_dtype),
-                                channel_filepath,
-                                axes="TCZYX"[: channel_image.ndim],
-                            )
-                        else:
-                            tifffile.imwrite(
-                                channel_filepath,
-                                channel_image.astype(save_dtype),
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                            )
+                        write_labels_with_source_metadata(
+                            channel_image.astype(save_dtype),
+                            filepath,
+                            channel_filepath,
+                            self.output_format,
+                            resolved_dim_order,
+                        )
                     else:
                         print(
                             f"Regular image channel, saving with dtype {image_dtype}"
@@ -3098,14 +3392,30 @@ class ProcessingWorker(QThread):
                             save_as_zarr(
                                 channel_image.astype(image_dtype),
                                 channel_filepath,
-                                axes="TCZYX"[: channel_image.ndim],
+                                axes=resolved_dim_order,
+                                scale=_resolve_output_scale(
+                                    filepath, resolved_dim_order
+                                ),
                             )
                         else:
+                            tiff_metadata = {"axes": resolved_dim_order}
+                            for ax_name, ax_scale in _extract_source_physical_scale(
+                                filepath, resolved_dim_order
+                            ).items():
+                                tiff_metadata[f"PhysicalSize{ax_name}"] = (
+                                    ax_scale
+                                )
+                                tiff_metadata[
+                                    f"PhysicalSize{ax_name}Unit"
+                                ] = "um"
                             tifffile.imwrite(
                                 channel_filepath,
                                 channel_image.astype(image_dtype),
+                                ome=True,
+                                photometric="minisblack",
                                 compression="zlib",
                                 bigtiff=use_bigtiff,
+                                metadata=tiff_metadata,
                             )
 
                     processed_files.append(channel_filepath)
@@ -3142,37 +3452,51 @@ class ProcessingWorker(QThread):
 
                 # Check if this is a label image based on dtype
                 is_label = is_label_image(processed_image)
+                resolved_dim_order = _resolve_output_dim_order(
+                    dimension_order_hint,
+                    channel_axis_removed,
+                    processed_image.ndim,
+                )
 
                 if is_label:
                     save_dtype = np.uint32
-                    print(f"Saving label image as {save_dtype.__name__}")
-                    if self.output_format == "zarr":
-                        save_as_zarr(
-                            processed_image.astype(save_dtype),
-                            new_filepath,
-                            axes="TCZYX"[: processed_image.ndim],
-                        )
-                    else:
-                        tifffile.imwrite(
-                            new_filepath,
-                            processed_image.astype(save_dtype),
-                            compression="zlib",
-                            bigtiff=use_bigtiff,
-                        )
+                    print(
+                        f"Saving label image as {save_dtype.__name__} "
+                        f"(dim_order={resolved_dim_order})"
+                    )
+                    write_labels_with_source_metadata(
+                        processed_image.astype(save_dtype),
+                        filepath,
+                        new_filepath,
+                        self.output_format,
+                        resolved_dim_order,
+                    )
                 else:
                     print(f"Saving image with dtype {image_dtype}")
                     if self.output_format == "zarr":
                         save_as_zarr(
                             processed_image.astype(image_dtype),
                             new_filepath,
-                            axes="TCZYX"[: processed_image.ndim],
+                            axes=resolved_dim_order,
+                            scale=_resolve_output_scale(
+                                filepath, resolved_dim_order
+                            ),
                         )
                     else:
+                        tiff_metadata = {"axes": resolved_dim_order}
+                        for ax_name, ax_scale in _extract_source_physical_scale(
+                            filepath, resolved_dim_order
+                        ).items():
+                            tiff_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+                            tiff_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
                         tifffile.imwrite(
                             new_filepath,
                             processed_image.astype(image_dtype),
+                            ome=True,
+                            photometric="minisblack",
                             compression="zlib",
                             bigtiff=use_bigtiff,
+                            metadata=tiff_metadata,
                         )
 
                 return {
@@ -3282,6 +3606,7 @@ class FileResultsWidget(QWidget):
                 "TZYX",
                 "ZCYX",
                 "TZCYX",
+                "TCZYX",
             ]
         )
         self.dimension_order.setToolTip(
@@ -3355,9 +3680,7 @@ class FileResultsWidget(QWidget):
         self.thread_count.setMaximum(
             max(1, (os.cpu_count() or 4) // 2)
         )  # Cap outer thread count to half the available CPU cores
-        self.thread_count.setValue(
-            max(1, (os.cpu_count() or 4) // 2)
-        )  # Default to half of available CPU cores
+        self.thread_count.setValue(1)  # Safe default: single-threaded
         thread_layout.addWidget(self.thread_count)
 
         # Track thread-control locks from function constraints and GPU mode.

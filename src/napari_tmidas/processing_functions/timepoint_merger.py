@@ -19,6 +19,9 @@ import tifffile
 from skimage.io import imread
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions.ome_output_utils import (
+    _extract_source_physical_scale,
+)
 
 # Global set to track which folders have been processed in the current session
 # This prevents redundant processing when the function is called for each file
@@ -639,9 +642,29 @@ def merge_timepoint_folder_advanced(
         size_gb = time_series.nbytes / (1024**3)
         use_bigtiff = size_gb > 2.0
 
+        # Axis 0 of time_series is always the newly-added Time axis (this
+        # function's whole job is stacking per-timepoint files along it).
+        merged_axes = {3: "TYX", 4: "TZYX", 5: "TCZYX"}.get(
+            time_series.ndim, "TYX"
+        )
+        ome_metadata = {"axes": merged_axes}
+        if image_files:
+            # Individual timepoint files in a series normally share the same
+            # physical scale; the first file is representative. Without
+            # this, the merged output silently reset to isotropic scale
+            # (same bug class as the per-file processing save path).
+            for ax_name, ax_scale in _extract_source_physical_scale(
+                image_files[0], merged_axes
+            ).items():
+                ome_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+                ome_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
+
         tifffile.imwrite(
             output_path,
             time_series,
+            ome=True,
+            photometric="minisblack",
+            metadata=ome_metadata,
             compression="zlib",
             bigtiff=use_bigtiff,
         )

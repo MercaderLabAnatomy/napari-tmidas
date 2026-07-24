@@ -16,6 +16,9 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions.ome_output_utils import (
+    _extract_source_physical_scale,
+)
 
 # Lazy imports for optional heavy dependencies
 try:
@@ -1584,7 +1587,7 @@ def rgb_to_labels(
         },
         "num_workers": {
             "type": int,
-            "default": 4,
+            "default": 1,
             "min": 1,
             "max": 16,
             "description": "Number of worker processes for parallel processing",
@@ -1596,7 +1599,7 @@ def split_tzyx_stack(
     output_name_format: str = "{basename}_t{timepoint:03d}",
     preserve_scale: bool = True,
     use_compression: bool = True,
-    num_workers: int = 4,
+    num_workers: int = 1,
     _source_filepath: Optional[str] = None,
 ) -> np.ndarray:
     """
@@ -1756,7 +1759,7 @@ try:
         t: int,
         dask_image,
         output_filepath: str,
-        resolution=None,
+        physical_scale=None,
         use_compression=True,
     ) -> str:
         """
@@ -1770,8 +1773,11 @@ try:
             4D TZYX lazy array; one 3D ZYX slab will be computed for this timepoint
         output_filepath : str
             Path to save the file
-        resolution : tuple, optional
-            Resolution metadata to preserve
+        physical_scale : dict, optional
+            {"X": .., "Y": .., "Z": ..} voxel spacing (microns) from the
+            source file, written as OME PhysicalSize metadata so this ZYX
+            slab occupies the same physical extent as the source in a
+            scale-aware viewer.
         use_compression : bool
             Whether to use compression
 
@@ -1795,11 +1801,18 @@ try:
             size_gb = (data.size * data.itemsize) / (1024**3)
             use_bigtiff = size_gb > 4.0
 
+            ome_metadata = {"axes": "ZYX"}
+            for ax_name, ax_scale in (physical_scale or {}).items():
+                ome_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+                ome_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
+
             # Save the file with proper parameters
             tifffile.imwrite(
                 output_filepath,
                 data,
-                resolution=resolution,
+                ome=True,
+                photometric="minisblack",
+                metadata=ome_metadata,
                 compression=compression_arg,
                 bigtiff=use_bigtiff,
             )
@@ -1850,19 +1863,21 @@ try:
                 basename = os.path.splitext(os.path.basename(output_path))[0]
                 dirname = os.path.dirname(output_path)
 
-                # Try to get scale info from original file if needed
-                resolution = None
+                # Try to get physical voxel spacing from the source file, so
+                # each per-timepoint ZYX slab occupies the same physical
+                # extent as the source in a scale-aware viewer. Reads OME
+                # metadata (works for both zarr and OME-TIFF sources) rather
+                # than the old TIFF-only XY resolution tag, which silently
+                # dropped Z spacing and any zarr source entirely.
+                physical_scale = None
                 if preserve_scale:
                     try:
-                        with tifffile.TiffFile(filepath) as tif:
-                            if hasattr(tif, "pages") and tif.pages:
-                                page = tif.pages[0]
-                                if hasattr(page, "resolution"):
-                                    resolution = page.resolution
-                    except (OSError, AttributeError, KeyError) as e:
-
+                        physical_scale = _extract_source_physical_scale(
+                            filepath, "ZYX"
+                        )
+                    except Exception as e:
                         print(
-                            f"Warning: Could not read original resolution: {e}"
+                            f"Warning: Could not read original physical scale: {e}"
                         )
 
                 # Get number of timepoints
@@ -1899,7 +1914,7 @@ try:
                             t,
                             dask_image,
                             output_filepaths[t],
-                            resolution,
+                            physical_scale,
                             use_compression,
                         )
                         future_to_timepoint[future] = t

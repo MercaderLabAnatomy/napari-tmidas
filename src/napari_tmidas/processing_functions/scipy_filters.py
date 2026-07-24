@@ -382,12 +382,111 @@ if SCIPY_AVAILABLE:
                         image[i, j], sigma=sigma
                     )
             return result
+        elif (
+            dimension_order in ["TZCYX", "TCZYX"]
+            and len(image.shape) == 5
+        ):
+            # Process each leading-axis combination independently (2D blur)
+            result = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                for j in range(image.shape[1]):
+                    for k in range(image.shape[2]):
+                        result[i, j, k] = ndimage.gaussian_filter(
+                            image[i, j, k], sigma=sigma
+                        )
+            return result
         elif dimension_order == "ZYX" and len(image.shape) == 3:
             # Apply 3D blur to spatial volume
             return ndimage.gaussian_filter(image, sigma=sigma)
         else:
             # YX, Auto, or other: process as-is
             return ndimage.gaussian_filter(image, sigma=sigma)
+
+    def _median_filter_size_tuple(dimension_order, ndim, size):
+        """
+        Build a per-axis window size for ndimage.median_filter matching the
+        branches below: `size` on axes the filter should span spatially, 1 on
+        axes that must stay independent (T, C, ...). A window of 1 along an
+        axis is mathematically equivalent to looping over that axis, but lets
+        scipy (or Dask, via map_overlap) handle it in a single nd call.
+        """
+        if dimension_order in ["TYX", "CYX"] and ndim == 3:
+            return (1, size, size)
+        elif dimension_order in ["TCYX", "TZYX", "ZCYX"] and ndim == 4:
+            return (1, 1, size, size)
+        elif dimension_order in ["TZCYX", "TCZYX"] and ndim == 5:
+            return (1, 1, 1, size, size)
+        elif dimension_order == "ZYX" and ndim == 3:
+            return (size, size, size)
+        elif ndim >= 3:
+            # Auto or an unrecognized hint on data with more than 2 axes:
+            # assume the last two axes are spatial (Y, X) and everything
+            # before them (T, C, Z, ...) stays independent. Filtering across
+            # those leading axes by default would blend unrelated
+            # frames/channels together, and for Zarr chunks with size 1
+            # along those axes (typical for TCZYX layouts) a >0 map_overlap
+            # depth on them is invalid and raises.
+            return (1,) * (ndim - 2) + (size, size)
+        else:
+            # YX (2D): filter every axis
+            return (size,) * ndim
+
+    def _clamp_overlap_depth(image, depth, label):
+        """
+        dask.array.map_overlap requires depth to be smaller than the chunk
+        size along that axis, or it raises. The dimension-aware window
+        sizing above already keeps depth at 0 on axes that must stay
+        independent, but as a last-resort safety net for parameter
+        combinations it doesn't cover (e.g. a large window on an axis that
+        happens to have small chunks), clamp instead of crashing.
+        """
+        clamped = dict(depth)
+        for axis, d in depth.items():
+            if d <= 0:
+                continue
+            min_chunk = min(image.chunks[axis])
+            max_allowed = max(0, min_chunk - 1)
+            if d > max_allowed:
+                print(
+                    f"Warning: {label} overlap depth {d} on axis {axis} "
+                    f"exceeds smallest chunk size {min_chunk}; clamping to "
+                    f"{max_allowed} (results near chunk boundaries on this "
+                    "axis may be slightly less accurate)."
+                )
+                clamped[axis] = max_allowed
+        return clamped
+
+    def _median_filter_dask(image, size: int, dimension_order: str):
+        """
+        Apply the median filter to a Dask array chunk-by-chunk via
+        map_overlap, so only a halo of `size // 2` pixels around each chunk
+        is exchanged instead of loading the whole array into memory.
+        """
+        import dask.array as da
+
+        size_tuple = _median_filter_size_tuple(
+            dimension_order, image.ndim, size
+        )
+        depth_radius = size // 2
+        depth = {
+            axis: (depth_radius if axis_size > 1 else 0)
+            for axis, axis_size in enumerate(size_tuple)
+        }
+        depth = _clamp_overlap_depth(image, depth, "median filter")
+
+        print(
+            f"Applying median filter to Dask array with shape {image.shape}, "
+            f"chunks {image.chunks}, window={size_tuple}, overlap depth={depth}"
+        )
+
+        return da.map_overlap(
+            ndimage.median_filter,
+            image,
+            size=size_tuple,
+            depth=depth,
+            boundary="reflect",
+            dtype=image.dtype,
+        )
 
     @BatchProcessingRegistry.register(
         name="Median Filter",
@@ -410,13 +509,19 @@ if SCIPY_AVAILABLE:
         },
     )
     def median_filter(
-        image: np.ndarray, size: int = 3, dimension_order: str = "Auto", channel: str = "all"
+        image: np.ndarray,
+        size: int = 3,
+        dimension_order: str = "Auto",
+        channel: str = "all",
+        _source_filepath: str = None,
     ) -> np.ndarray:
         """
         Apply median filter for noise reduction.
 
         Args:
-            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.)
+            image: Input image (YX, TYX, ZYX, CYX, TCYX, TZYX, etc.). Can be a
+                Dask array, in which case chunks are filtered in place (with a
+                halo) via map_overlap instead of loading the whole array.
             size: Size of the median filter window
             dimension_order: Dimension interpretation hint (Auto, YX, TYX, ZYX, CYX, TCYX, etc.)
                             If TYX/CYX: processes each frame/channel independently (2D filter per slice)
@@ -426,31 +531,14 @@ if SCIPY_AVAILABLE:
         Returns:
             Filtered image with same shape as input
         """
-        # Handle different dimension orders
-        if dimension_order in ["TYX", "CYX"] and len(image.shape) == 3:
-            # Process frame-by-frame or channel-by-channel (2D filter)
-            result = np.zeros_like(image)
-            for i in range(image.shape[0]):
-                result[i] = ndimage.median_filter(image[i], size=size)
-            return result
-        elif (
-            dimension_order in ["TCYX", "TZYX", "ZCYX"]
-            and len(image.shape) == 4
-        ):
-            # Process each T/Z and C slice independently (2D filter)
-            result = np.zeros_like(image)
-            for i in range(image.shape[0]):
-                for j in range(image.shape[1]):
-                    result[i, j] = ndimage.median_filter(
-                        image[i, j], size=size
-                    )
-            return result
-        elif dimension_order == "ZYX" and len(image.shape) == 3:
-            # Apply 3D filter to spatial volume
-            return ndimage.median_filter(image, size=size)
-        else:
-            # YX, Auto, or other: process as-is
-            return ndimage.median_filter(image, size=size)
+        is_dask = hasattr(image, "chunks") and hasattr(image, "map_blocks")
+        if is_dask:
+            return _median_filter_dask(image, size, dimension_order)
+
+        size_tuple = _median_filter_size_tuple(
+            dimension_order, image.ndim, size
+        )
+        return ndimage.median_filter(image, size=size_tuple)
 
 else:
     # Export stub functions that raise ImportError when called

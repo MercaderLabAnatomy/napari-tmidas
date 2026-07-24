@@ -50,6 +50,7 @@ except ImportError:
 
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions.ome_output_utils import (
+    _extract_source_physical_scale,
     write_labels_with_source_metadata,
 )
 
@@ -661,12 +662,23 @@ def cellpose_segmentation(
             recover_stack[out_idx] = np.asarray(slab_arr, dtype=output_dtype)
 
         axes = "TYX" if len(slab_shape) == 2 else "TZYX"
+        recover_metadata = {"axes": axes}
+        # Same source used by the primary write_labels_with_source_metadata
+        # path above (see _write_interleaved_checkpoint_output) — this is
+        # only the exception fallback, but it shouldn't silently drop
+        # physical scale just because the primary write failed.
+        recover_source = original_source_filepath or _source_filepath
+        for ax_name, ax_scale in _extract_source_physical_scale(
+            recover_source, axes
+        ).items():
+            recover_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+            recover_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
         tifffile.imwrite(
             tmp_output_path,
             recover_stack,
             dtype=output_dtype,
             ome=True,
-            metadata={"axes": axes},
+            metadata=recover_metadata,
             compression="zlib",
             photometric="minisblack",
             bigtiff=True,

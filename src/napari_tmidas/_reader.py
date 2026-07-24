@@ -50,6 +50,41 @@ def _get_cached_tiff(path):
         return tf
 
 
+def _ome_scale_for_series(tf, axes):
+    """Return a per-axis scale tuple (in `axes` order) from OME PhysicalSize
+    metadata, or None if unavailable. Axes without a physical size (e.g. "T",
+    "C") default to 1.0 provided at least one real axis has one — otherwise
+    napari falls back to its own default (1,1,...) same as if this returned
+    None, so the raw image and a label file sharing the same OME metadata
+    end up displayed at the same physical extent instead of one being scaled
+    (from OME-Zarr's coordinateTransformations, which napari-ome-zarr does
+    apply) and the other not.
+    """
+    if not getattr(tf, "is_ome", False):
+        return None
+    try:
+        import tifffile
+
+        pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"]["Pixels"]
+        if isinstance(pixels, list):
+            pixels = pixels[0]
+    except Exception:
+        return None
+    if not isinstance(pixels, dict):
+        return None
+
+    scale = []
+    found_any = False
+    for ax in axes:
+        val = pixels.get(f"PhysicalSize{ax.upper()}")
+        if val is not None:
+            scale.append(float(val))
+            found_any = True
+        else:
+            scale.append(1.0)
+    return tuple(scale) if found_any else None
+
+
 def detect_channel_axis_from_tiff_path(path):
     """Return the channel-axis index of a TIFF, or ``None`` when there is none.
 
@@ -170,13 +205,21 @@ def tiff_reader_function(path):
         dtype = series.dtype
         n_pages = len(series.pages)
 
+        # Without this, an OME-TIFF with real voxel spacing (e.g. Z != Y/X)
+        # displays at a different physical extent than a napari-ome-zarr
+        # layer of the same data — that reader does apply the source's
+        # coordinateTransformations as `scale`, so a raw/label pair backed
+        # by one zarr and one OME-TIFF otherwise never lines up in the viewer.
+        scale = _ome_scale_for_series(tf, series.axes)
+        add_kwargs = {"scale": scale} if scale is not None else {}
+
         if n_pages <= 1 or len(shape) <= 2:
             arr = tifffile.imread(p)
             import os
 
             basename = os.path.basename(p).lower()
             layer_type = "labels" if "label" in basename else "image"
-            results.append((arr, {}, layer_type))
+            results.append((arr, dict(add_kwargs), layer_type))
             continue
 
         page_shape = shape[-2:]
@@ -207,6 +250,6 @@ def tiff_reader_function(path):
 
         basename = os.path.basename(p).lower()
         layer_type = "labels" if "label" in basename else "image"
-        results.append((arr, {}, layer_type))
+        results.append((arr, dict(add_kwargs), layer_type))
 
     return results

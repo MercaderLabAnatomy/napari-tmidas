@@ -369,6 +369,118 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
     return out_shape
 
 
+def _peek_raw_shape(raw_path: str):
+    """Read only shape metadata for a raw TIFF/Zarr image (no pixel data)."""
+    if raw_path.lower().endswith(".zarr"):
+        import zarr
+
+        root = zarr.open(raw_path, mode="r")
+        for candidate in ("0", "s0", "data"):
+            try:
+                return root[candidate].shape
+            except Exception:
+                continue
+        return getattr(root, "shape", None)
+
+    with tifffile.TiffFile(raw_path) as tif:
+        return tif.series[0].shape
+
+
+def _maybe_extract_raw_channel(
+    raw_path: str,
+    channel_param: str,
+    dimension_order_param: str,
+    work_dir: Path,
+):
+    """
+    HOCT expects the raw image to have the same shape as the label image
+    (TYX or TZYX, no channel axis). If the raw file is multichannel, extract
+    a single channel into a temporary TIFF and return that path instead.
+
+    Returns (path_to_use, temp_path_or_None); the caller must delete
+    temp_path_or_None (if not None) once the HOCT subprocess has finished.
+    """
+    channel_axis = None
+    num_channels = 1
+
+    # An explicit dimension_order hint (e.g. "TCZYX") is authoritative when
+    # its length matches the raw array's ndim, mirroring Trackastra's
+    # channel-axis resolution.
+    if dimension_order_param and str(dimension_order_param).upper() not in (
+        "AUTO",
+        "NONE",
+        "",
+    ):
+        axes = str(dimension_order_param).upper()
+        if "C" in axes:
+            shape = _peek_raw_shape(raw_path)
+            if shape is not None and len(axes) == len(shape):
+                channel_axis = axes.index("C")
+                num_channels = shape[channel_axis]
+                print(
+                    f"Using dimension_order={axes} requested channel axis {channel_axis}"
+                )
+
+    if channel_axis is None:
+        from napari_tmidas._file_selector import detect_channels_for_file
+
+        num_channels, channel_axis = detect_channels_for_file(raw_path)
+
+    if num_channels <= 1 or channel_axis is None:
+        return raw_path, None
+
+    print(
+        f"Raw image {os.path.basename(raw_path)} has {num_channels} channels "
+        f"(axis {channel_axis}); extracting one channel for HOCT."
+    )
+
+    if channel_param in ("", "all", "None"):
+        ch_idx = 0
+        print(
+            "No channel specified for multichannel raw image, using channel 0..."
+        )
+    else:
+        try:
+            ch_idx = int(channel_param)
+        except ValueError:
+            print(f"Invalid channel '{channel_param}', using channel 0...")
+            ch_idx = 0
+
+    if ch_idx < 0 or ch_idx >= num_channels:
+        print(
+            f"Channel index {ch_idx} out of bounds for {num_channels} channels; using 0"
+        )
+        ch_idx = 0
+
+    if raw_path.lower().endswith(".zarr"):
+        import zarr
+
+        root = zarr.open(raw_path, mode="r")
+        arr = None
+        for candidate in ("0", "s0", "data"):
+            try:
+                arr = root[candidate]
+                break
+            except Exception:
+                continue
+        if arr is None:
+            arr = root
+        channel_data = np.asarray(np.take(arr, ch_idx, axis=channel_axis))
+    else:
+        # tifffile has no cheap partial-page read for an arbitrary channel
+        # axis, so the full array is loaded once here before slicing.
+        full = tifffile.imread(raw_path)
+        channel_data = np.take(full, ch_idx, axis=channel_axis)
+
+    temp_raw_path = work_dir / f"hoct_raw_ch{ch_idx}_{os.getpid()}.tif"
+    imwrite(str(temp_raw_path), channel_data)
+    print(
+        f"Extracted channel {ch_idx} to temporary raw file: {temp_raw_path} "
+        f"(shape {channel_data.shape})"
+    )
+    return str(temp_raw_path), str(temp_raw_path)
+
+
 @BatchProcessingRegistry.register(
     name="Track Cells with HOCT",
     suffix="_hoct_tracked",
@@ -376,9 +488,21 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
         "Track cells across time using HOCT (Higher-Order Cell Tracking "
         "Transformer, github.com/royerlab/hoct), a transformer-based tracker. "
         "Expects TYX or TZYX label images with a matching raw image of the "
-        "same shape. Supports TIFF and zarr inputs."
+        "same shape (or a multichannel raw image, with optional channel "
+        "selection). Supports TIFF and zarr inputs."
     ),
     parameters={
+        "channel": {
+            "type": str,
+            "default": "",
+            "description": "Optional raw-image channel index for multichannel input. Leave empty to use the default first channel.",
+        },
+        "dimension_order": {
+            "type": str,
+            "default": "Auto",
+            "options": ["Auto", "TYX", "TZYX", "TCZYX", "TZCYX", "TCYX"],
+            "description": "Dimension order hint for raw images (e.g., TCZYX for time-Z-channel-Y-X). Helps with channel detection.",
+        },
         "model": {
             "type": str,
             "default": "",
@@ -456,6 +580,8 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
 )
 def hoct_tracking(
     image: np.ndarray,
+    channel: str = "",
+    dimension_order: str = "Auto",
     model: str = "",
     device: str = "cuda",
     window: int = 5,
@@ -476,7 +602,8 @@ def hoct_tracking(
     Track cells in time-lapse label images using HOCT.
 
     This function takes a time series of segmentation masks and a matching
-    raw image (same shape) and performs automatic cell tracking using HOCT
+    raw image (same shape, or multichannel with an optional 'channel' index)
+    and performs automatic cell tracking using HOCT
     (https://github.com/royerlab/hoct), a transformer-based tracker from
     royerlab. Tracking is run via the ``hoct`` CLI in a dedicated conda
     environment, exporting directly to CTC (Cell Tracking Challenge) format,
@@ -494,6 +621,12 @@ def hoct_tracking(
     -----------
     image : np.ndarray
         Input label image array with time as first dimension
+    channel : str
+        Optional raw-image channel index for multichannel input. Leave
+        empty to use the default first channel.
+    dimension_order : str
+        Dimension order hint for raw images (e.g., "TCZYX"). Helps with
+        channel detection when the raw image is multichannel.
     model : str
         Checkpoint path or registered HOCT model name. Empty uses the
         default pretrained model (auto-downloaded on first use).
@@ -631,6 +764,13 @@ def hoct_tracking(
     if ctc_dir.exists():
         shutil.rmtree(ctc_dir)
 
+    # If the raw image is multichannel, extract the requested (or default)
+    # channel to a temp TIFF so HOCT sees a channel-free array matching the
+    # mask's shape.
+    raw_path, temp_raw_path = _maybe_extract_raw_channel(
+        str(raw_path), channel, dimension_order, temp_dir
+    )
+
     conda_cmd = HoctEnvManager.get_conda_cmd()
     cmd = [
         conda_cmd,
@@ -705,6 +845,8 @@ def hoct_tracking(
         if gpu_id is not None:
             pool.put(gpu_id)
             print(f"[{label_tag}] Released GPU {gpu_id}")
+        if temp_raw_path is not None:
+            Path(temp_raw_path).unlink(missing_ok=True)
 
     if result.returncode != 0:
         print(f"HOCT error (exit code {result.returncode}):")
