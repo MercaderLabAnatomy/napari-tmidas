@@ -88,7 +88,7 @@ def test_load_label_image(temp_label_folder):
 def test_extract_regionprops_recursive_2d(temp_label_folder):
     """Test extracting regionprops from 2D label image."""
     files = find_label_images(str(temp_label_folder))
-    file_2d = [f for f in files if "2d" in f][0]
+    file_2d = [f for f in files if "2d" in os.path.basename(f)][0]
 
     img = load_label_image(file_2d)
     results = extract_regionprops_recursive(
@@ -118,7 +118,7 @@ def test_extract_regionprops_recursive_2d(temp_label_folder):
 def test_extract_regionprops_recursive_3d(temp_label_folder):
     """Test extracting regionprops from 3D label image."""
     files = find_label_images(str(temp_label_folder))
-    file_3d = [f for f in files if "3d" in f][0]
+    file_3d = [f for f in files if "3d" in os.path.basename(f)][0]
 
     img = load_label_image(file_3d)
     results = extract_regionprops_recursive(
@@ -149,7 +149,7 @@ def test_extract_regionprops_recursive_3d(temp_label_folder):
 def test_extract_regionprops_recursive_4d(temp_label_folder):
     """Test extracting regionprops from 4D label image with time dimension."""
     files = find_label_images(str(temp_label_folder))
-    file_4d = [f for f in files if "4d" in f][0]
+    file_4d = [f for f in files if "4d" in os.path.basename(f)][0]
 
     img = load_label_image(file_4d)
     results = extract_regionprops_recursive(
