@@ -96,7 +96,7 @@ For each pair displayed:
 - **Click-to-delete**: Left-click a label to remove it from every timepoint
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
 - **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
-- **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint
+- **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint or across the whole movie
 
 **Track-level tools** (napari-tmidas, for tracked time series):
 - **Whole-track 3D views** (docked as **Track inspection**, see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
@@ -195,13 +195,29 @@ Notes:
 
 Docked (with the other click modes) as part of **Label manipulations**, this tool is the fix for
 *over*-segmentation — one cell broken into several touching IDs — and the
-counterpart to [Splitting Merged Labels](#splitting-merged-labels). Like the
-split tool it edits **only the clicked timepoint**.
+counterpart to [Splitting Merged Labels](#splitting-merged-labels).
 
 Enable *"Click a label to merge its touching neighbors into it"*, then
 **left-click** any fragment of the cell. Every label that shares a border with
 the clicked one — a shared face, edge or corner all count as touching — is
-relabeled to the clicked ID at that timepoint.
+relabeled to the clicked ID.
+
+**Apply to** decides how far that reaches:
+
+- **Clicked timepoint only** *(default)* — repairs just the frame you clicked,
+  like the split tool.
+- **All timepoints** — merges those same neighbor IDs across the whole movie.
+  This is the right unit for **tracked** data, where a label ID is one object's
+  trajectory: an over-segmented cell keeps the same fragment IDs frame to
+  frame, so a single click repairs the entire track rather than one frame of
+  it. It runs through the value-remap LUT, so it costs no extra I/O however
+  long the movie is.
+
+  Which labels count as touching is **always** decided on the clicked frame
+  alone — never re-detected per frame. An all-timepoint merge therefore cannot
+  quietly swallow a different cell that only brushes past the label at some
+  other timepoint; if a fragment only appears later in the movie, scrub to a
+  frame where it touches and click again.
 
 Notes:
 
@@ -211,8 +227,10 @@ Notes:
 - **Ctrl+Z** reverts the whole merge in one step.
 - Merges are staged in memory; press **Save and Continue** to write them —
   saved merges can no longer be undone.
-- Works in the **normal frame view only** — turn *Track view* off first, since
-  touching is a per-slice spatial notion the projected views do not preserve.
+- Works in the **track views** as well: the view only supplies the clicked ID
+  and timepoint, and which labels touch is then measured on the source's
+  full-resolution spatial slice — so a subsampled or Z-projected view never
+  changes the result.
 - Mutually exclusive with the other click modes; the mode persists as you
   move through image-label pairs.
 
@@ -251,10 +269,16 @@ Three modes:
   full resolution); only painting is disabled in a downsampled view, since a
   strided pixel cannot be written back losslessly. The status bar reports
   when a view is downsampled.
-- Click-to-delete / click-to-relabel, **Ctrl+Z** undo, and **Save Changes and
-  Continue** all work exactly as in the normal view; label files stay TZYX.
-- Delete/relabel edits remap the cached 3-D volume in place, so 3-D picking and
-  refreshes cost no extra I/O.
+- Click-to-delete / click-to-relabel / click-to-merge-neighbors, **Ctrl+Z**
+  undo, and **Save Changes and Continue** all work exactly as in the normal
+  view; label files stay TZYX. (Click-to-split is the one exception — it needs
+  precise source voxels as seeds, so turn *Track view* off for it.)
+- Editing stays interactive no matter how long the movie is. The 3-D volume is
+  built **once** and then kept up to date in place: a delete or relabel touches
+  only the affected labels' bounding boxes, and only that box is re-uploaded to
+  the GPU, instead of re-reading the movie and re-uploading the whole texture
+  for every click. The data itself is never rewritten until you save — edits
+  accumulate as a value map on the lazy array.
 - The chosen view persists as you move through image-label pairs and is rebuilt
   over each new pair. Requires a 3-D (TYX) or 4-D (TZYX) label source.
 
@@ -392,10 +416,11 @@ When segmentation over-splits cells:
 4. Or paint manually with the same label for partial merges
 5. Save changes
 
-For a single over-segmented cell whose fragments differ frame to frame, enable
-**Click-to-merge-neighbors** instead and click one fragment: every label
-touching it fuses into the clicked ID at that timepoint, no pipetting needed
-(re-click to reach further out).
+For a single over-segmented cell, enable **Click-to-merge-neighbors** instead
+and click one fragment: every label touching it fuses into the clicked ID, no
+pipetting needed (re-click to reach further out). Set its **Apply to** to *All
+timepoints* to repair the whole track from that one click, or leave it on
+*Clicked timepoint only* when the fragmentation differs frame to frame.
 
 ### Splitting Merged Objects
 

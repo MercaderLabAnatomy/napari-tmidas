@@ -478,6 +478,81 @@ class TestLabelInspector:
             assert restored[0, 2, 1] == 4
             assert restored[0, 2, 3] == 5
 
+    def test_merge_neighbors_all_timepoints(self):
+        """An all-T merge spreads the clicked frame's neighbor IDs over the
+        whole movie without re-detecting adjacency per frame."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        class _FakeLabels:
+            def __init__(self, data):
+                self.data = data
+
+            def refresh(self):
+                pass
+
+        # 1 and 2 touch at t=0 only; at t=1 they have drifted apart, and 7
+        # brushes against 1 there. A merge decided at t=0 must relabel 2
+        # everywhere and never pick up 7.
+        base = np.zeros((2, 5, 5), dtype=np.uint32)
+        base[0, 2, 2] = 1
+        base[0, 2, 3] = 2  # touching at t=0
+        base[1, 0, 0] = 1
+        base[1, 4, 4] = 2  # far away at t=1
+        base[1, 0, 1] = 7  # touches 1 at t=1, but t=1 is not the clicked frame
+        wrapper = _DaskFancyIndexWrapper(da.from_array(base, chunks=(1, 5, 5)))
+        layer = _FakeLabels(wrapper)
+
+        self.viewer.layers = [layer]
+        self.viewer.mouse_drag_callbacks = []
+
+        inspector = LabelInspector(self.viewer)
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.merge_neighbors_all_timepoints(1, 0)
+
+            result = np.asarray(layer.data)
+            assert not np.any(result == 2)  # merged on every timepoint
+            assert result[0, 2, 3] == 1
+            assert result[1, 4, 4] == 1  # even where it no longer touches
+            assert result[1, 0, 1] == 7  # t=1's own neighbor is untouched
+
+            # One LUT entry, so Ctrl+Z reverts the whole merge.
+            assert layer.data._lut == {2: 1}
+            inspector._on_undo_key()
+            np.testing.assert_array_equal(np.asarray(layer.data), base)
+
+    def test_merge_scope_routes_the_click(self):
+        """The 'Apply to' setting picks which merge a click performs."""
+        inspector = LabelInspector(self.viewer)
+        assert inspector.merge_scope == "current"  # default keeps one frame
+
+        calls = []
+        inspector.merge_neighbors_at_timepoint = lambda i, t: calls.append(
+            ("current", i, t)
+        )
+        inspector.merge_neighbors_all_timepoints = lambda i, t: calls.append(
+            ("all", i, t)
+        )
+
+        class _FakeEvent:
+            dims_displayed = [1, 2]
+            modifiers = ()
+            position = (3.0, 1.0, 1.0)
+            view_direction = None
+
+        class _FakeLayer:
+            data = np.zeros((5, 4, 4), dtype=np.uint32)
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        layer = _FakeLayer()
+        inspector._on_click_merge(layer, 4, _FakeEvent())
+        inspector.merge_scope = "all"
+        inspector._on_click_merge(layer, 4, _FakeEvent())
+        assert calls == [("current", 4, 3), ("all", 4, 3)]
+
     def test_merge_neighbors_no_touching(self):
         """A label with no neighbors leaves the data unchanged."""
         base = np.zeros((1, 5, 5), dtype=np.uint32)
@@ -781,11 +856,12 @@ class TestLabelInspector:
             inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
             inspector.channel_axis_override = "None"
 
-            with patch(
-                "napari_tmidas._label_inspection.Labels", _FakeLabels
-            ), patch(
-                "napari_tmidas._label_inspection._load_image",
-                return_value=raw,
+            with (
+                patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+                patch(
+                    "napari_tmidas._label_inspection._load_image",
+                    return_value=raw,
+                ),
             ):
                 inspector.delete_low_intensity_tracks(0.5)
 
@@ -825,10 +901,11 @@ class TestLabelInspector:
         inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
         inspector.channel_axis_override = "None"
 
-        with patch(
-            "napari_tmidas._label_inspection.Labels", _FakeLabels
-        ), patch(
-            "napari_tmidas._label_inspection._load_image", return_value=raw
+        with (
+            patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
         ):
             # High threshold deletes BOTH tracks.
             inspector.delete_low_intensity_tracks(0.9)
@@ -876,10 +953,11 @@ class TestLabelInspector:
         inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
         inspector.channel_axis_override = "1"
 
-        with patch(
-            "napari_tmidas._label_inspection.Labels", _FakeLabels
-        ), patch(
-            "napari_tmidas._label_inspection._load_image", return_value=raw
+        with (
+            patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
         ):
             inspector.delete_low_intensity_tracks(0.3)
 
@@ -915,10 +993,11 @@ class TestLabelInspector:
         inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
         inspector.channel_axis_override = "1"
 
-        with patch(
-            "napari_tmidas._label_inspection.Labels", _FakeLabels
-        ), patch(
-            "napari_tmidas._label_inspection._load_image", return_value=raw
+        with (
+            patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
         ):
             # Channel 0: label 7 is bright → survives; label 5 (also bright) too.
             inspector.delete_low_intensity_tracks(0.5, channel="0")
@@ -952,10 +1031,11 @@ class TestLabelInspector:
         inspector.image_label_pairs = [("raw.tif", "lbl.tif")]
         inspector.channel_axis_override = "None"
 
-        with patch(
-            "napari_tmidas._label_inspection.Labels", _FakeLabels
-        ), patch(
-            "napari_tmidas._label_inspection._load_image", return_value=raw
+        with (
+            patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
         ):
             inspector.delete_low_intensity_tracks(0.5)
 
@@ -993,9 +1073,7 @@ class TestLabelInspector:
             )
 
         # Auto with equal dims (no extra axis) detects nothing.
-        assert (
-            inspector._resolve_channel_axis(label, label, "raw.tif") is None
-        )
+        assert inspector._resolve_channel_axis(label, label, "raw.tif") is None
 
         # Auto falls back to the shape heuristic when metadata is unavailable
         # (e.g. a TIFF whose axes tags tifffile reports as "QQYX").
@@ -1274,13 +1352,160 @@ class TestTrackInspection:
             assert viewer.layers == [main]
             assert main.visible is True
 
+    def test_plane_range_read_materializes_and_serves_the_volume(self):
+        """napari's 3-D slicing asks for a range of planes; that must build
+        the volume once instead of re-reading the movie on every redraw."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.zeros((4, 2, 4, 4), dtype=np.uint32)
+        base[:, :, 1, 1] = 5
+        wrapper = self._wrapper(base)
+        view = _StackedTrackView(wrapper)
+
+        loads = []
+        orig = view._t_slice
+        view._t_slice = lambda t: loads.append(t) or orig(t)
+
+        first = view[:, :, :]  # what napari's 3-D display asks for
+        assert view._vol is not None
+        assert len(loads) == 8  # one read per plane, once
+        np.testing.assert_array_equal(first, base.reshape(8, 4, 4))
+
+        loads.clear()
+        np.testing.assert_array_equal(view[:, :, :], base.reshape(8, 4, 4))
+        assert loads == []  # every later redraw is free
+        # Scrubbing in 2-D is still served without touching the source.
+        np.testing.assert_array_equal(view[3], base[1, 1])
+        assert loads == []
+
+    def test_remap_touches_only_the_labels_bounding_box(self):
+        """A delete/relabel scans the remapped labels' boxes, not the whole
+        volume, and reports the changed region for a partial redraw."""
+        from napari_tmidas._label_inspection import (
+            _apply_value_map,
+            _StackedTrackView,
+        )
+
+        base = np.zeros((3, 2, 10, 10), dtype=np.uint32)
+        base[:, :, 1:3, 1:3] = 5
+        base[:, :, 7:9, 6:8] = 7
+        base[:, 0, 5, 5] = 9
+        view = _StackedTrackView(self._wrapper(base))
+        vol = np.asarray(view)
+        expected = _apply_value_map(vol, mapping={5: 0, 7: 9})
+
+        region = view.apply_mapping({5: 0, 7: 9})
+        np.testing.assert_array_equal(vol, expected)
+        # The region covers both boxes and nothing near the far corner.
+        assert region == (slice(0, 6), slice(1, 9), slice(1, 8))
+
+        # A label that isn't there reports an empty region and changes
+        # nothing (the caller then skips the redraw entirely).
+        assert view.apply_mapping({404: 0}) == (
+            slice(0, 0),
+            slice(0, 0),
+            slice(0, 0),
+        )
+        np.testing.assert_array_equal(vol, expected)
+
+        # 9 inherited 7's box, so deleting it afterwards still finds every
+        # voxel — including the ones it had before the merge.
+        view.apply_mapping({9: 0})
+        assert not np.any(vol == 9)
+
+    def test_painted_ids_stay_remappable(self):
+        """Painting through the view widens the box index, so a later
+        delete of the painted ID still finds the painted voxels."""
+        from napari_tmidas._label_inspection import _StackedTrackView
+
+        base = np.zeros((2, 2, 6, 6), dtype=np.uint32)
+        base[:, :, 0, 0] = 5
+        view = _StackedTrackView(self._wrapper(base))
+        vol = np.asarray(view)
+        view.apply_mapping({5: 0})  # builds the box index
+
+        view[np.array([2]), np.array([4]), np.array([4])] = 5
+        assert vol[2, 4, 4] == 5
+        view.apply_mapping({5: 0})
+        assert not np.any(vol == 5)
+
+    def test_merge_neighbors_through_the_track_view(self):
+        """Click-to-merge works while a track view is active: the view
+        resolves the ID and timepoint, adjacency comes from the source."""
+        from napari_tmidas._label_inspection import (
+            LabelInspector,
+            _StackedTrackView,
+        )
+
+        class _FakeLabels:
+            def __init__(self, data, name="", scale=None):
+                self.data = data
+                self.name = name
+                self.scale = scale or [1.0] * getattr(data, "ndim", 1)
+                self.visible = True
+                self.selected_label = 1
+
+            def refresh(self):
+                pass
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        class _FakeViewer:
+            def __init__(self):
+                self.layers = []
+                self.status = ""
+                self.mouse_drag_callbacks = []
+
+            def add_labels(self, data, scale=None, name=""):
+                layer = _FakeLabels(data, name=name, scale=scale)
+                self.layers.append(layer)
+                return layer
+
+        # Labels 1 and 2 touch at every timepoint; 6 is detached.
+        base = np.zeros((3, 2, 6, 6), dtype=np.uint32)
+        base[:, :, 2, 2] = 1
+        base[:, :, 2, 3] = 2
+        base[:, :, 5, 5] = 6
+        wrapper = self._wrapper(base)
+
+        viewer = _FakeViewer()
+        main = _FakeLabels(wrapper)
+        viewer.layers.append(main)
+        inspector = LabelInspector(viewer)
+
+        class _FakeEvent:
+            dims_displayed = [1, 2]  # 2-D display
+            modifiers = ()
+            position = (3.0, 2.0, 2.0)  # plane 3 == t=1, z=1
+            view_direction = None
+
+        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels):
+            inspector.set_track_view_mode("stack")
+            view_layer = inspector._track_view_layer
+            assert isinstance(view_layer.data, _StackedTrackView)
+
+            inspector._on_click_merge(view_layer, 1, _FakeEvent())
+
+            result = np.asarray(wrapper)
+            # Merged at the clicked timepoint only, at full resolution.
+            assert result[1, 0, 2, 3] == 1 and result[1, 1, 2, 3] == 1
+            assert result[0, 0, 2, 3] == 2 and result[2, 0, 2, 3] == 2
+            assert result[1, 0, 5, 5] == 6  # detached label untouched
+            # The view shows it too, and Ctrl+Z puts 2 back.
+            assert view_layer.data[3][2, 3] == 1
+            inspector._on_undo_key()
+            assert np.asarray(wrapper)[1, 1, 2, 3] == 2
+
     def test_pick_track_view_step(self):
         """The YX step is the smallest that fits the volume in budget."""
         from napari_tmidas._label_inspection import _pick_track_view_step
 
         gib = 1024**3
         # Fits exactly: no subsampling.
-        assert _pick_track_view_step(10, 64, 64, 4, budget=10 * 64 * 64 * 4) == 1
+        assert (
+            _pick_track_view_step(10, 64, 64, 4, budget=10 * 64 * 64 * 4) == 1
+        )
         # The reported crash: 33 T x 75 Z planes of 2720x2720 uint32
         # is ~68 GiB — napari uploads it as ONE 3-D texture and the GPU
         # allocation failure corrupts vispy's command queue.
@@ -1371,11 +1596,13 @@ class TestTrackInspection:
 
         # Full stacked volume is 2*3*8*8*4 = 1536 B; a 400 B budget
         # needs step 2 (6*4*4*4 = 384 B).
-        with patch("napari_tmidas._label_inspection.Labels", _FakeLabels), \
-             patch(
-                 "napari_tmidas._label_inspection._TRACK_VIEW_BUDGET_BYTES",
-                 400,
-             ):
+        with (
+            patch("napari_tmidas._label_inspection.Labels", _FakeLabels),
+            patch(
+                "napari_tmidas._label_inspection._TRACK_VIEW_BUDGET_BYTES",
+                400,
+            ),
+        ):
             inspector.set_track_view_mode("stack")
             view_layer = inspector._track_view_layer
             assert view_layer.data.yx_step == 2
@@ -1398,8 +1625,9 @@ class TestLabelInspectorWidget:
         returned early before next_pair(), so edits to the final label
         image were silently dropped instead of written to disk.
         """
-        import tifffile
         from unittest.mock import MagicMock
+
+        import tifffile
 
         from napari_tmidas._label_inspection import label_inspector
 

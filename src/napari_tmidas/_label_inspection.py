@@ -513,6 +513,21 @@ class _DaskFancyIndexWrapper:
         return result.astype(dtype) if dtype is not None else result
 
 
+# A changed-region tuple covering nothing (an edit that matched no voxel).
+_EMPTY_REGION = (slice(0, 0), slice(0, 0), slice(0, 0))
+
+
+def _bbox_union(a, b):
+    """Smallest region containing both slice-tuples (either may be None)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return tuple(
+        slice(min(x.start, y.start), max(x.stop, y.stop)) for x, y in zip(a, b)
+    )
+
+
 class _TrackView:
     """Read-through 3-D "track volume" view over a TZYX/TYX label source.
 
@@ -532,6 +547,10 @@ class _TrackView:
     back losslessly).  The underlying data stays full resolution.
     """
 
+    # Largest label ID for which the per-label bounding-box index is built
+    # (find_objects walks 1..max_id, so a sparse ID space is not worth it).
+    _BBOX_MAX_ID: int = 2_000_000
+
     def __init__(self, source, yx_step: int = 1):
         if getattr(source, "ndim", 0) not in (3, 4):
             raise ValueError(
@@ -548,13 +567,21 @@ class _TrackView:
         )
         # A TYX movie has an implicit Z of size 1.
         self.n_z = source.shape[1] if source.ndim == 4 else 1
-        # Materialized full view, built lazily by __array__ when napari's
-        # 3-D display first asks for it.  While present, ALL reads
-        # (including 3-D click pick-rays, which would otherwise re-read
-        # one timepoint from disk per plane they cross) are served from
-        # it, and delete/relabel remaps update it in place — so 3-D
-        # clicking stays interactive on movies of any size.
+        # Materialized full view, built lazily the first time napari's
+        # 3-D display asks for more than one plane.  While present, ALL
+        # reads (including 3-D click pick-rays, which would otherwise
+        # re-read one timepoint from disk per plane they cross) are
+        # served from it, and delete/relabel remaps update it in place —
+        # so 3-D clicking and editing stay interactive on movies of any
+        # size.
         self._vol = None
+        # {label_id: (slice, slice, slice)} bounding each label in _vol,
+        # so a remap only touches the label's own sub-volume instead of
+        # scanning the whole thing.  Built lazily (one find_objects pass)
+        # and maintained as a *superset* across edits; None = not built,
+        # and _bbox_ok False = don't build (too many IDs to be worth it).
+        self._bboxes = None
+        self._bbox_ok = True
 
     def _t_slice(self, t: int) -> np.ndarray:
         """Timepoint *t* of the source as numpy, pending edits included."""
@@ -577,34 +604,158 @@ class _TrackView:
     def invalidate(self) -> None:
         """Drop all derived caches after an arbitrary source edit."""
         self._vol = None
+        self._bboxes = None
 
     def _planes_of_t(self, t: int):
         """The view plane indices that show timepoint *t*."""
         raise NotImplementedError
 
-    def refresh_timepoint(self, t: int) -> None:
+    def refresh_timepoint(self, t: int):
         """Recompute cached planes for timepoint *t* only.
 
         The cheap alternative to :meth:`invalidate` when a source edit is
         confined to one timepoint: the materialized volume is patched with
         that timepoint's planes (served from the source's warm slice
         cache), so the 3-D display stays interactive.
+
+        Returns the changed region as a tuple of slices into the view (for
+        a partial canvas redraw), or None when the whole view may differ.
         """
         if self._vol is None:
-            return
-        for i in self._planes_of_t(int(t)):
+            return None
+        planes = list(self._planes_of_t(int(t)))
+        for i in planes:
             self._vol[i] = self._plane(i)
+        # Painted / merged voxels can carry IDs anywhere in these planes.
+        self._bboxes = None
+        if not planes:
+            return _EMPTY_REGION
+        return (
+            slice(min(planes), max(planes) + 1),
+            slice(0, self.shape[1]),
+            slice(0, self.shape[2]),
+        )
 
-    def apply_mapping(self, mapping: dict) -> None:
+    def _bbox_index(self):
+        """``{label_id: region}`` bounding every voxel of each label in the
+        materialized volume, or None when no index is available.
+
+        One ``find_objects`` pass builds the whole index; it is then kept
+        as a *superset* across edits (a merged label inherits the union of
+        both boxes, a shrunk label keeps its old box), which is all the
+        remap fast path needs.  Volumes whose largest ID dwarfs the label
+        count would need a huge intermediate list, so they opt out and fall
+        back to whole-volume passes.
+        """
+        if self._bboxes is not None:
+            return self._bboxes
+        vol = self._vol
+        if vol is None or not self._bbox_ok:
+            return None
+        max_id = int(vol.max())
+        if max_id <= 0 or max_id > self._BBOX_MAX_ID:
+            self._bbox_ok = False
+            return None
+        from scipy import ndimage as ndi
+
+        self._bboxes = {
+            i + 1: sl
+            for i, sl in enumerate(ndi.find_objects(vol))
+            if sl is not None
+        }
+        return self._bboxes
+
+    def _grow_bboxes(self, index, value) -> None:
+        """Widen the bbox index to cover a paint write into the volume.
+
+        Only the written IDs' boxes grow, and only ever outward, so the
+        index stays the superset the remap fast path relies on.  Anything
+        this cannot describe cheaply drops the index instead (it rebuilds
+        on the next remap).
+        """
+        if self._bboxes is None:
+            return
+        # Read the written extent straight off the index: napari paints
+        # with 1-D coordinate arrays, and slices/scalars bound trivially.
+        padded = list(index) + [slice(None)] * (3 - len(index))
+        box = []
+        for dim, ix in enumerate(padded):
+            if isinstance(ix, (int, np.integer)):
+                lo, hi = int(ix), int(ix) + 1
+            elif isinstance(ix, slice):
+                rng = range(*ix.indices(self.shape[dim]))
+                if not len(rng):
+                    return  # nothing written
+                lo, hi = min(rng.start, rng[-1]), max(rng.start, rng[-1]) + 1
+            elif isinstance(ix, np.ndarray) and ix.ndim == 1 and ix.size:
+                lo, hi = int(ix.min()), int(ix.max()) + 1
+            else:
+                self._bboxes = None  # can't bound it — rebuild on next remap
+                return
+            box.append(slice(lo, hi))
+        box = tuple(box)
+        for v in np.unique(np.asarray(value)):
+            v = int(v)
+            if v:
+                self._bboxes[v] = _bbox_union(self._bboxes.get(v), box)
+
+    def _remap_vol(self, mapping: dict):
+        """Apply *mapping* to the materialized volume, touching only the
+        remapped labels' bounding boxes when an index is available.
+
+        Returns the changed region, or None when the whole volume was
+        scanned (and so may have changed anywhere).
+        """
+        vol = self._vol
+        index = self._bbox_index()
+        # Background has no bounding box (it is everywhere), so remapping
+        # it — which the click tools never do — takes the whole-volume pass.
+        if index is None or any(int(k) == 0 for k in mapping):
+            _apply_value_map_inplace(vol, mapping)
+            self._bboxes = None
+            return None
+        # Masks first, writes second, so chained mappings stay simultaneous.
+        hits = []
+        region = None
+        for k, v in mapping.items():
+            k, v = int(k), int(v)
+            box = index.get(k)
+            if box is None:
+                continue
+            sub = vol[box]
+            hits.append((sub, sub == k, v))
+            del index[k]
+            if v:
+                index[v] = _bbox_union(index.get(v), box)
+            region = _bbox_union(region, box)
+        for sub, mask, v in hits:
+            sub[mask] = v
+        return region if region is not None else _EMPTY_REGION
+
+    def apply_mapping(self, mapping: dict):
         """Update caches in place for a global {old_id: new_id} remap.
 
         The cheap alternative to :meth:`invalidate` for delete / relabel:
-        the materialized volume is remapped with one numpy pass instead of
-        being rebuilt from disk, so the 3-D display and its pick-rays stay
-        interactive.
+        the materialized volume is remapped where the affected labels live
+        instead of being rebuilt from disk, so the 3-D display and its
+        pick-rays stay interactive.
+
+        Returns the changed region as a tuple of slices into the view (for
+        a partial canvas redraw), or None when the whole view may differ.
         """
-        if self._vol is not None:
-            _apply_value_map_inplace(self._vol, mapping)
+        if self._vol is None:
+            return None
+        return self._remap_vol(mapping)
+
+    def _ensure_vol(self) -> np.ndarray:
+        """Materialize (and cache) the full view volume plane-by-plane."""
+        if self._vol is None:
+            out = np.empty(self.shape, dtype=self.dtype)
+            for i in range(self.shape[0]):
+                out[i] = self._plane(i)
+            self._vol = out
+            self._bboxes = None
+        return self._vol
 
     def __getitem__(self, index):
         # Serve everything from the materialized volume while it exists —
@@ -615,20 +766,17 @@ class _TrackView:
             index = (index,)
         first = index[0] if index else slice(None)
         rest = index[1:]
-        # Scalar outer plane — napari's 2-D slicing path.
+        # Scalar outer plane — napari's 2-D slicing path, kept lazy so
+        # scrubbing a movie never materializes the whole volume.
         if isinstance(first, (int, np.integer)):
             plane = self._plane(int(first))
             return plane[rest] if rest else plane
-        # Pure int/slice indexing — assemble the requested planes.
+        # A range of planes — napari's 3-D slicing path, which re-reads the
+        # *entire* view on every redraw.  Materialize once and serve this
+        # and all later reads from the volume; edits patch it in place, so
+        # a delete no longer costs a full re-read of the movie.
         if all(isinstance(ix, (int, np.integer, slice)) for ix in index):
-            planes = [
-                self._plane(i)[rest] if rest else self._plane(i)
-                for i in range(*first.indices(self.shape[0]))
-            ]
-            if planes:
-                return np.stack(planes)
-            probe = self._plane(0)[rest] if rest else self._plane(0)
-            return np.empty((0, *np.shape(probe)), dtype=self.dtype)
+            return self._ensure_vol()[index]
         # Fancy indexing (napari's 3-D picking): 1-D coord arrays, possibly
         # mixed with scalars (broadcast to the arrays' length), served
         # plane-by-plane so the source's T-slice cache is reused.
@@ -664,14 +812,10 @@ class _TrackView:
         The result is cached on the view so subsequent refreshes and 3-D
         pick-rays cost no I/O; edits keep the cache current in place.
         """
-        if self._vol is None:
-            out = np.empty(self.shape, dtype=self.dtype)
-            for i in range(self.shape[0]):
-                out[i] = self._plane(i)
-            self._vol = out
-        if dtype is not None and dtype != self._vol.dtype:
-            return self._vol.astype(dtype)
-        return self._vol
+        vol = self._ensure_vol()
+        if dtype is not None and dtype != vol.dtype:
+            return vol.astype(dtype)
+        return vol
 
 
 class _StackedTrackView(_TrackView):
@@ -711,6 +855,7 @@ class _StackedTrackView(_TrackView):
         # Keep the materialized 3-D volume in sync with paint edits.
         if self._vol is not None:
             self._vol[index] = value
+            self._grow_bboxes(index, value)
         if self._source.ndim == 3:  # TYX: the view aliases the source
             self._source[index] = value
             return
@@ -783,13 +928,13 @@ class _MaxProjTrackView(_TrackView):
     def _planes_of_t(self, t: int):
         return (t,)
 
-    def refresh_timepoint(self, t: int) -> None:
+    def refresh_timepoint(self, t: int):
         # Unlike apply_mapping, this re-projects the timepoint exactly, so
         # labels that were occluded along Z reappear correctly.
         self._cache.pop(int(t), None)
-        super().refresh_timepoint(t)
+        return super().refresh_timepoint(t)
 
-    def apply_mapping(self, mapping: dict) -> None:
+    def apply_mapping(self, mapping: dict):
         """Remap caches in place; projected planes are dropped instead.
 
         2-D planes recompute exactly on demand (one timepoint of I/O), so
@@ -800,8 +945,9 @@ class _MaxProjTrackView(_TrackView):
         volume shows background there instead until the view is rebuilt
         (toggle the mode off/on).  The underlying data is always exact.
         """
-        super().apply_mapping(mapping)
+        region = super().apply_mapping(mapping)
         self._cache.clear()
+        return region
 
     def __setitem__(self, index, value):
         raise TypeError(
@@ -1020,6 +1166,9 @@ class LabelInspector:
         # the clicked ID exists, "current" only to the clicked timepoint.
         self.delete_scope = "all"
         self.relabel_scope = "all"
+        # Merge defaults to the clicked timepoint: which labels touch is a
+        # per-frame fact, so spreading it over the movie is opt-in.
+        self.merge_scope = "current"
         self._click_split_cb = None  # click-to-split mouse callback
         self._click_merge_cb = None  # click-to-merge-neighbors mouse callback
         # Seeds accumulated for a pending split, or None:
@@ -1494,7 +1643,7 @@ class LabelInspector:
         in-place write on numpy — so it saves normally and stays
         consistent with later all-T remaps (which patch pending diffs).
 
-        Returns the [(coords, old_id), ...] restore records for the
+        Returns the [(coords, old_values)] restore record for the
         single-level Ctrl+Z undo (empty when no ID was present at *t*),
         or the string ``"all"`` when the labels have no time axis and the
         remap fell back to the whole array.
@@ -1519,21 +1668,34 @@ class LabelInspector:
             t_slice = data._get_outer_slice(0, t)
         else:
             t_slice = data[t]
-        # Masks first, writes second: simultaneous mapping semantics.
-        hits = [
-            (np.nonzero(t_slice == k), v, k)
-            for k, v in mapping.items()
-            if int(k) != int(v)
+        # One pass over the slice for the whole mapping: merging an
+        # over-segmented cell remaps a dozen neighbors at once, and a
+        # mask per neighbor would re-scan the volume a dozen times.
+        items = [
+            (int(k), int(v)) for k, v in mapping.items() if int(k) != int(v)
         ]
         restores = []
-        for coords, v, k in hits:
-            if not coords[0].size:
-                continue
-            if isinstance(data, _DaskFancyIndexWrapper):
-                data[(t, *coords)] = v
-            else:
-                t_slice[coords] = v
-            restores.append((coords, k))
+        if items:
+            keys = np.array([k for k, _ in items], dtype=t_slice.dtype)
+            targets = np.array([v for _, v in items], dtype=t_slice.dtype)
+            hit = (
+                (t_slice == keys[0])
+                if len(items) == 1
+                else np.isin(t_slice, keys)
+            )
+            coords = np.nonzero(hit)
+            if coords[0].size:
+                # Old values are read before any write, so a chained
+                # mapping stays simultaneous, and they double as the undo
+                # record for exactly the voxels that changed.
+                old = t_slice[coords]
+                order = np.argsort(keys)
+                new = targets[order][np.searchsorted(keys[order], old)]
+                if isinstance(data, _DaskFancyIndexWrapper):
+                    data[(t, *coords)] = new
+                else:
+                    t_slice[coords] = new
+                restores.append((coords, old))
         if restores:
             labels_layer.refresh()
             self._refresh_track_view(timepoint=t)
@@ -1802,7 +1964,9 @@ class LabelInspector:
 
         # Integer raws with a modest range get exact per-track histograms;
         # anything else falls back to a plain mean.
-        raw_dtype = np.asarray(raw).dtype if not hasattr(raw, "dtype") else raw.dtype
+        raw_dtype = (
+            np.asarray(raw).dtype if not hasattr(raw, "dtype") else raw.dtype
+        )
         n_bins = 0
         if np.issubdtype(raw_dtype, np.integer):
             info_max = int(np.iinfo(raw_dtype).max)
@@ -1871,9 +2035,7 @@ class LabelInspector:
                 value = float(min(rank, len(h) - 1))
             else:
                 value = stats["sums"][label_id] / count
-            out[int(label_id)] = (
-                (value - raw_min) / span if span > 0 else 0.0
-            )
+            out[int(label_id)] = (value - raw_min) / span if span > 0 else 0.0
         return out
 
     def delete_low_intensity_tracks(
@@ -1977,9 +2139,11 @@ class LabelInspector:
         data = layer.data
         if isinstance(data, _DaskFancyIndexWrapper):
             if data._op_log and data._op_log[-1][0] == info["mapping"]:
-                mapping = data.undo_remap()
+                data.undo_remap()
                 layer.refresh()
-                self._refresh_track_view(mapping)
+                # Reversing a deletion is not itself a value map (0 maps
+                # back to many IDs), so the view rebuilds from the source.
+                self._refresh_track_view()
         elif info["backup"] is not None:
             data[...] = info["backup"]
             layer.refresh()
@@ -2032,7 +2196,9 @@ class LabelInspector:
             mapping = data.undo_remap()
             if mapping:
                 layer.refresh()
-                self._refresh_track_view(mapping)
+                # The undone mapping is not its own inverse, so the track
+                # view rebuilds from the (already reverted) source.
+                self._refresh_track_view()
                 desc = ", ".join(
                     (
                         f"{k} restored (deletion undone)"
@@ -2545,29 +2711,20 @@ class LabelInspector:
     # ------------------------------------------------------------------
     # Click-to-merge-neighbors (fuse an over-segmented cell's fragments)
     # ------------------------------------------------------------------
-    def merge_neighbors_at_timepoint(self, label_id, t) -> None:
-        """Merge every label touching *label_id* at timepoint *t* into it.
+    def _touching_neighbors(self, labels_layer, label_id, t) -> list:
+        """IDs sharing a border with *label_id* on the spatial slice at *t*.
 
-        For over-segmented cells split across several IDs: click one
-        fragment and all labels sharing a border with it — at the clicked
-        timepoint only — are relabeled to the clicked ID.  Adjacency is
-        full connectivity (a shared face, edge or corner counts), computed
-        on the label's spatial slice at *t*.  Only direct neighbors merge,
-        not a neighbor's neighbors, so re-clicking the (now larger) label
-        grows the region another ring outward.  The edit is a
-        single-timepoint pixel write, recorded like a paint stroke so it
-        saves normally and Ctrl+Z reverts the merge.
+        Adjacency is full connectivity — a shared face, edge or corner all
+        count as touching.  Empty when the layer, the label or any
+        neighbor is missing; the viewer status says which.
         """
-        labels_layer = self._find_labels_layer()
         if labels_layer is None:
             self.viewer.status = "No labels layer found."
-            return
+            return []
         label_id = int(label_id)
         if label_id == 0:
-            self.viewer.status = (
-                "Select a non-background label to merge into."
-            )
-            return
+            self.viewer.status = "Select a non-background label to merge into."
+            return []
 
         data = labels_layer.data
         try:
@@ -2591,18 +2748,26 @@ class LabelInspector:
             self.viewer.status = (
                 f"Label {label_id} not present at timepoint {t}."
             )
-            return
+            return []
 
         from scipy import ndimage as ndi
 
-        # Full connectivity: a shared face, edge or corner all count as
-        # touching. The one-pixel dilation band around the label collects
-        # every neighboring ID in a single vectorized read.
+        # The one-pixel dilation band around the label collects every
+        # neighboring ID in a single vectorized read — and every voxel
+        # that can touch the label lies inside its bounding box grown by
+        # one, so the dilation runs on that box rather than on the whole
+        # (possibly gigavoxel) spatial slice.
+        where = np.nonzero(mask)
+        box = tuple(
+            slice(max(int(c.min()) - 1, 0), min(int(c.max()) + 2, n))
+            for c, n in zip(where, mask.shape)
+        )
+        sub_mask = mask[box]
         structure = ndi.generate_binary_structure(mask.ndim, mask.ndim)
-        border = ndi.binary_dilation(mask, structure=structure) & ~mask
+        border = ndi.binary_dilation(sub_mask, structure=structure) & ~sub_mask
         neighbors = [
             int(n)
-            for n in np.unique(sub[border])
+            for n in np.unique(sub[box][border])
             if int(n) != 0 and int(n) != label_id
         ]
         if not neighbors:
@@ -2610,9 +2775,66 @@ class LabelInspector:
                 f"Label {label_id} has no touching neighbors at "
                 f"timepoint {t}."
             )
-            return
+        return neighbors
 
-        mapping = {n: label_id for n in neighbors}
+    def merge_neighbors_all_timepoints(self, label_id, t) -> None:
+        """Merge the labels touching *label_id* at *t* into it, on **all**
+        timepoints.
+
+        Which labels touch is still decided on one slice — the clicked
+        timepoint — and those IDs are then merged across the whole movie.
+        That is the right unit for tracked data, where a label ID is one
+        object's trajectory: an over-segmented cell keeps the same
+        fragment IDs frame to frame, so one click repairs the entire
+        track instead of one frame of it.  It is deliberately *not* a
+        per-frame re-detection: neighbors are only ever taken from the
+        frame you looked at, so a merge can never quietly swallow a cell
+        that happens to brush past at some other timepoint.
+
+        Runs through the value-remap LUT, so it costs no I/O however long
+        the movie is, and Ctrl+Z reverts the whole merge in one step.
+        """
+        labels_layer = self._find_labels_layer()
+        neighbors = self._touching_neighbors(labels_layer, label_id, t)
+        if not neighbors:
+            return
+        label_id, t = int(label_id), int(t)
+
+        self._remap_all_timepoints(
+            labels_layer, dict.fromkeys(neighbors, label_id)
+        )
+        self._invalidate_track_stats()
+        ids_str = ", ".join(str(n) for n in neighbors)
+        self._single_t_last = None
+        self.viewer.status = (
+            f"Merged {len(neighbors)} neighbor(s) ({ids_str}) into label "
+            f"{label_id} on all timepoints (touching measured at t={t}). "
+            "Ctrl+Z reverts; 'Save Changes and Continue' writes it to disk."
+        )
+
+    def merge_neighbors_at_timepoint(self, label_id, t) -> None:
+        """Merge every label touching *label_id* at timepoint *t* into it.
+
+        For over-segmented cells split across several IDs: click one
+        fragment and all labels sharing a border with it — at the clicked
+        timepoint only — are relabeled to the clicked ID.  Adjacency is
+        full connectivity (a shared face, edge or corner counts), computed
+        on the label's spatial slice at *t*.  Only direct neighbors merge,
+        not a neighbor's neighbors, so re-clicking the (now larger) label
+        grows the region another ring outward.  The edit is a
+        single-timepoint pixel write, recorded like a paint stroke so it
+        saves normally and Ctrl+Z reverts the merge.
+
+        See :meth:`merge_neighbors_all_timepoints` for the same merge
+        applied to the whole movie.
+        """
+        labels_layer = self._find_labels_layer()
+        neighbors = self._touching_neighbors(labels_layer, label_id, t)
+        if not neighbors:
+            return
+        label_id, t = int(label_id), int(t)
+
+        mapping = dict.fromkeys(neighbors, label_id)
         restores = self._remap_one_timepoint(labels_layer, mapping, t)
         self._invalidate_track_stats()
         ids_str = ", ".join(str(n) for n in neighbors)
@@ -2637,14 +2859,14 @@ class LabelInspector:
         )
 
     def _on_click_merge(self, layer, label_id, event):
-        """Merge every label touching the clicked one, at the clicked
-        timepoint. Track view must be off (touching is a per-slice notion)."""
-        if self._track_view_layer is not None:
-            self.viewer.status = (
-                "Merge neighbors works only in the normal frame view — set "
-                "Track view to 'Off' first."
-            )
-            return
+        """Merge every label touching the clicked one — at the clicked
+        timepoint, or across the movie when ``merge_scope`` is ``"all"``.
+
+        Works in the track views too: only the clicked ID and timepoint
+        come from the view, and adjacency is then computed on the source's
+        full-resolution spatial slice at that timepoint — so a subsampled
+        or Z-projected view never affects which labels are found to touch.
+        """
         if not label_id:  # None (off-canvas) or 0 (background)
             self.viewer.status = (
                 "Merge neighbors: background clicked, nothing merged."
@@ -2661,6 +2883,9 @@ class LabelInspector:
                     "timepoint."
                 )
                 return
+        if self.merge_scope != "current":
+            self.merge_neighbors_all_timepoints(label_id, t)
+            return
         self.merge_neighbors_at_timepoint(label_id, t)
 
     def enable_click_merge(self, enabled: bool) -> None:
@@ -2668,10 +2893,12 @@ class LabelInspector:
         delete / relabel / split).
 
         While enabled, a plain left-click on a label merges every label
-        touching it — at the clicked timepoint only — into the clicked ID,
-        fusing an over-segmented cell's fragments in one click.  Ctrl+Z
-        reverts the last merge.  Track view must be off (touching is a
-        per-slice spatial notion the projected views don't preserve).
+        touching it into the clicked ID, fusing an over-segmented cell's
+        fragments in one click — at the clicked timepoint, or across the
+        whole movie when ``merge_scope`` is ``"all"``.  Ctrl+Z reverts the
+        last merge.  Works in the track views as well: they supply the
+        clicked ID and timepoint, and adjacency is measured on the
+        source's full-resolution slice at that timepoint.
         """
         if enabled and self._click_merge_cb is None:
             self.enable_click_delete(False)
@@ -2684,9 +2911,9 @@ class LabelInspector:
             self._bind_undo_key(self._find_labels_layer(), True)
             self.viewer.status = (
                 "Click-to-merge-neighbors ON: click a label to merge every "
-                "label touching it (at the clicked timepoint) into it. "
-                "Re-click to grow another ring outward; Ctrl+Z reverts. "
-                "Turn Track view off to use it."
+                "label touching it into it — at the clicked timepoint or "
+                "across the movie, per 'Apply to'. Re-click to grow "
+                "another ring outward; Ctrl+Z reverts."
             )
         elif not enabled and self._click_merge_cb is not None:
             with contextlib.suppress(ValueError):
@@ -2833,15 +3060,50 @@ class LabelInspector:
         if layer is None:
             return
         data = getattr(layer, "data", None)
+        region = None
         if isinstance(data, _TrackView):
             if mapping:
-                data.apply_mapping(mapping)
+                region = data.apply_mapping(mapping)
             elif timepoint is not None:
-                data.refresh_timepoint(timepoint)
+                region = data.refresh_timepoint(timepoint)
             else:
                 data.invalidate()
+        if region is not None and self._partial_track_redraw(layer, region):
+            return
         with contextlib.suppress(Exception):
             layer.refresh()
+
+    def _partial_track_redraw(self, layer, region) -> bool:
+        """Redraw only *region* of the 3-D track-view layer.
+
+        ``layer.refresh()`` re-slices the whole view and re-uploads the
+        whole GPU texture — seconds on a multi-GiB track volume, for every
+        click.  napari's own paint tools instead push just the changed box
+        (``_partial_labels_refresh``); an edit whose extent we know can do
+        the same.  Returns False when that isn't possible, so the caller
+        falls back to the full refresh.
+        """
+        try:
+            if int(self.viewer.dims.ndisplay) != 3:
+                return False  # 2-D slicing is one plane — already cheap
+            if getattr(layer, "contour", 0):
+                return False  # contours redraw beyond the changed box
+            if any(s.stop <= s.start for s in region):
+                return True  # nothing changed — nothing to redraw
+            vol = getattr(layer.data, "_vol", None)
+            image = layer._slice.image
+            # The displayed slice must be the very buffer we just edited,
+            # or the canvas would show a stale copy of the rest of it.
+            if vol is None or not np.shares_memory(image.raw, vol):
+                return False
+            image.view[region] = layer.colormap._data_to_texture(vol[region])
+            layer._updated_slice = _bbox_union(
+                getattr(layer, "_updated_slice", None), region
+            )
+            layer._partial_labels_refresh()
+            return True
+        except Exception:
+            return False
 
     def _proceed(self, save: bool):
         """
@@ -3081,19 +3343,40 @@ def label_inspector(
                 "For over-segmented cells — one cell broken into several "
                 "touching IDs. While enabled, left-click any fragment and "
                 "every label sharing a border with it (a shared face, edge "
-                "or corner) is merged into the clicked ID, at the clicked "
-                "timepoint only. Only direct neighbors merge, so re-click "
-                "the now-larger label to grow the region another ring "
-                "outward. Ctrl+Z reverts the last merge. Click-drag "
-                "(pan/zoom) and clicks on background do nothing. Merges are "
-                "staged in memory; press 'Save Changes and Continue' to "
-                "write them. Only in the normal frame view — turn Track "
-                "view off first."
+                "or corner) is merged into the clicked ID. Only direct "
+                "neighbors merge, so re-click the now-larger label to grow "
+                "the region another ring outward. Ctrl+Z reverts the last "
+                "merge. Click-drag (pan/zoom) and clicks on background do "
+                "nothing. Works in the track views too — the click's plane "
+                "picks the timepoint, and neighbors are found on the "
+                "full-resolution data. Merges are staged in memory; press "
+                "'Save Changes and Continue' to write them."
+            ),
+        },
+        scope={
+            "label": "Apply to",
+            "widget_type": "ComboBox",
+            "choices": ["Clicked timepoint only", "All timepoints"],
+            "tooltip": (
+                "'Clicked timepoint only' merges the neighbors just in the "
+                "frame you clicked. 'All timepoints' merges those same "
+                "neighbor IDs across the whole movie — the right unit for "
+                "tracked data, where an over-segmented cell keeps the same "
+                "fragment IDs frame to frame, so one click repairs the "
+                "entire track (the fast LUT path, no extra I/O). Which "
+                "labels count as touching is always decided on the clicked "
+                "frame alone, so an all-timepoint merge can never swallow a "
+                "cell that only brushes past at some other timepoint."
             ),
         },
     )
-    def click_to_merge(enabled: bool = False):
+    def click_to_merge(
+        enabled: bool = False, scope: str = "Clicked timepoint only"
+    ):
         """While on, click a label to merge every touching neighbor into it."""
+        inspector.merge_scope = (
+            "current" if scope.startswith("Clicked") else "all"
+        )
         if enabled and click_to_delete["enabled"].value:
             click_to_delete["enabled"].value = False
         if enabled and click_to_relabel["enabled"].value:
