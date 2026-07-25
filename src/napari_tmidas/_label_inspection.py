@@ -1977,9 +1977,9 @@ class LabelInspector:
         data = layer.data
         if isinstance(data, _DaskFancyIndexWrapper):
             if data._op_log and data._op_log[-1][0] == info["mapping"]:
-                data.undo_remap()
+                mapping = data.undo_remap()
                 layer.refresh()
-                self._refresh_track_view()
+                self._refresh_track_view(mapping)
         elif info["backup"] is not None:
             data[...] = info["backup"]
             layer.refresh()
@@ -2032,7 +2032,7 @@ class LabelInspector:
             mapping = data.undo_remap()
             if mapping:
                 layer.refresh()
-                self._refresh_track_view()
+                self._refresh_track_view(mapping)
                 desc = ", ".join(
                     (
                         f"{k} restored (deletion undone)"
@@ -2843,16 +2843,19 @@ class LabelInspector:
         with contextlib.suppress(Exception):
             layer.refresh()
 
-    def next_pair(self):
+    def _proceed(self, save: bool):
         """
-        Save changes and proceed to the next image-label pair.
+        Advance to the next image-label pair, optionally saving first.
+
+        Shared by :meth:`next_pair` (save=True) and :meth:`skip_pair`
+        (save=False, discarding any in-memory edits to the current pair).
         """
         if not self.image_label_pairs:
             self.viewer.status = "No pairs to inspect."
             return
 
-        # Save current labels before proceeding
-        self.save_current_labels()
+        if save:
+            self.save_current_labels()
 
         # Check if we're already at the last pair
         if self.current_index >= len(self.image_label_pairs) - 1:
@@ -2871,6 +2874,19 @@ class LabelInspector:
         return (
             True  # Return True to indicate successful navigation to next pair
         )
+
+    def next_pair(self):
+        """
+        Save changes and proceed to the next image-label pair.
+        """
+        return self._proceed(save=True)
+
+    def skip_pair(self):
+        """
+        Discard any in-memory (unsaved) changes to the current pair and
+        proceed to the next image-label pair.
+        """
+        return self._proceed(save=False)
 
 
 @magicgui(
@@ -2905,7 +2921,7 @@ def label_inspector(
     inspector.channel_axis_override = channel_axis
     inspector.load_image_label_pairs(folder_path, label_suffix)
 
-    # Add buttons for saving and continuing to the next pair
+    # Add buttons for saving (or skipping) and continuing to the next pair
     @magicgui(call_button="Save Changes and Continue")
     def save_and_continue():
         at_last_pair = (
@@ -2916,6 +2932,17 @@ def label_inspector(
         inspector.next_pair()
         if at_last_pair:
             save_and_continue.call_button.enabled = False
+            skip_and_continue.call_button.enabled = False
+
+    @magicgui(call_button="Skip (Discard Changes)")
+    def skip_and_continue():
+        at_last_pair = (
+            inspector.current_index >= len(inspector.image_label_pairs) - 1
+        )
+        inspector.skip_pair()
+        if at_last_pair:
+            save_and_continue.call_button.enabled = False
+            skip_and_continue.call_button.enabled = False
 
     @magicgui(
         auto_call=True,
@@ -3151,21 +3178,37 @@ def label_inspector(
             }.get(mode, "off")
         )
 
-    viewer.window.add_dock_widget(save_and_continue, name="Save changes")
-    viewer.window.add_dock_widget(click_to_delete, name="Delete label")
-    viewer.window.add_dock_widget(click_to_relabel, name="Relabel label")
     from magicgui.widgets import Container
 
-    split_widget = Container(
-        widgets=[click_to_split, apply_split], labels=False
+    # One dock per functional group, rather than one per tool.
+    save_widget = Container(
+        widgets=[save_and_continue, skip_and_continue], labels=False
     )
-    viewer.window.add_dock_widget(split_widget, name="Split label")
+    viewer.window.add_dock_widget(save_widget, name="Save / Skip")
+
+    label_manip_widget = Container(
+        widgets=[
+            click_to_delete,
+            click_to_relabel,
+            click_to_split,
+            apply_split,
+            click_to_merge,
+        ],
+        labels=False,
+    )
     viewer.window.add_dock_widget(
-        click_to_merge, name="Merge touching neighbors"
+        label_manip_widget, name="Label manipulations"
+    )
+
+    # Track-level bulk operations (act across all timepoints of a track);
+    # more tools land here as they're added.
+    track_manip_widget = Container(
+        widgets=[delete_low_intensity], labels=False
     )
     viewer.window.add_dock_widget(
-        delete_low_intensity, name="Delete low-intensity tracks"
+        track_manip_widget, name="Track manipulations"
     )
+
     viewer.window.add_dock_widget(track_view, name="Track inspection")
 
 

@@ -1417,8 +1417,9 @@ class TestLabelInspectorWidget:
         )
 
         # The first dock widget added inside label_inspector is the
-        # save-and-continue button.
-        save_widget = viewer.window.add_dock_widget.call_args_list[0].args[0]
+        # Save/Skip container; save-and-continue is its first sub-widget.
+        save_dock = viewer.window.add_dock_widget.call_args_list[0].args[0]
+        save_widget = save_dock[0]
 
         edited = np.zeros((8, 8), dtype=np.uint32)
         edited[2:4, 2:4] = 9

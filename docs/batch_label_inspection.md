@@ -92,15 +92,15 @@ For each pair displayed:
 - **Selection tools**: Select and modify regions
 - **Undo/Redo**: Ctrl+Z / Ctrl+Y
 
-**Click Modes** (napari-tmidas, see [One-Click Label Editing](#one-click-label-editing-all-timepoints)):
+**Click Modes** (napari-tmidas, docked together as **Label manipulations**, see [One-Click Label Editing](#one-click-label-editing-all-timepoints)):
 - **Click-to-delete**: Left-click a label to remove it from every timepoint
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
 - **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
 - **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint
 
 **Track-level tools** (napari-tmidas, for tracked time series):
-- **Whole-track 3D views** (see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
-- **Delete low-intensity tracks** (see [Delete Low-Intensity Tracks](#delete-low-intensity-tracks)): remove every track dimmer than a threshold in one step, with a live preview
+- **Whole-track 3D views** (docked as **Track inspection**, see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
+- **Delete low-intensity tracks** (docked as **Track manipulations**, see [Delete Low-Intensity Tracks](#delete-low-intensity-tracks)): remove every track dimmer than a threshold in one step, with a live preview
 
 **Viewing Tips**:
 - Adjust label opacity (right panel) to see image beneath
@@ -109,26 +109,27 @@ For each pair displayed:
 
 ### Step 5: Save Progress
 
-**Save and Continue**:
+Docked together as **Save / Skip**:
+
+**Save Changes and Continue**:
 - Saves current label edits to disk
 - Moves to next image-label pair
 - Shows confirmation status
 
-**Previous**:
-- Saves current edits
-- Returns to previous pair (useful for refinement)
-
-**Stop**:
-- Saves final edits and closes widget
+**Skip (Discard Changes)**:
+- Discards any in-memory (unsaved) edits to the current pair
+- Moves to next image-label pair without writing to disk
+- Useful for pairs that need no correction, or to abandon a mistaken edit
 
 ## Features
 
 ### One-Click Label Editing (all timepoints)
 
-Two toggleable click modes, each in its own dock widget, edit a label across
-**every timepoint** of a time series (e.g. tracked TZYX labels) with a single
-click. Both use a lazy remapping path, so they are instant even for stacks far
-larger than RAM — no data is rewritten until you save.
+Two toggleable click modes, docked together with the other label-editing
+tools under **Label manipulations**, edit a label across **every timepoint**
+of a time series (e.g. tracked TZYX labels) with a single click. Both use a
+lazy remapping path, so they are instant even for stacks far larger than
+RAM — no data is rewritten until you save.
 
 **Click-to-Delete** — enable *"Click a label to delete it from all timepoints"*:
 
@@ -161,7 +162,7 @@ larger than RAM — no data is rewritten until you save.
 
 ### Splitting Merged Labels
 
-Docked as **Split label**, this tool divides an under-segmented label — two
+Docked (with the other click modes) as part of **Label manipulations**, this tool divides an under-segmented label — two
 or more touching cells that a segmenter gave a single ID — into separate
 labels. It is the inverse of Click-to-Relabel's merge, and unlike the other
 click modes it edits **only the clicked timepoint** (each frame's geometry is
@@ -192,7 +193,7 @@ Notes:
 
 ### Merging Touching Neighbors
 
-Docked as **Merge touching neighbors**, this tool is the fix for
+Docked (with the other click modes) as part of **Label manipulations**, this tool is the fix for
 *over*-segmentation — one cell broken into several touching IDs — and the
 counterpart to [Splitting Merged Labels](#splitting-merged-labels). Like the
 split tool it edits **only the clicked timepoint**.
@@ -259,7 +260,7 @@ Three modes:
 
 ### Delete Low-Intensity Tracks
 
-Docked as **Delete low-intensity tracks**, this tool removes every track
+Docked as part of **Track manipulations**, this tool removes every track
 (label ID) whose raw-image brightness falls below a threshold — across **all
 timepoints** — in one step. It is aimed at tracked data where dim, spurious
 tracks should be culled in bulk rather than clicked away one by one.
