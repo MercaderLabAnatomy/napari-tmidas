@@ -1175,6 +1175,15 @@ class LabelInspector:
         self.grow_max_px = 30
         self.grow_smooth_px = 1
         self.grow_channel = "mean"
+        self._click_add_cb = None  # click-to-add-missed-cell mouse callback
+        # Click-to-add settings (see add_label_at_timepoint, which segments
+        # with SAM2 too): add_max_px is the largest radius the new label may
+        # reach from the clicked pixel and the context SAM2 is shown,
+        # add_propagate_z continues the object onto the neighboring Z-planes.
+        self.add_max_px = 30
+        self.add_smooth_px = 1
+        self.add_channel = "mean"
+        self.add_propagate_z = True
         # Seeds accumulated for a pending split, or None:
         # {"label_id": int, "t": int, "coords": [tuple, ...]}.  Plain-click
         # commits once two or more seeds exist; Ctrl+click adds more first.
@@ -1489,6 +1498,7 @@ class LabelInspector:
             or self._click_split_cb is not None
             or self._click_merge_cb is not None
             or self._click_grow_cb is not None
+            or self._click_add_cb is not None
         ):
             self._bind_undo_key(new_labels_layer, True)
 
@@ -1781,15 +1791,13 @@ class LabelInspector:
             "Save to write changes to disk."
         )
 
-    def _ray_hit_voxel(self, layer, label_id, event, dims_displayed):
-        """Full data coordinate of the first voxel carrying *label_id* along
-        the 3-D pick ray (a 1-D int array), or None.
+    def _ray_points(self, layer, event, dims_displayed):
+        """Integer data coordinates sampled along the 3-D pick ray, ``(N, ndim)``.
 
-        napari's ``get_value`` already resolved the click to *label_id*
-        via the same ray, so marching it again (~1 sample per voxel of
-        ray length, one vectorized fancy-index read served from the
-        view's caches) recovers *where* along the ray it was hit — the
-        precise voxel is needed both for the timepoint and as a split seed.
+        The same ray napari casts for ``get_value``, marched at ~2 samples per
+        voxel of its length; non-displayed axes (T for a 4-D layer) come along
+        as their constant slider value, so each row is a full data index.
+        Returns None when the ray misses the layer.
         """
         try:
             # Same world→layer conversions napari's get_value performs
@@ -1830,13 +1838,60 @@ class LabelInspector:
         # indices come from truncation, at ~2 samples per voxel of length.
         n = max(int(2 * np.linalg.norm(end - start)), 2)
         pts = np.floor(np.linspace(start, end, n)).astype(np.intp)
-        data = layer.data
-        np.clip(pts, 0, np.asarray(data.shape, dtype=np.intp) - 1, out=pts)
-        vals = np.asarray(data[tuple(pts.T)])
+        shape = np.asarray(layer.data.shape, dtype=np.intp)
+        np.clip(pts, 0, shape - 1, out=pts)
+        return pts
+
+    def _ray_hit_voxel(self, layer, label_id, event, dims_displayed):
+        """Full data coordinate of the first voxel carrying *label_id* along
+        the 3-D pick ray (a 1-D int array), or None.
+
+        napari's ``get_value`` already resolved the click to *label_id*
+        via the same ray, so marching it again (one vectorized fancy-index
+        read served from the view's caches) recovers *where* along the ray it
+        was hit — the precise voxel is needed both for the timepoint and as a
+        split seed.
+        """
+        pts = self._ray_points(layer, event, dims_displayed)
+        if pts is None:
+            return None
+        vals = np.asarray(layer.data[tuple(pts.T)])
         hit = np.nonzero(vals == label_id)[0]
         if hit.size == 0:
             return None
         return pts[hit[0]]
+
+    def _ray_signal_voxel(self, layer, event, dims_displayed, raw_t):
+        """``(voxel, blocker)`` for a background click in 3-D display.
+
+        The 3-D counterpart of picking a pixel.  napari's own pick reports
+        only where the ray hits a label, and a cell that was missed has none —
+        but the user is aiming at something they can see, and napari draws the
+        raw volume by maximum intensity along exactly this ray.  So the voxel
+        under the cursor is the ray's *brightest* sample, and that is the seed.
+
+        Deliberately the brightest overall, not the brightest unlabeled one:
+        when the ray passes through a cell that already has a label, the
+        brightest thing no label owns is that cell's own halo rim, a pixel
+        ahead of it — seeding there would add a sliver in front of a cell the
+        user was pointing at.  A labeled peak instead comes back as *blocker*,
+        which the caller reports, since the object drawn under the cursor is
+        that label and it needs the grow tool, not this one.
+
+        *raw_t* is the (label-aligned) raw volume at the clicked timepoint;
+        its axes are the ray's trailing ones.  The voxel is None when the ray
+        misses the layer.
+        """
+        pts = self._ray_points(layer, event, dims_displayed)
+        if pts is None:
+            return None, 0
+        spatial = pts[:, pts.shape[1] - np.ndim(raw_t) :]
+        intensity = np.asarray(raw_t[tuple(spatial.T)], dtype=float)
+        peak = int(np.argmax(intensity))
+        owner = int(np.asarray(layer.data[tuple(pts[peak])]))
+        if owner:
+            return None, owner
+        return pts[peak], 0
 
     def _ray_hit_plane(self, layer, label_id, event, dims_displayed):
         """Axis-0 index of the first voxel carrying *label_id* along the
@@ -2397,6 +2452,7 @@ class LabelInspector:
             self.enable_click_split(False)
             self.enable_click_merge(False)
             self.enable_click_grow(False)
+            self.enable_click_add(False)
             self._click_delete_cb = self._make_click_callback(
                 self._on_click_delete
             )
@@ -2416,6 +2472,7 @@ class LabelInspector:
                 and self._click_split_cb is None
                 and self._click_merge_cb is None
                 and self._click_grow_cb is None
+                and self._click_add_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-delete OFF."
@@ -2436,6 +2493,7 @@ class LabelInspector:
             self.enable_click_split(False)
             self.enable_click_merge(False)
             self.enable_click_grow(False)
+            self.enable_click_add(False)
             self._click_relabel_cb = self._make_click_callback(
                 self._on_click_relabel
             )
@@ -2456,6 +2514,7 @@ class LabelInspector:
                 and self._click_split_cb is None
                 and self._click_merge_cb is None
                 and self._click_grow_cb is None
+                and self._click_add_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-relabel OFF."
@@ -2485,13 +2544,14 @@ class LabelInspector:
             return int(data.max().compute())
         return int(np.max(data))
 
-    def _allocate_split_id(self, labels_layer) -> int:
+    def _allocate_new_id(self, labels_layer) -> int:
         """Return the next globally-unique label ID and advance the counter.
 
-        Initialized lazily per pair to ``global_max + 1`` so the first
-        allocation costs one scan and later splits are O(1); monotonic, so
-        intervening deletes / relabels (which only lower the max) can never
-        make a later split reuse a live ID.
+        Shared by every tool that creates a label (split, add).  Initialized
+        lazily per pair to ``global_max + 1`` so the first allocation costs
+        one scan and later ones are O(1); monotonic, so intervening deletes /
+        relabels (which only lower the max) can never make a later
+        allocation reuse a live ID.
         """
         if self._next_free_id is None:
             self._next_free_id = self._global_max_id(labels_layer) + 1
@@ -2613,7 +2673,7 @@ class LabelInspector:
             coords = np.nonzero(ws == marker)
             if not coords[0].size:
                 continue
-            new_id = self._allocate_split_id(labels_layer)
+            new_id = self._allocate_new_id(labels_layer)
             if isinstance(data, _DaskFancyIndexWrapper):
                 data[(t, *coords)] = new_id
             else:
@@ -2744,6 +2804,7 @@ class LabelInspector:
             self.enable_click_relabel(False)
             self.enable_click_merge(False)
             self.enable_click_grow(False)
+            self.enable_click_add(False)
             self._split_seeds = None
             self._click_split_cb = self._make_click_callback(
                 self._on_click_split
@@ -2766,6 +2827,7 @@ class LabelInspector:
                 and self._click_relabel_cb is None
                 and self._click_merge_cb is None
                 and self._click_grow_cb is None
+                and self._click_add_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-split OFF."
@@ -2967,6 +3029,7 @@ class LabelInspector:
             self.enable_click_relabel(False)
             self.enable_click_split(False)
             self.enable_click_grow(False)
+            self.enable_click_add(False)
             self._click_merge_cb = self._make_click_callback(
                 self._on_click_merge
             )
@@ -2987,6 +3050,7 @@ class LabelInspector:
                 and self._click_relabel_cb is None
                 and self._click_split_cb is None
                 and self._click_grow_cb is None
+                and self._click_add_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-merge-neighbors OFF."
@@ -3017,11 +3081,14 @@ class LabelInspector:
     def _prompt_points(seed, lbl, label_id, max_negative: int = 6):
         """Point prompts describing "this object, not its neighbors".
 
-        Positive points are the most interior pixels of the existing label —
-        the distance transform's peaks, spread out so they sample the label
-        rather than crowding one spot.  Each neighboring label contributes one
-        negative point, which is what stops SAM2 from returning a whole clump
-        of touching cells as a single object.
+        Positive points are the most interior pixels of *seed* — the distance
+        transform's peaks, spread out so they sample it rather than crowding
+        one spot.  *seed* is the existing label when growing one, and the
+        clicked pixel when segmenting a cell that has no label yet.  Each
+        neighboring label contributes one negative point, nearest first, which
+        is what stops SAM2 from returning a whole clump of touching cells as a
+        single object.  Pass ``label_id=0`` to make *every* label in the crop
+        a neighbor.
 
         Note there is deliberately no box prompt: a box drawn around an
         under-segmented label would tell SAM2 the object ends at the label's
@@ -3049,6 +3116,13 @@ class LabelInspector:
             )
 
         others = np.unique(lbl[(lbl != 0) & (lbl != label_id)])
+        if others.size > max_negative:
+            # A crowded crop holds more neighbors than the prompt should
+            # carry; the ones worth spending a point on are those the object
+            # could be confused with, i.e. the closest ones.
+            to_seed = ndi.distance_transform_edt(~seed)
+            gap = np.asarray(ndi.minimum(to_seed, lbl, others), dtype=float)
+            others = others[np.argsort(gap, kind="stable")]
         for other in others[:max_negative]:
             other_mask = lbl == other
             other_dist = ndi.distance_transform_edt(other_mask)
@@ -3061,19 +3135,31 @@ class LabelInspector:
             np.asarray(labels, dtype=np.int32),
         )
 
-    def _sam2_plane_mask(self, worker, seed, lbl, raw, label_id, max_px):
+    def _sam2_plane_mask(
+        self, worker, seed, lbl, raw, label_id, max_px, must_cover=None
+    ):
         """SAM2's mask for the object *seed* belongs to, on one plane.
 
-        The plane is cropped to the label plus *max_px* of context before
+        *seed* is whatever is already known to lie inside the object — the
+        existing label when growing one, a single clicked pixel (with
+        ``label_id=0``) when segmenting a cell that has none yet, the
+        previous plane's cross-section when tracing one through Z.  It both
+        supplies the prompt points and, by default, decides which candidate
+        won; pass *must_cover* to judge the candidates against something
+        smaller than the prompt, which is what a tapering cell needs — its
+        next cross-section can be well under half of the prompt's area
+        without the mask having drifted anywhere.
+
+        The plane is cropped to the seed plus *max_px* of context before
         being sent.  That is not only cheaper: SAM2 rescales whatever it is
         given to 1024x1024, so cropping to the cell raises its effective
         resolution considerably compared with sending a full frame.
 
         Two passes are used.  The first offers three candidate masks at
-        different scales; the one that best covers the existing label wins.
-        The second feeds that candidate back as a mask prompt, which is what
-        pulls the contour out to the true edge — on a synthetic cell it took
-        the recovered area from 93%% to 99.6%% of ground truth, and
+        different scales; the one that best covers the seed wins.  The second
+        feeds that candidate back as a mask prompt, which is what pulls the
+        contour out to the true edge — on a synthetic cell it took the
+        recovered area from 93%% to 99.6%% of ground truth, and
         under-reaching is exactly the failure being fixed here.
         """
         ys, xs = np.nonzero(seed)
@@ -3092,13 +3178,14 @@ class LabelInspector:
         if not coords.size:
             return np.zeros_like(seed)
 
+        target = sub_seed if must_cover is None else must_cover[crop]
         masks, scores = worker.segment(image, coords, point_labels)
-        seed_area = float(sub_seed.sum())
+        target_area = float(target.sum())
         cover = np.array(
-            [float((m & sub_seed).sum()) / seed_area for m in masks]
+            [float((m & target).sum()) / target_area for m in masks]
         )
-        # Only a candidate that actually contains the existing label can be
-        # the object it belongs to; among those, trust SAM2's own score.
+        # Only a candidate that actually contains what is known to be inside
+        # the object can be that object; among those, trust SAM2's own score.
         usable = cover >= 0.5
         index = int(
             np.argmax(np.where(usable, scores, -np.inf))
@@ -3108,9 +3195,9 @@ class LabelInspector:
 
         best = masks[index]
         refined, _score = worker.refine(index, coords, point_labels)
-        # A refinement that loses the label has drifted onto something else;
+        # A refinement that loses the object has drifted onto something else;
         # keep the unrefined candidate rather than the wrong object.
-        if float((refined & sub_seed).sum()) >= 0.5 * seed_area:
+        if float((refined & target).sum()) >= 0.5 * target_area:
             best = refined
 
         out = np.zeros_like(seed)
@@ -3343,6 +3430,7 @@ class LabelInspector:
             self.enable_click_relabel(False)
             self.enable_click_split(False)
             self.enable_click_merge(False)
+            self.enable_click_add(False)
             self._click_grow_cb = self._make_click_callback(
                 self._on_click_grow
             )
@@ -3363,9 +3451,450 @@ class LabelInspector:
                 and self._click_relabel_cb is None
                 and self._click_split_cb is None
                 and self._click_merge_cb is None
+                and self._click_add_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-grow OFF."
+
+    # ------------------------------------------------------------------
+    # Click-to-add (segment a missed cell into a brand-new label)
+    # ------------------------------------------------------------------
+    # Fewer pixels than this is not a cell — a click on a featureless patch
+    # of background is reported rather than written.
+    _MIN_NEW_AREA = 4
+    # Z propagation stops where the cross-section falls below this fraction
+    # of the clicked plane's: a cell tapers off, and what lies past the taper
+    # is noise, not more cell.
+    _Z_TAPER_STOP = 0.1
+    # ... and a plane that suddenly grows by this factor has leaked into its
+    # surroundings, so it is dropped and the walk ends there.
+    _Z_LEAK_STOP = 3.0
+    # The one that actually ends most walks: a plane counts as part of the
+    # cell only while its brightness above the local background is at least
+    # this fraction of the clicked plane's. Past the cell's last plane a
+    # Z-stack still shows its out-of-focus halo, which is real signal and
+    # which SAM2 will happily segment plane after plane — area alone shrinks
+    # far too gently to tell that cone apart from a tapering cell, while the
+    # contrast drops off a cliff (measured on a blurred synthetic sphere:
+    # 0.36 of the clicked plane's on its last true plane, 0.19 on the first
+    # empty one).
+    _Z_FAINT_STOP = 0.3
+
+    def _add_plane_mask(
+        self, worker, prompt, point, lbl, raw, max_px, smooth_px
+    ):
+        """One plane of a new object: prompt SAM2, then make the mask safe.
+
+        *prompt* is what SAM2 is told lies inside the object — the clicked
+        pixel on the clicked plane, the previous plane's cross-section while
+        propagating through Z — while *point* is the single pixel the result
+        must contain and stay within *max_px* of.  Keeping the two apart is
+        what lets a propagated plane be prompted with the whole previous
+        cross-section without simply inheriting it, since
+        :meth:`_constrain_region` unions its seed back in.
+        """
+        region = self._sam2_plane_mask(
+            worker, prompt, lbl, raw, 0, max_px, must_cover=point
+        )
+        # Only background is free: a missed cell is by definition unlabeled,
+        # so anything already carrying an ID belongs to another cell.
+        return self._constrain_region(
+            region, point, lbl == 0, max_px, smooth_px
+        )
+
+    @staticmethod
+    def _plane_contrast(raw, lbl, mask):
+        """How far *mask* stands out from the unlabeled background around it.
+
+        Medians, so a few saturated pixels or a ragged edge cannot move it,
+        and measured per plane, so a stack that dims with depth is judged
+        against its own background rather than the clicked plane's.
+        """
+        background = raw[(lbl == 0) & ~mask]
+        if not mask.any() or not background.size:
+            return 0.0
+        return float(np.median(raw[mask]) - np.median(background))
+
+    def _next_plane_mask(
+        self, worker, prev, lbl, raw, max_px, smooth_px, first_area, contrast
+    ):
+        """The new object's cross-section on the next Z-plane, or None to stop.
+
+        The previous plane's mask, minus whatever is labeled here, is the
+        prompt; its most interior pixel anchors the result.  ``None`` ends the
+        walk — the plane is only the cell's out-of-focus halo, the cell has
+        tapered out, its footprint is taken by another label, or the mask
+        leaked.
+        """
+        from scipy import ndimage as ndi
+
+        prompt = prev & (lbl == 0)
+        if not prompt.any():
+            return None  # another label owns this plane's footprint
+        point = np.zeros_like(prompt)
+        dist = ndi.distance_transform_edt(prompt)
+        point[np.unravel_index(np.argmax(dist), dist.shape)] = True
+
+        mask = self._add_plane_mask(
+            worker, prompt, point, lbl, raw, max_px, smooth_px
+        )
+        area = float(mask.sum())
+        if area < self._Z_TAPER_STOP * first_area:
+            return None
+        if area > self._Z_LEAK_STOP * float(prev.sum()):
+            return None
+        here = self._plane_contrast(raw, lbl, mask)
+        if here < self._Z_FAINT_STOP * contrast:
+            return None  # only the cell's halo reaches this plane
+        return mask
+
+    def add_label_at_timepoint(self, coord, t, raw_t=None) -> None:
+        """Segment the unlabeled cell at spatial *coord* into a new label at *t*.
+
+        For false negatives — a cell the segmentation missed entirely, so
+        there is no label to correct and nothing for the other tools to act
+        on.  The clicked pixel is the whole prompt: SAM2 returns the object
+        around it, every label in the crop contributes a negative point
+        (nearest first), and the result is intersected with background, so a
+        cell that got missed *because* it touches a labeled one still cannot
+        take a single pixel from its neighbor.  The mask is also confined to
+        ``add_max_px`` of the click, which bounds what one click can create.
+
+        On a Z-stack the click resolves one plane only, so the object is
+        propagated up and down from there: each plane is prompted with the
+        previous plane's cross-section and segmented from its own in-plane
+        image, exactly as the grow tool treats an anisotropic stack.  The
+        walk stops once a plane holds only the cell's out-of-focus halo
+        rather than the cell — by brightness, since the halo is real signal
+        that segments perfectly well (see :meth:`_next_plane_mask`).  Set
+        ``add_propagate_z`` False to label the clicked plane alone.
+
+        The new cell gets a fresh globally-unique ID, and the write is a
+        single-timepoint pixel edit recorded like a paint stroke, so Ctrl+Z
+        removes it and 'Save Changes and Continue' writes it to disk.
+
+        Pass *raw_t* to reuse a raw slice the caller has already read (a 3-D
+        click needs it to resolve the clicked voxel in the first place), so
+        one click costs one read however big the timepoint is.
+        """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+
+        from napari_tmidas._sam2_worker import Sam2Unavailable, Sam2Worker
+
+        data = labels_layer.data
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            data = _DaskFancyIndexWrapper(data)
+            labels_layer.data = data
+
+        has_time = getattr(data, "ndim", 0) >= 3
+        t = int(t) if has_time else None
+        if isinstance(data, _DaskFancyIndexWrapper) and has_time:
+            sub = data._get_outer_slice(0, t)
+        elif has_time:
+            sub = np.asarray(data[t])  # a view: writes reach the layer
+        else:
+            sub = np.asarray(data)
+
+        coord = tuple(int(c) for c in coord)
+        if len(coord) != sub.ndim or any(
+            not 0 <= c < n for c, n in zip(coord, sub.shape)
+        ):
+            self.viewer.status = (
+                "Add: the clicked point is outside the label image."
+            )
+            return
+        occupant = int(sub[coord])
+        if occupant:
+            self.viewer.status = (
+                f"Add: that pixel already belongs to label {occupant} — click "
+                "a cell that has no label, or use click-to-grow to extend "
+                "this one."
+            )
+            return
+
+        if raw_t is None:
+            raw_t = self._raw_slice_at(data, t, self.add_channel)
+        if raw_t is None:
+            return  # status already set
+
+        # One more ID has to fit in the label dtype; check before spending
+        # any time on inference.
+        if self._next_free_id is None:
+            self._next_free_id = self._global_max_id(labels_layer) + 1
+        if (
+            np.issubdtype(data.dtype, np.integer)
+            and self._next_free_id > np.iinfo(data.dtype).max
+        ):
+            self.viewer.status = (
+                f"Add: label dtype {np.dtype(data.dtype)} cannot hold another "
+                f"ID (max {np.iinfo(data.dtype).max}). Convert the labels to "
+                "a wider integer type first."
+            )
+            return
+
+        max_px = max(int(self.add_max_px), 1)
+        smooth_px = max(int(self.add_smooth_px), 0)
+        # Work in a window around the click only — the new label cannot reach
+        # beyond max_px of it, plus a margin so the crop SAM2 sees carries
+        # context on every side. Z is kept whole when propagating, since that
+        # is the axis the object is about to be traced along.
+        pad = max_px + smooth_px + 8
+        box = tuple(
+            slice(max(c - pad, 0), min(c + pad + 1, n))
+            for c, n in zip(coord[-2:], sub.shape[-2:])
+        )
+        if sub.ndim == 3:
+            z = coord[0]
+            z_range = (
+                slice(0, sub.shape[0])
+                if self.add_propagate_z
+                else slice(z, z + 1)
+            )
+            box = (z_range, *box)
+        lbl = np.asarray(sub[box])
+        raw = np.asarray(raw_t[box], dtype=np.float32)
+        local = tuple(c - b.start for c, b in zip(coord, box))
+
+        # Starting the worker loads a ~900 MB checkpoint, so the first click
+        # of a session pauses for a few seconds; later ones are ~0.2 s/plane.
+        try:
+            self.viewer.status = "Add: contacting SAM2..."
+            worker = Sam2Worker.instance()
+        except Sam2Unavailable as exc:
+            self.viewer.status = f"Add: {exc}"
+            return
+
+        z0 = local[0] if lbl.ndim == 3 else None
+        seed = np.zeros(lbl.shape[-2:], dtype=bool)
+        seed[local[-2:]] = True
+        new = np.zeros(lbl.shape, dtype=bool)
+        try:
+            first = self._add_plane_mask(
+                worker,
+                seed,
+                seed,
+                lbl if z0 is None else lbl[z0],
+                raw if z0 is None else raw[z0],
+                max_px,
+                smooth_px,
+            )
+            first_area = float(first.sum())
+            if first_area < self._MIN_NEW_AREA:
+                self.viewer.status = (
+                    "Add: SAM2 found no object at that point — click nearer "
+                    "the middle of the cell, or raise 'Max radius' if the "
+                    "cell is bigger than that."
+                )
+                return
+            # How far this cell stands out here is the yardstick every
+            # further plane is held to.
+            contrast = self._plane_contrast(
+                raw if z0 is None else raw[z0],
+                lbl if z0 is None else lbl[z0],
+                first,
+            )
+            if z0 is None:
+                new[...] = first
+            else:
+                new[z0] = first
+                if self.add_propagate_z:
+                    for step in (-1, 1):
+                        prev, zi = first, z0 + step
+                        while 0 <= zi < lbl.shape[0]:
+                            self.viewer.status = (
+                                f"Add: SAM2 on Z-plane {zi}..."
+                            )
+                            mask = self._next_plane_mask(
+                                worker,
+                                prev,
+                                lbl[zi],
+                                raw[zi],
+                                max_px,
+                                smooth_px,
+                                first_area,
+                                contrast,
+                            )
+                            if mask is None:
+                                break
+                            new[zi] = mask
+                            prev, zi = mask, zi + step
+        except Sam2Unavailable as exc:
+            self.viewer.status = f"Add: {exc}"
+            return
+
+        new_id = self._allocate_new_id(labels_layer)
+        offsets = [b.start for b in box]
+        coords = tuple(c + o for c, o in zip(np.nonzero(new), offsets))
+        index = coords if t is None else (t, *coords)
+        if isinstance(data, _DaskFancyIndexWrapper):
+            data[index] = new_id
+        else:
+            sub[coords] = new_id
+
+        labels_layer.refresh()
+        self._refresh_track_view(timepoint=t)
+        # A new label changes what there is to measure — re-measure intensity
+        # stats on the next preview. (Also clears any older single-T undo,
+        # so our record has to be set after it.)
+        self._invalidate_track_stats()
+        n_px = int(new.sum())
+        self._single_t_last = {
+            "t": t,
+            "restores": [(coords, 0)],
+            "desc": f"new label {new_id} removed ({n_px} pixel(s))",
+        }
+        n_planes = int(new.any(axis=(-2, -1)).sum()) if new.ndim == 3 else 1
+        self.viewer.status = (
+            f"Added label {new_id}: {n_px} pixel(s) on {n_planes} plane(s)"
+            + ("" if t is None else f", timepoint {t}")
+            + ". Ctrl+Z removes it; 'Save Changes and Continue' writes it "
+            "to disk."
+        )
+
+    def _on_click_add(self, layer, label_id, event):
+        """Segment the missed cell under the click into a new label.
+
+        Unlike the other click tools this one wants a *background* click, so
+        the clicked voxel itself has to be resolved rather than an ID.  In 2-D
+        display ``world_to_data`` gives it exactly.  In 3-D display it takes
+        the raw volume: napari's pick reports only where the ray hits a label
+        and a missed cell has none, so the ray is marched and the brightest
+        unlabeled voxel on it — the one napari's maximum-intensity rendering
+        put under the cursor — becomes the seed (:meth:`_ray_signal_voxel`).
+        The track views project or restack Z, so they are still refused.
+        """
+        if self._track_view_layer is not None:
+            self.viewer.status = (
+                "Add works only in the normal frame view — set Track view to "
+                "'Off' first."
+            )
+            return
+        occupied = (
+            f"Add: that pixel already belongs to label {label_id} — click "
+            "a cell that has no label, or use click-to-grow to extend "
+            "this one."
+        )
+        dims_displayed = list(getattr(event, "dims_displayed", None) or [])
+        if len(dims_displayed) == 3:
+            # In 3-D a ray that meets no label returns None, which here is
+            # the ordinary case — a missed cell has no label to hit — so it
+            # goes to the ray path rather than being read as off-canvas.
+            if label_id:
+                self.viewer.status = occupied
+            else:
+                self._add_from_ray(layer, event, dims_displayed)
+            return
+        if label_id is None:
+            return  # off-canvas
+        if label_id:
+            self.viewer.status = occupied
+            return
+        data = getattr(layer, "data", None)
+        shape = np.asarray(getattr(data, "shape", ()), dtype=np.intp)
+        try:
+            full = np.asarray(layer.world_to_data(event.position), dtype=float)
+        except Exception:
+            full = np.empty(0)
+        if full.shape[0] != shape.shape[0]:
+            self.viewer.status = "Add: could not resolve the clicked voxel."
+            return
+        coord = np.clip(np.rint(full).astype(np.intp), 0, shape - 1)
+        if data.ndim >= 3:  # axis 0 is time (see grow_label_at_timepoint)
+            self.add_label_at_timepoint(tuple(coord[1:]), int(coord[0]))
+        else:
+            self.add_label_at_timepoint(tuple(coord), 0)
+
+    def _add_from_ray(self, layer, event, dims_displayed) -> None:
+        """Add a missed cell from a click in napari's 3-D display.
+
+        Only a 4-D (T, Z, Y, X) label has a Z axis to click into: T is then
+        the non-displayed axis, so the timepoint comes from the slider and
+        the ray runs through the Z-stack of that frame.  A 3-D (T, Y, X)
+        movie shown in 3-D has time as its volume axis, where a "voxel" spans
+        frames rather than planes, so that case is sent back to 2-D display.
+        """
+        data = getattr(layer, "data", None)
+        if getattr(data, "ndim", 0) < 4:
+            self.viewer.status = (
+                "Add: this label has no Z axis, so napari's 3D display is "
+                "showing time as the third axis — switch back to 2D display "
+                "to add a cell."
+            )
+            return
+        try:
+            t = int(round(float(layer.world_to_data(event.position)[0])))
+        except Exception:
+            self.viewer.status = "Add: could not resolve the clicked frame."
+            return
+        t = min(max(t, 0), data.shape[0] - 1)
+
+        raw_t = self._raw_slice_at(data, t, self.add_channel)
+        if raw_t is None:
+            return  # status already set
+        voxel, blocker = self._ray_signal_voxel(
+            layer, event, dims_displayed, raw_t
+        )
+        if blocker:
+            self.viewer.status = (
+                f"Add: the brightest thing along that view ray is label "
+                f"{blocker}, so that is the cell under the cursor — use "
+                "click-to-grow for it, or rotate the view to reach a cell "
+                "behind it."
+            )
+            return
+        if voxel is None:
+            self.viewer.status = (
+                "Add: the view ray missed the volume — click over the data."
+            )
+            return
+        self.add_label_at_timepoint(
+            tuple(int(c) for c in voxel[1:]), t, raw_t=raw_t
+        )
+
+    def enable_click_add(self, enabled: bool) -> None:
+        """Toggle click-to-add mode (mutually exclusive with the other click
+        tools).
+
+        While enabled, a plain left-click on a cell the segmentation missed
+        hands that pixel to SAM2 as a prompt and writes the object it returns
+        as a new label with a fresh ID, at the clicked timepoint.  Ctrl+Z
+        removes it again.
+        """
+        if enabled and self._click_add_cb is None:
+            self.enable_click_delete(False)
+            self.enable_click_relabel(False)
+            self.enable_click_split(False)
+            self.enable_click_merge(False)
+            self.enable_click_grow(False)
+            self._click_add_cb = self._make_click_callback(self._on_click_add)
+            self.viewer.mouse_drag_callbacks.append(self._click_add_cb)
+            self._bind_undo_key(self._find_labels_layer(), True)
+            self.viewer.status = (
+                "Click-to-add ON: click a cell that has no label and SAM2 "
+                "segments it into a new one at that timepoint. The first "
+                "click loads the model (a few seconds). Ctrl+Z removes the "
+                "last added label. Turn Track view off to use it."
+            )
+        elif not enabled and self._click_add_cb is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.mouse_drag_callbacks.remove(self._click_add_cb)
+            self._click_add_cb = None
+            if (
+                self._click_delete_cb is None
+                and self._click_relabel_cb is None
+                and self._click_split_cb is None
+                and self._click_merge_cb is None
+                and self._click_grow_cb is None
+            ):
+                self._bind_undo_key(self._find_labels_layer(), False)
+            self.viewer.status = "Click-to-add OFF."
 
     def set_track_view_mode(self, mode: str) -> None:
         """Switch the track-inspection view: ``"off"``, ``"stack"`` or ``"max"``.
@@ -3646,155 +4175,126 @@ def label_inspector(
             save_and_continue.call_button.enabled = False
             skip_and_continue.call_button.enabled = False
 
+    # The click tools are mutually exclusive by nature, so one selector
+    # drives all of them instead of six checkboxes that had to switch each
+    # other off, and a mode's settings are shown only while it is chosen.
+    # That keeps the dock two or three rows tall instead of seventeen, which
+    # is the difference between the napari window fitting on a laptop screen
+    # and not. Each mode explains itself in the status bar when picked.
+    modes = {
+        "Off": "off",
+        "Delete label": "delete",
+        "Relabel label": "relabel",
+        "Split merged label": "split",
+        "Merge touching neighbors": "merge",
+        "Grow label to cell (SAM2)": "grow",
+        "Add missed cell (SAM2)": "add",
+    }
+
     @magicgui(
         auto_call=True,
-        enabled={
-            "label": "Click a label to delete it",
+        mode={
+            "label": "Click mode",
+            "widget_type": "ComboBox",
+            "choices": list(modes),
             "tooltip": (
-                "While enabled, left-click any label in the viewer to "
-                "remove it instantly — from every timepoint or only the "
-                "clicked one, per 'Apply to'. Ctrl+Z undoes the last "
-                "deletion. Click-drag (pan/zoom) and clicks on "
-                "background do nothing. Deletions are staged in memory; "
-                "press 'Save Changes and Continue' to write them to the "
-                "file — saved deletions can no longer be undone."
+                "What a left-click in the viewer does. One mode at a time; "
+                "its settings appear below it. Click-drag (pan/zoom) is "
+                "never affected, Ctrl+Z undoes the last edit of any mode, "
+                "and every edit is staged in memory until 'Save Changes and "
+                "Continue' writes it to the file.\n\n"
+                "• Delete — remove the clicked label, from the whole movie "
+                "or just the clicked timepoint.\n"
+                "• Relabel — Ctrl+click a label to pipette its ID, then "
+                "click others to reassign them to it (merging them into "
+                "it).\n"
+                "• Split — for one label spanning several touching cells: "
+                "click one point per cell, then 'Apply split'. A seeded "
+                "watershed divides it at the constrictions; each part after "
+                "the first gets a new ID. Ctrl+click removes the last seed. "
+                "Needs Track view off.\n"
+                "• Merge touching neighbors — for one cell broken into "
+                "several IDs: click one fragment and every label sharing a "
+                "border with it merges into it.\n"
+                "• Grow label to cell — for a label covering only part of "
+                "its cell: SAM2 segments the cell and extends the label to "
+                "it, only into background, at the clicked timepoint.\n"
+                "• Add missed cell — for a cell with no label at all: click "
+                "inside it and SAM2 segments it into a new label with a "
+                "fresh ID. In 3D display the click takes the brightest "
+                "unlabeled voxel along the view ray. Needs Track view "
+                "off.\n\n"
+                "The two SAM2 modes need the SAM2 environment, which the "
+                "'Batch Crop Anything' widget installs; the first click of a "
+                "session loads the model (a few seconds)."
             ),
         },
+    )
+    def click_mode(mode: str = "Off"):
+        """Choose which click tool is active (they are mutually exclusive)."""
+        chosen = modes.get(mode, "off")
+        for name, settings in mode_settings.items():
+            settings.visible = name == chosen
+        setters = {
+            "delete": inspector.enable_click_delete,
+            "relabel": inspector.enable_click_relabel,
+            "split": inspector.enable_click_split,
+            "merge": inspector.enable_click_merge,
+            "grow": inspector.enable_click_grow,
+            "add": inspector.enable_click_add,
+        }
+        # Off first, so the tools' own mutual exclusion never has to fight
+        # this one, then on — a no-op when the mode did not really change.
+        for name, setter in setters.items():
+            if name != chosen:
+                setter(False)
+        if chosen in setters:
+            setters[chosen](True)
+
+    scope_tip = (
+        "'All timepoints' applies to the clicked ID across the whole movie "
+        "(the fast track-wide path). 'Clicked timepoint only' applies just "
+        "to the timepoint you clicked — in the track views the click's plane "
+        "determines that timepoint."
+    )
+
+    @magicgui(
+        auto_call=True,
         scope={
             "label": "Apply to",
             "widget_type": "ComboBox",
             "choices": ["All timepoints", "Clicked timepoint only"],
-            "tooltip": (
-                "'All timepoints' removes the clicked ID from the whole "
-                "movie (the fast track-wide path). 'Clicked timepoint "
-                "only' removes it just at the timepoint you clicked — in "
-                "the track views the click's plane determines that "
-                "timepoint."
-            ),
+            "tooltip": scope_tip,
         },
     )
-    def click_to_delete(enabled: bool = False, scope: str = "All timepoints"):
-        """While on, left-click a label in the viewer to delete it."""
+    def delete_settings(scope: str = "All timepoints"):
+        """Scope of click-to-delete."""
         inspector.delete_scope = (
             "current" if scope.startswith("Clicked") else "all"
         )
-        # NB: index by name — `.enabled` is FunctionGui's own bool property
-        # (widget enabled state) and shadows the parameter's CheckBox.
-        if enabled and click_to_relabel["enabled"].value:
-            click_to_relabel["enabled"].value = False
-        if enabled and click_to_split["enabled"].value:
-            click_to_split["enabled"].value = False
-        if enabled and click_to_merge["enabled"].value:
-            click_to_merge["enabled"].value = False
-        if enabled and click_to_grow["enabled"].value:
-            click_to_grow["enabled"].value = False
-        inspector.enable_click_delete(enabled)
 
     @magicgui(
         auto_call=True,
-        enabled={
-            "label": "Click a label to relabel it (Ctrl+click picks up an ID)",
-            "tooltip": (
-                "While enabled, Ctrl+left-click a label to pipette its ID, "
-                "then plain left-click other labels to relabel them to that "
-                "ID (merging them into it) — on every timepoint or only "
-                "the clicked one, per 'Apply to'. The target "
-                "ID is napari's selected label, so you can also pick it "
-                "with napari's pipette (color picker) tool — switch back "
-                "to the pan/zoom tool (camera symbol) before clicking — or "
-                "type it into the label spinbox. Ctrl+Z undoes the last "
-                "relabel. Click-drag (pan/zoom) and clicks on background "
-                "do nothing. Relabels are staged in memory; press 'Save "
-                "Changes and Continue' to write them to the file — saved "
-                "relabels can no longer be undone."
-            ),
-        },
         scope={
             "label": "Apply to",
             "widget_type": "ComboBox",
             "choices": ["All timepoints", "Clicked timepoint only"],
             "tooltip": (
-                "'All timepoints' relabels the clicked ID across the whole "
-                "movie (the fast track-wide path). 'Clicked timepoint "
-                "only' relabels it just at the timepoint you clicked — in "
-                "the track views the click's plane determines that "
-                "timepoint."
+                scope_tip + " The target ID is napari's selected label, so "
+                "you can also pick it with napari's pipette (color picker) "
+                "tool — switch back to the pan/zoom tool before clicking — "
+                "or type it into the label spinbox."
             ),
         },
     )
-    def click_to_relabel(enabled: bool = False, scope: str = "All timepoints"):
-        """While on, left-click a label to give it the pipetted ID."""
+    def relabel_settings(scope: str = "All timepoints"):
+        """Scope of click-to-relabel."""
         inspector.relabel_scope = (
             "current" if scope.startswith("Clicked") else "all"
         )
-        if enabled and click_to_delete["enabled"].value:
-            click_to_delete["enabled"].value = False
-        if enabled and click_to_split["enabled"].value:
-            click_to_split["enabled"].value = False
-        if enabled and click_to_merge["enabled"].value:
-            click_to_merge["enabled"].value = False
-        if enabled and click_to_grow["enabled"].value:
-            click_to_grow["enabled"].value = False
-        inspector.enable_click_relabel(enabled)
 
     @magicgui(
         auto_call=True,
-        enabled={
-            "label": "Click one point per cell to split a merged label",
-            "tooltip": (
-                "For under-segmented labels — several touching cells that "
-                "got one ID. While enabled, left-click one point inside "
-                "each cell of the merged label, then press 'Apply split': a "
-                "seeded watershed divides it at the constrictions between "
-                "the seeds, at the clicked timepoint only. Ctrl+click "
-                "removes the most recently placed seed. The first seed's "
-                "region keeps the original ID; every other region gets a "
-                "new, globally-unique ID. Ctrl+Z merges the split back. All "
-                "seeds must be on the same label and timepoint (a click "
-                "elsewhere restarts). Splits are staged in memory; press "
-                "'Save Changes and Continue' to write them. Only in the "
-                "normal frame view — turn Track view off first."
-            ),
-        },
-    )
-    def click_to_split(enabled: bool = False):
-        """While on, click one point per cell to split a merged label."""
-        if enabled and click_to_delete["enabled"].value:
-            click_to_delete["enabled"].value = False
-        if enabled and click_to_relabel["enabled"].value:
-            click_to_relabel["enabled"].value = False
-        if enabled and click_to_merge["enabled"].value:
-            click_to_merge["enabled"].value = False
-        if enabled and click_to_grow["enabled"].value:
-            click_to_grow["enabled"].value = False
-        inspector.enable_click_split(enabled)
-
-    @magicgui(
-        call_button="Apply split",
-        labels=False,
-    )
-    def apply_split():
-        """Run the watershed split on the seeds placed in the viewer."""
-        inspector.commit_split()
-
-    @magicgui(
-        auto_call=True,
-        enabled={
-            "label": "Click a label to merge its touching neighbors into it",
-            "tooltip": (
-                "For over-segmented cells — one cell broken into several "
-                "touching IDs. While enabled, left-click any fragment and "
-                "every label sharing a border with it (a shared face, edge "
-                "or corner) is merged into the clicked ID. Only direct "
-                "neighbors merge, so re-click the now-larger label to grow "
-                "the region another ring outward. Ctrl+Z reverts the last "
-                "merge. Click-drag (pan/zoom) and clicks on background do "
-                "nothing. Works in the track views too — the click's plane "
-                "picks the timepoint, and neighbors are found on the "
-                "full-resolution data. Merges are staged in memory; press "
-                "'Save Changes and Continue' to write them."
-            ),
-        },
         scope={
             "label": "Apply to",
             "widget_type": "ComboBox",
@@ -3812,45 +4312,19 @@ def label_inspector(
             ),
         },
     )
-    def click_to_merge(
-        enabled: bool = False, scope: str = "Clicked timepoint only"
-    ):
-        """While on, click a label to merge every touching neighbor into it."""
+    def merge_settings(scope: str = "Clicked timepoint only"):
+        """Scope of click-to-merge-neighbors."""
         inspector.merge_scope = (
             "current" if scope.startswith("Clicked") else "all"
         )
-        if enabled and click_to_delete["enabled"].value:
-            click_to_delete["enabled"].value = False
-        if enabled and click_to_relabel["enabled"].value:
-            click_to_relabel["enabled"].value = False
-        if enabled and click_to_split["enabled"].value:
-            click_to_split["enabled"].value = False
-        if enabled and click_to_grow["enabled"].value:
-            click_to_grow["enabled"].value = False
-        inspector.enable_click_merge(enabled)
+
+    @magicgui(call_button="Apply split", labels=False)
+    def apply_split():
+        """Run the watershed split on the seeds placed in the viewer."""
+        inspector.commit_split()
 
     @magicgui(
         auto_call=True,
-        enabled={
-            "label": "Click a label to grow it to the cell boundary (SAM2)",
-            "tooltip": (
-                "For under-segmented cells — the label covers only part of "
-                "the object. While enabled, left-click the label and SAM2 "
-                "segments the cell it belongs to, extending the label to the "
-                "full object at the clicked timepoint only. The existing "
-                "label is used as the prompt, and every neighboring label "
-                "becomes a negative prompt, so a touching cell is not "
-                "swallowed. The label only ever grows and only into "
-                "background, so you can re-click after adjusting the "
-                "settings. Ctrl+Z removes exactly the pixels the last grow "
-                "added. Runs on each Z-plane the label appears on. The first "
-                "click of a session loads the model (a few seconds); after "
-                "that it is about 0.2 s per plane. Requires the SAM2 "
-                "environment — the 'Batch Crop Anything' widget installs it. "
-                "Grows are staged in memory; press 'Save Changes and "
-                "Continue' to write them."
-            ),
-        },
         max_growth={
             "label": "Max growth (px)",
             "widget_type": "SpinBox",
@@ -3893,25 +4367,98 @@ def label_inspector(
             ),
         },
     )
-    def click_to_grow(
-        enabled: bool = False,
+    def grow_settings(
         max_growth: int = 30,
         smoothing: int = 1,
         channel: str = "Mean",
     ):
-        """While on, click an under-segmented label to grow it to the cell."""
+        """Settings for growing an under-segmented label to its cell."""
         inspector.grow_max_px = int(max_growth)
         inspector.grow_smooth_px = int(smoothing)
         inspector.grow_channel = channel.strip().lower()
-        for other in (
-            click_to_delete,
-            click_to_relabel,
-            click_to_split,
-            click_to_merge,
-        ):
-            if enabled and other["enabled"].value:
-                other["enabled"].value = False
-        inspector.enable_click_grow(enabled)
+
+    @magicgui(
+        auto_call=True,
+        max_radius={
+            "label": "Max radius (px)",
+            "widget_type": "SpinBox",
+            "min": 1,
+            "max": 400,
+            "tooltip": (
+                "Does double duty: how far, in pixels, the new label may "
+                "reach from the pixel you clicked, and how much context "
+                "around it SAM2 is shown. Too small clips a large cell (or "
+                "one clicked off-center); too large makes the crop mostly "
+                "background, which gives SAM2 less resolution on the cell "
+                "itself (the crop is rescaled to 1024x1024 whatever its "
+                "size). Roughly the diameter of one cell is a good start, "
+                "since the click rarely lands dead center."
+            ),
+        },
+        smoothing={
+            "label": "Smoothing (px)",
+            "widget_type": "SpinBox",
+            "min": 0,
+            "max": 20,
+            "tooltip": (
+                "Polishes the returned contour with a closing then an "
+                "opening of this radius, filling small bays and removing thin "
+                "spurs. SAM2 masks are already fairly smooth, so 0-2 is "
+                "usually right; 0 keeps the model's boundary exactly."
+            ),
+        },
+        channel={
+            "label": "Signal channel",
+            "widget_type": "ComboBox",
+            "choices": ["Mean", "0", "1", "2", "3", "4"],
+            "tooltip": (
+                "Which channel of a multi-channel raw image is shown to "
+                "SAM2. 'Mean' averages all channels; pick a channel index "
+                "(0-based, along the raw's channel axis) to outline the cell "
+                "in one marker — e.g. a membrane or cytoplasm channel rather "
+                "than a nuclear one. Ignored for single-channel raws."
+            ),
+        },
+        propagate_z={
+            "label": "Continue through Z",
+            "tooltip": (
+                "For Z-stacks: after segmenting the plane you clicked, "
+                "continue the same object onto the planes above and below, "
+                "each prompted with the previous plane's outline and "
+                "segmented from its own image (which suits anisotropic "
+                "stacks). The walk stops once a plane shows only the cell's "
+                "dimmer out-of-focus halo, or where the cell tapers out or "
+                "the mask leaks, and every plane keeps the one new ID, so no "
+                "stitching is needed. Turn off to label the clicked plane "
+                "alone. Ignored for data without a Z axis."
+            ),
+        },
+    )
+    def add_settings(
+        max_radius: int = 30,
+        smoothing: int = 1,
+        channel: str = "Mean",
+        propagate_z: bool = True,
+    ):
+        """Settings for segmenting a missed cell into a new label."""
+        inspector.add_max_px = int(max_radius)
+        inspector.add_smooth_px = int(smoothing)
+        inspector.add_channel = channel.strip().lower()
+        inspector.add_propagate_z = bool(propagate_z)
+
+    mode_settings = {
+        "delete": delete_settings,
+        "relabel": relabel_settings,
+        "split": apply_split,
+        "merge": merge_settings,
+        "grow": grow_settings,
+        "add": add_settings,
+    }
+    # Push each panel's defaults into the inspector once, so a mode works
+    # off what its settings show even if they are never touched.
+    for settings in mode_settings.values():
+        if settings is not apply_split:
+            settings()
 
     @magicgui(
         call_button="Apply",
@@ -3998,19 +4545,16 @@ def label_inspector(
     viewer.window.add_dock_widget(save_widget, name="Save / Skip")
 
     label_manip_widget = Container(
-        widgets=[
-            click_to_delete,
-            click_to_relabel,
-            click_to_split,
-            apply_split,
-            click_to_merge,
-            click_to_grow,
-        ],
+        widgets=[click_mode, *mode_settings.values()],
         labels=False,
     )
     viewer.window.add_dock_widget(
         label_manip_widget, name="Label manipulations"
     )
+    # Only the chosen mode's settings are shown; with "Off" that leaves one
+    # row. Hiding has to happen after the container is built, since adding a
+    # widget to a Container makes it visible again.
+    click_mode()
 
     # Track-level bulk operations (act across all timepoints of a track);
     # more tools land here as they're added.

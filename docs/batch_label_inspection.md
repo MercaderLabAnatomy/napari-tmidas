@@ -90,14 +90,18 @@ For each pair displayed:
 - **Eraser**: Remove labels
   - Set label ID to 0 to erase
 - **Selection tools**: Select and modify regions
-- **Undo/Redo**: Ctrl+Z / Ctrl+Y
+- **Undo/Redo**: Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y is napari's 2D/3D display
+  toggle, not redo)
 
-**Click Modes** (napari-tmidas, docked together as **Label manipulations**, see [One-Click Label Editing](#one-click-label-editing-all-timepoints)):
-- **Click-to-delete**: Left-click a label to remove it from every timepoint
-- **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
-- **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
-- **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint or across the whole movie
-- **Click-to-grow** (see [Growing Incomplete Labels](#growing-incomplete-labels)): click a label that covers only part of its cell and SAM2 extends it to the whole object, at the clicked timepoint
+**Click Modes** (napari-tmidas, docked as **Label manipulations**): one
+**Click mode** dropdown picks what a left-click does, and only that mode's
+settings are shown beneath it. Set it to *Off* to click without editing.
+- **Delete label** (see [One-Click Label Editing](#one-click-label-editing-all-timepoints)): left-click a label to remove it from every timepoint
+- **Relabel label**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
+- **Split merged label** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
+- **Merge touching neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint or across the whole movie
+- **Grow label to cell (SAM2)** (see [Growing Incomplete Labels](#growing-incomplete-labels)): click a label that covers only part of its cell and SAM2 extends it to the whole object, at the clicked timepoint
+- **Add missed cell (SAM2)** (see [Segmenting Missed Cells](#segmenting-missed-cells)): click a cell that has no label at all and SAM2 segments it into a new one, at the clicked timepoint
 
 **Track-level tools** (napari-tmidas, for tracked time series):
 - **Whole-track 3D views** (docked as **Track inspection**, see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
@@ -126,19 +130,20 @@ Docked together as **Save / Skip**:
 
 ### One-Click Label Editing (all timepoints)
 
-Two toggleable click modes, docked together with the other label-editing
-tools under **Label manipulations**, edit a label across **every timepoint**
-of a time series (e.g. tracked TZYX labels) with a single click. Both use a
-lazy remapping path, so they are instant even for stacks far larger than
-RAM — no data is rewritten until you save.
+Two of the **Click mode** dropdown's entries, under **Label manipulations**,
+edit a label across **every timepoint** of a time series (e.g. tracked TZYX
+labels) with a single click. Both use a lazy remapping path, so they are
+instant even for stacks far larger than RAM — no data is rewritten until you
+save.
 
-**Click-to-Delete** — enable *"Click a label to delete it from all timepoints"*:
+**Delete label** — set *Click mode* to it, leaving *Apply to* on
+*All timepoints*:
 
 - **Left-click** any label in the viewer to remove it from every timepoint
   (e.g. delete a whole mistracked cell in one click)
 - Replaces the slow bucket-fill workflow, which loads the entire array
 
-**Click-to-Relabel** — enable *"Click a label to relabel it (Ctrl+click picks up an ID)"*:
+**Relabel label** — set *Click mode* to it:
 
 - **Ctrl+left-click** a label to *pipette* its ID (this sets napari's
   selected label)
@@ -158,18 +163,18 @@ RAM — no data is rewritten until you save.
 - Click-dragging (pan/zoom) and clicks on background do nothing
 - Edits are staged in memory; press **Save and Continue** to write them to
   the file — saved operations can no longer be undone
-- The two modes are mutually exclusive: enabling one switches the other off
+- Only one click mode is active at a time — the dropdown makes that automatic
 - The active mode persists as you move through image-label pairs
 
 ### Splitting Merged Labels
 
 Docked (with the other click modes) as part of **Label manipulations**, this tool divides an under-segmented label — two
 or more touching cells that a segmenter gave a single ID — into separate
-labels. It is the inverse of Click-to-Relabel's merge, and unlike the other
+labels. It is the inverse of the *Relabel label* mode's merge, and unlike the other
 click modes it edits **only the clicked timepoint** (each frame's geometry is
 different, so there is no all-timepoints shortcut).
 
-Enable *"Click one point per cell to split a merged label"*, then:
+Set **Click mode** to *Split merged label*, then:
 
 - **Left-click** one point inside each cell of the merged label — one seed per
   cell. The status bar shows the running seed count.
@@ -198,7 +203,7 @@ Docked (with the other click modes) as part of **Label manipulations**, this too
 *over*-segmentation — one cell broken into several touching IDs — and the
 counterpart to [Splitting Merged Labels](#splitting-merged-labels).
 
-Enable *"Click a label to merge its touching neighbors into it"*, then
+Set **Click mode** to *Merge touching neighbors*, then
 **left-click** any fragment of the cell. Every label that shares a border with
 the clicked one — a shared face, edge or corner all count as touching — is
 relabeled to the clicked ID.
@@ -244,8 +249,8 @@ segmentation of a different kind from
 label spanning several cells. Here one cell has one label; the label is simply
 too small.
 
-Enable *"Click a label to grow it to the cell boundary (SAM2)"* and
-**left-click** the label. The cell is segmented with
+Set **Click mode** to *Grow label to cell (SAM2)* and **left-click** the
+label. The cell is segmented with
 [SAM2](https://github.com/facebookresearch/sam2) and the label is extended to
 the full object, at the clicked timepoint only.
 
@@ -295,6 +300,84 @@ resident worker process, so the **first click pauses for a few seconds** and
 every later one costs about **0.2 s per Z-plane**. A GPU is used when
 available, otherwise it falls back to CPU (considerably slower).
 
+### Segmenting Missed Cells
+
+Docked (with the other click modes) as part of **Label manipulations**, this
+tool is the fix for a **false negative** — a cell the segmentation left out
+entirely. There is no label to correct, so none of the other tools apply:
+[Growing Incomplete Labels](#growing-incomplete-labels) needs a label to
+extend, and painting one by hand is the slow alternative this replaces.
+
+Set **Click mode** to *Add missed cell (SAM2)* and **left-click inside the
+cell**. The clicked pixel is the whole prompt:
+[SAM2](https://github.com/facebookresearch/sam2) segments the object around it
+and the result is written as a **new label with a fresh, globally-unique ID**,
+at the clicked timepoint only. Click **background** — a click on an existing
+label is refused with a pointer to click-to-grow.
+
+Every label near the click contributes a negative point ("not this object"),
+nearest first, and the returned mask is intersected with **background only**.
+That combination is what makes the common case safe: a cell often gets missed
+*because* it touches a labeled one, and neither the model nor a stray brush
+stroke can take a pixel from the neighbor.
+
+Settings:
+
+- **Max radius (px)** — does double duty: how far the new label may reach from
+  the pixel you clicked, and how much context around it the model is shown.
+  Too small clips a large cell (or one clicked off-center); too large makes the
+  crop mostly background, leaving less resolution on the cell itself (the crop
+  is rescaled to 1024x1024 whatever its size). Roughly one cell *diameter* is a
+  good start, since a click rarely lands dead center.
+- **Smoothing (px)** — as for growing: closes small bays and removes thin
+  spurs; 0-2 is usually right.
+- **Signal channel** — which channel of a multi-channel raw outlines the cell,
+  e.g. a membrane marker rather than a nuclear one.
+- **Continue through Z** *(on by default)* — for Z-stacks, continue the same
+  object onto the planes above and below the clicked one.
+
+Notes:
+
+- A click resolves **one plane**, so on a stack the object is traced through Z
+  from there: each plane is prompted with the previous plane's outline and
+  segmented from its own in-plane image (which suits anisotropic stacks). The
+  walk stops once a plane holds only the cell's **out-of-focus halo** — judged
+  by how far the object stands out from the background *on that plane*, since
+  the halo is real signal that segments as readily as the cell — and also
+  where the cell tapers out, where another label owns the footprint, or where
+  the mask suddenly leaks. Every plane keeps the one new ID, so nothing needs
+  stitching. Turn *Continue through Z* off to label the clicked plane alone.
+- Nothing is written if the model finds no object at the click — the status bar
+  says so and suggests clicking nearer the middle of the cell or raising *Max
+  radius*.
+- **Ctrl+Z** removes the label just added.
+- New labels are staged in memory; press **Save and Continue** to write them.
+- Works in **2D and in 3D display**. In 3D there is no pixel to pick — napari
+  reports only where the view ray hits a *label*, and a missed cell has none —
+  so the ray is marched and its **brightest sample** becomes the seed, which is
+  exactly the voxel napari's maximum-intensity rendering drew under the cursor.
+  Any camera angle works, and a click in 3D lands on the same seed (and
+  produces the same label) as the equivalent click in 2D. If that brightest
+  sample already belongs to a label, the status bar says which — that cell is
+  what you pointed at, and it needs *Grow label to cell* instead.
+- Needs the **normal frame view**: turn *Track view* off, since those views
+  restack or project Z. On a movie with no Z axis, napari's 3D display stacks
+  *time*, so switch back to 2D there.
+- Mutually exclusive with the other click modes; the mode persists as you move
+  through image-label pairs.
+
+**Requirements.** The same SAM2 environment as
+[Growing Incomplete Labels](#growing-incomplete-labels), and the same costs: a
+few seconds for the first click of a session, then ~0.2 s per plane.
+
+On synthetic cells with blurred, noisy edges, a click in a missed cell wedged
+between two labeled ones recovered it at IoU 0.94 against ground truth (0.87
+for a deliberately off-center click), with zero pixels taken from either
+neighbor. On a Z-stack the propagation covered all 9 planes of a sphere at IoU
+0.93; on a sphere sitting in a taller stack it labeled exactly the 9 planes the
+cell occupies and none of the 8 that hold only its halo (IoU 0.66 there — the
+edge planes, being mostly halo in-plane, come out wider than the cell).
+
 ### Whole-Track 3D Inspection
 
 Docked as **Track inspection**, the *Track view* dropdown shows the whole
@@ -330,9 +413,9 @@ Three modes:
   full resolution); only painting is disabled in a downsampled view, since a
   strided pixel cannot be written back losslessly. The status bar reports
   when a view is downsampled.
-- Click-to-delete / click-to-relabel / click-to-merge-neighbors, **Ctrl+Z**
+- The *Delete label* / *Relabel label* / *Merge touching neighbors* modes, **Ctrl+Z**
   undo, and **Save Changes and Continue** all work exactly as in the normal
-  view; label files stay TZYX. (Click-to-split is the one exception — it needs
+  view; label files stay TZYX. (*Split merged label* is one exception — it needs
   precise source voxels as seeds, so turn *Track view* off for it.)
 - Editing stays interactive no matter how long the movie is. The 3-D volume is
   built **once** and then kept up to date in place: a delete or relabel touches
@@ -471,14 +554,14 @@ After running Cellpose or another segmenter:
 ### Merging Split Objects
 
 When segmentation over-splits cells:
-1. Enable **Click-to-Relabel**
+1. Set **Click mode** to *Relabel label*
 2. Ctrl+click the object to keep (pipettes its ID)
 3. Click the split-off fragments to merge them into it (all timepoints at once)
 4. Or paint manually with the same label for partial merges
 5. Save changes
 
-For a single over-segmented cell, enable **Click-to-merge-neighbors** instead
-and click one fragment: every label touching it fuses into the clicked ID, no
+For a single over-segmented cell, set **Click mode** to *Merge touching
+neighbors* instead and click one fragment: every label touching it fuses into the clicked ID, no
 pipetting needed (re-click to reach further out). Set its **Apply to** to *All
 timepoints* to repair the whole track from that one click, or leave it on
 *Clicked timepoint only* when the fragmentation differs frame to frame.
@@ -486,7 +569,7 @@ timepoints* to repair the whole track from that one click, or leave it on
 ### Splitting Merged Objects
 
 When segmentation under-splits — several touching cells share one ID:
-1. Enable **Click-to-split**
+1. Set **Click mode** to *Split merged label*
 2. Navigate to the timepoint where the objects are merged
 3. Click one point inside each cell (Ctrl+click removes the last seed)
 4. Press **Apply split** — the label divides into one region per seed, each
@@ -496,10 +579,23 @@ When segmentation under-splits — several touching cells share one ID:
 ### Removing False Positives
 
 When segmentation detects spurious objects:
-1. Enable **Click-to-Delete** and click each spurious object —
+1. Set **Click mode** to *Delete label* and click each spurious object —
    removed from every timepoint instantly
 2. Or use eraser (label = 0) for partial removal
 3. Save corrected labels
+
+### Recovering False Negatives
+
+When segmentation misses cells entirely (dim ones, or ones packed against a
+detected neighbor):
+1. Set **Click mode** to *Add missed cell (SAM2)* and set *Max radius* to
+   about one cell diameter
+2. Click inside each missed cell; SAM2 segments it into a new label with a
+   fresh ID, without touching the labels around it
+3. On a Z-stack leave *Continue through Z* on to get the whole object from one
+   click
+4. Check the result and **Ctrl+Z** any label you do not want
+5. **Save and Continue**
 
 ### Culling Dim Tracks in Bulk
 
@@ -517,12 +613,12 @@ To review a track's entire lifetime at once:
    (tubes)
 2. Switch napari to its 3D display
 3. Rotate to see each track as one connected object
-4. Click-to-delete or click-to-relabel whole tracks, then save
+4. Delete or relabel whole tracks with one click, then save
 
 ### Fixing Tracking ID Switches
 
 When a tracked object changes ID partway through a time series:
-1. Enable **Click-to-Relabel**
+1. Set **Click mode** to *Relabel label*
 2. Ctrl+click the object at a timepoint where it has the correct ID
 3. Navigate to a timepoint after the switch and click the object —
    the wrong ID is reassigned to the correct one everywhere
@@ -532,7 +628,8 @@ When a tracked object changes ID partway through a time series:
 
 When a segmentation systematically under-covers its objects (thresholding that
 clipped dim edges, a model trained on tighter masks):
-1. Enable **Click-to-grow** and set *Max growth* to about one cell radius
+1. Set **Click mode** to *Grow label to cell (SAM2)* and set *Max growth* to
+   about one cell radius
 2. Click each under-sized label; SAM2 extends it to the cell boundary
 3. Check the result and **Ctrl+Z** any grow you do not want
 4. **Save and Continue**
@@ -624,7 +721,7 @@ automatically — usually a TIFF written without clean axes metadata.
 - Check folder write permissions
 - Verify label filename in confirmation message
 
-### Click-to-Grow Reports SAM2 Is Missing
+### Grow / Add Reports SAM2 Is Missing
 
 **Cause**: The SAM2 environment or its model checkpoint has not been created yet
 
@@ -635,7 +732,7 @@ automatically — usually a TIFF written without clean axes metadata.
 - The status bar names exactly what is missing (environment, checkpoint, or
   plugin file)
 
-### Click-to-Grow Is Slow
+### Grow / Add Is Slow
 
 **Cause**: The model loads on the first click, and cost scales with Z-depth
 

@@ -1965,3 +1965,484 @@ class TestClickToGrow:
 
         inspector.enable_click_delete(False)
         assert len(self.viewer.mouse_drag_callbacks) == 0
+
+
+class TestClickToAdd:
+    """Segmenting a cell the segmentation missed into a brand-new label.
+
+    As with the grow tool the model is faked — here by a worker that simply
+    thresholds the image it is handed, so each plane's "object" follows the
+    synthetic raw — leaving the decisions that make an edit safe to be
+    tested: prompt construction, the background-only constraint, the radius
+    cap, the Z walk, the new ID, the write and the undo.
+    """
+
+    def setup_method(self):
+        self.viewer = Mock()
+        self.viewer.mouse_drag_callbacks = []
+        self.viewer.status = ""
+
+    class _FakeLabels:
+        def __init__(self, data):
+            self.data = data
+
+        def refresh(self):
+            pass
+
+    class _FakeWorker:
+        """Stands in for the SAM2 subprocess by thresholding the crop.
+
+        The bright part of whatever image it is handed is the winning
+        candidate, so a plane's object is whatever the synthetic raw shows
+        there; two decoys (one tiny, one covering everything) sit around it
+        with higher and lower scores, and every prompt is recorded.
+        """
+
+        def __init__(self):
+            self.calls = []
+            self.last = None
+
+        def segment(self, image, coords, labels):
+            self.calls.append(
+                {
+                    "image": image,
+                    "coords": np.asarray(coords),
+                    "labels": np.asarray(labels),
+                }
+            )
+            good = image[:, :, 0] >= 128
+            tiny = np.zeros_like(good)
+            tiny[:2, :2] = True
+            huge = np.ones_like(good)
+            self.last = np.stack([tiny, good, huge])
+            return self.last, np.array([0.9, 0.8, 0.7], dtype=np.float32)
+
+        def refine(self, index, coords, labels):
+            return self.last[index], 0.95
+
+    @staticmethod
+    def _disc(shape, center, radius):
+        yy, xx = np.ogrid[: shape[0], : shape[1]]
+        return (yy - center[0]) ** 2 + (xx - center[1]) ** 2 <= radius**2
+
+    def _pair(self, radii=(6,), n_t=2):
+        """A TZYX raw with one bright disc per Z-plane (radius 0 = none) and
+        labels that are empty — the missed cell to recover."""
+        n_z = len(radii)
+        raw = np.full((n_t, n_z, 21, 21), 10, dtype=np.uint16)
+        for z, radius in enumerate(radii):
+            if radius:
+                raw[:, z, self._disc((21, 21), (10, 10), radius)] = 200
+        labels = np.zeros((n_t, n_z, 21, 21), dtype=np.uint32)
+        return raw, labels
+
+    def _inspector(self, raw, labels, worker=None):
+        """Inspector wired to a fake raw image and a fake SAM2 worker."""
+        import contextlib as _ctx
+
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "raw_labels.tif")]
+        inspector.current_index = 0
+        layer = self._FakeLabels(labels)
+        self.viewer.layers = [layer]
+        worker = worker or self._FakeWorker()
+
+        @_ctx.contextmanager
+        def _patched():
+            with (
+                patch(
+                    "napari_tmidas._label_inspection._load_image",
+                    return_value=raw,
+                ),
+                patch(
+                    "napari_tmidas._sam2_worker.Sam2Worker.instance",
+                    return_value=worker,
+                ),
+                patch(
+                    "napari_tmidas._label_inspection.Labels", self._FakeLabels
+                ),
+            ):
+                yield
+
+        return inspector, layer, worker, _patched
+
+    def test_add_segments_the_missed_cell_into_a_new_label(self):
+        """The clicked cell becomes a label with a fresh, unused ID."""
+        raw, labels = self._pair()
+        labels[0, 0, 0, 0] = 4  # the highest ID in use anywhere
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        added = labels[0, 0]
+        assert added[10, 10] == 5  # global max + 1
+        disc = self._disc((21, 21), (10, 10), 6)
+        assert (added[disc] == 5).mean() > 0.9
+        assert added[0, 20] == 0  # background outside the cell untouched
+        assert not labels[1].any()  # only the clicked timepoint changed
+        assert "Added label 5" in self.viewer.status
+
+    def test_the_click_is_positive_and_every_label_negative(self):
+        """The clicked pixel prompts the object; existing labels repel it."""
+        raw, labels = self._pair()
+        labels[0, 0, 3, 3] = 7  # a labeled cell next to the missed one
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        call = worker.calls[0]
+        coords, kinds = call["coords"], call["labels"]
+        assert call["image"].ndim == 3 and call["image"].dtype == np.uint8
+        pos = coords[kinds == 1]
+        assert len(pos) == 1
+        assert tuple(pos[0]) == (10.0, 10.0)  # SAM2's (x, y) order
+        neg = coords[kinds == 0]
+        assert len(neg) == 1 and tuple(neg[0]) == (3.0, 3.0)
+
+    def test_add_never_claims_a_neighbouring_label(self):
+        """A missed cell touching a labeled one takes none of its pixels."""
+        raw, labels = self._pair()
+        labels[0, 0, 10, 13] = 2  # a labeled cell inside the returned mask
+        labels[0, 0, 10, 14] = 2
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        assert labels[0, 0, 10, 13] == 2
+        assert labels[0, 0, 10, 14] == 2
+        assert labels[0, 0, 10, 10] == 3  # the new cell still got its ID
+
+    def test_max_radius_caps_the_new_label(self):
+        """The label cannot reach further than 'Max radius' from the click."""
+        raw, labels = self._pair()
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+        inspector.add_max_px = 1
+        inspector.add_smooth_px = 0
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        assert labels[0, 0, 10, 11] == 1  # one pixel out: reached
+        assert labels[0, 0, 10, 14] == 0  # inside the cell but past the cap
+
+    def test_a_click_on_an_existing_label_is_refused(self):
+        """Only background clicks add; existing labels are grow's business."""
+        raw, labels = self._pair()
+        labels[0, 0, 10, 10] = 3
+        before = labels.copy()
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        np.testing.assert_array_equal(labels, before)
+        assert not worker.calls
+        assert "already belongs to label 3" in self.viewer.status
+
+    def test_a_crowded_crop_spends_its_negatives_on_the_nearest_labels(self):
+        """More neighbours than prompt points: the closest ones win.
+
+        The prompt carries at most six negatives, and in a dense field the
+        ones worth spending them on are the labels the object could be
+        confused with — not whichever happen to have the lowest IDs.
+        """
+        lbl = np.zeros((40, 40), dtype=np.uint32)
+        seed = np.zeros((40, 40), dtype=bool)
+        seed[20, 20] = True
+        # IDs 1-4 are parked in the far corners, 5-10 ring the seed.
+        for i, (y, x) in enumerate(
+            [(1, 1), (1, 38), (38, 1), (38, 38)], start=1
+        ):
+            lbl[y, x] = i
+        near = [(16, 20), (24, 20), (20, 16), (20, 24), (17, 17), (23, 23)]
+        for i, (y, x) in enumerate(near, start=5):
+            lbl[y, x] = i
+
+        coords, kinds = LabelInspector._prompt_points(seed, lbl, 0)
+        negatives = {tuple(c) for c in coords[kinds == 0]}
+        assert negatives == {(float(x), float(y)) for y, x in near}
+
+    def test_nothing_found_reports_instead_of_writing(self):
+        """A click where SAM2 sees no object leaves the labels alone."""
+
+        class _BlindWorker:
+            calls = []
+
+            def segment(self, image, coords, labels):
+                empty = np.zeros(image.shape[:2], dtype=bool)
+                return (
+                    np.stack([empty, empty, empty]),
+                    np.array([0.9, 0.8, 0.7], dtype=np.float32),
+                )
+
+            def refine(self, index, coords, labels):
+                return np.zeros((1, 1), dtype=bool), 0.1
+
+        raw, labels = self._pair()
+        before = labels.copy()
+        inspector, layer, _worker, patched = self._inspector(
+            raw, labels, worker=_BlindWorker()
+        )
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 2, 2), 0)
+
+        np.testing.assert_array_equal(labels, before)
+        assert "no object" in self.viewer.status
+
+    def test_add_undo_removes_the_new_label(self):
+        """Ctrl+Z takes the added label back out, pixel for pixel."""
+        raw, labels = self._pair()
+        before = labels.copy()
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+            assert labels.any()
+            inspector._on_undo_key()
+
+        np.testing.assert_array_equal(labels, before)
+
+    def test_propagation_follows_the_cell_through_z_and_stops(self):
+        """The object continues onto neighbouring planes until it tapers out."""
+        raw, labels = self._pair(radii=(0, 4, 6, 4, 0))
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((2, 10, 10), 0)
+
+        present = [bool((labels[0, z] == 1).any()) for z in range(5)]
+        assert present == [False, True, True, True, False]
+        # One ID for the whole object, so the planes need no stitching.
+        assert set(np.unique(labels[labels != 0])) == {1}
+
+    def test_propagation_stops_at_the_out_of_focus_halo(self):
+        """A plane that only holds the cell's dim halo is not part of it.
+
+        The halo segments as readily as the cell — after contrast stretching
+        it looks the same — so brightness, not shape, has to end the walk.
+        """
+        raw, labels = self._pair(radii=(6, 6, 6))
+        raw[:, 0][raw[:, 0] > 10] = 40  # a faint halo below the cell
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((1, 10, 10), 0)
+
+        assert (labels[0, 1] == 1).any() and (labels[0, 2] == 1).any()
+        assert not labels[0, 0].any()
+
+    def test_propagation_can_be_turned_off(self):
+        """With 'Continue through Z' off only the clicked plane is labeled."""
+        raw, labels = self._pair(radii=(6, 6, 6))
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+        inspector.add_propagate_z = False
+
+        with patched():
+            inspector.add_label_at_timepoint((1, 10, 10), 0)
+
+        assert (labels[0, 1] == 1).any()
+        assert not labels[0, 0].any() and not labels[0, 2].any()
+        assert len(worker.calls) == 1
+
+    def test_propagation_stops_where_another_label_owns_the_plane(self):
+        """A neighbour occupying the next plane ends the walk, unharmed."""
+        raw, labels = self._pair(radii=(6, 6))
+        labels[0, 0] = 9  # the whole plane below belongs to another cell
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.add_label_at_timepoint((1, 10, 10), 0)
+
+        assert (labels[0, 0] == 9).all()
+        assert (labels[0, 1] == 10).any()  # global max 9 + 1
+
+    def test_add_on_a_dask_wrapper(self):
+        """Wrapper-backed labels take the sparse per-slice write path."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        raw, labels = self._pair()
+        wrapper = _DaskFancyIndexWrapper(
+            da.from_array(labels, chunks=(1, *labels.shape[1:]))
+        )
+        inspector, layer, worker, patched = self._inspector(raw, wrapper)
+
+        with patched():
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+            result = np.asarray(wrapper)
+            assert result[0, 0, 10, 10] == 1
+            assert not result[1].any()
+
+            inspector._on_undo_key()
+            np.testing.assert_array_equal(np.asarray(wrapper), labels)
+
+    def test_missing_sam2_reports_instead_of_editing(self):
+        """Without the SAM2 environment the click explains itself."""
+        from napari_tmidas._sam2_worker import Sam2Unavailable
+
+        raw, labels = self._pair()
+        before = labels.copy()
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "raw_labels.tif")]
+        self.viewer.layers = [self._FakeLabels(labels)]
+
+        with (
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
+            patch(
+                "napari_tmidas._sam2_worker.Sam2Worker.instance",
+                side_effect=Sam2Unavailable("SAM2 is not installed."),
+            ),
+            patch("napari_tmidas._label_inspection.Labels", self._FakeLabels),
+        ):
+            inspector.add_label_at_timepoint((0, 10, 10), 0)
+
+        np.testing.assert_array_equal(labels, before)
+        assert "not installed" in self.viewer.status
+
+    def test_click_resolves_the_voxel_and_the_timepoint(self):
+        """The click position picks the timepoint, plane and pixel."""
+        inspector = LabelInspector(self.viewer)
+        calls = []
+        inspector.add_label_at_timepoint = lambda c, t: calls.append((c, t))
+
+        class _FakeEvent:
+            dims_displayed = [2, 3]
+            modifiers = ()
+            position = (1.0, 0.0, 2.0, 3.0)
+            view_direction = None
+
+        class _FakeLayer:
+            data = np.zeros((3, 1, 5, 5), dtype=np.uint32)
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        inspector._on_click_add(_FakeLayer(), 0, _FakeEvent())
+        assert calls == [((0, 2, 3), 1)]
+
+        # A click on an existing label is refused.
+        inspector._on_click_add(_FakeLayer(), 6, _FakeEvent())
+        assert calls == [((0, 2, 3), 1)]
+        assert "already belongs to label 6" in self.viewer.status
+
+    def test_a_3d_click_seeds_the_brightest_unlabeled_voxel(self):
+        """In 3-D display the view ray, not a pixel, picks the cell.
+
+        napari reports no value for a click on a missed cell, so the ray is
+        marched and the brightest voxel no label owns wins — the one its
+        maximum-intensity rendering drew under the cursor.
+        """
+        inspector = LabelInspector(self.viewer)
+        calls = []
+        inspector.add_label_at_timepoint = (
+            lambda c, t, raw_t=None: calls.append((c, t, raw_t is not None))
+        )
+        labels = np.zeros((2, 5, 8, 8), dtype=np.uint32)
+        labels[1, 4, 4, 4] = 7  # a dimmer labeled cell further along the ray
+        raw = np.zeros((5, 8, 8), dtype=np.float32)
+        raw[3, 4, 4] = 900.0  # the brightest sample: the missed cell
+        raw[4, 4, 4] = 500.0
+        raw[0, 4, 4] = 100.0
+
+        class _FakeEvent:
+            dims_displayed = [1, 2, 3]
+            modifiers = ()
+            position = (1.0, 2.0, 4.0, 4.0)
+            view_direction = (1.0, 0.0, 0.0)
+
+        class _FakeLayer:
+            data = labels
+            ndim = 4
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        ray = np.array([[1, z, 4, 4] for z in range(5)], dtype=np.intp)
+        with (
+            patch.object(LabelInspector, "_raw_slice_at", return_value=raw),
+            patch.object(LabelInspector, "_ray_points", return_value=ray),
+        ):
+            # napari reports no value at all when the ray meets no label,
+            # which for a missed cell is the ordinary case.
+            inspector._on_click_add(_FakeLayer(), None, _FakeEvent())
+
+        assert calls == [((3, 4, 4), 1, True)]  # raw slice is handed on
+
+    def test_a_3d_click_on_an_already_labeled_cell_is_refused(self):
+        """The brightest sample being labeled means that cell is the target."""
+        inspector = LabelInspector(self.viewer)
+        calls = []
+        inspector.add_label_at_timepoint = lambda *a, **k: calls.append(a)
+        labels = np.zeros((2, 5, 8, 8), dtype=np.uint32)
+        labels[1, 1, 4, 4] = 7  # the brightest sample on the ray is its own
+        raw = np.zeros((5, 8, 8), dtype=np.float32)
+        raw[1, 4, 4] = 900.0
+        raw[3, 4, 4] = 500.0  # an unlabeled cell behind it
+
+        class _FakeEvent:
+            dims_displayed = [1, 2, 3]
+            modifiers = ()
+            position = (1.0, 2.0, 4.0, 4.0)
+            view_direction = (1.0, 0.0, 0.0)
+
+        class _FakeLayer:
+            data = labels
+            ndim = 4
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        ray = np.array([[1, z, 4, 4] for z in range(5)], dtype=np.intp)
+        with (
+            patch.object(LabelInspector, "_raw_slice_at", return_value=raw),
+            patch.object(LabelInspector, "_ray_points", return_value=ray),
+        ):
+            inspector._on_click_add(_FakeLayer(), None, _FakeEvent())
+
+        assert not calls
+        assert "is label 7" in self.viewer.status
+
+    def test_a_3d_click_on_a_movie_without_z_is_refused(self):
+        """A TYX movie in 3-D display stacks time, not planes."""
+        inspector = LabelInspector(self.viewer)
+        calls = []
+        inspector.add_label_at_timepoint = lambda *a, **k: calls.append(a)
+
+        class _FakeEvent:
+            dims_displayed = [0, 1, 2]
+            modifiers = ()
+            position = (1.0, 2.0, 3.0)
+            view_direction = (1.0, 0.0, 0.0)
+
+        class _FakeLayer:
+            data = np.zeros((3, 8, 8), dtype=np.uint32)
+            ndim = 3
+
+        inspector._on_click_add(_FakeLayer(), 0, _FakeEvent())
+        assert not calls
+        assert "no Z axis" in self.viewer.status
+
+    def test_add_is_mutually_exclusive_with_the_other_click_modes(self):
+        self.viewer.layers = []
+        inspector = LabelInspector(self.viewer)
+
+        inspector.enable_click_grow(True)
+        inspector.enable_click_add(True)
+        assert inspector._click_grow_cb is None
+        assert inspector._click_add_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_merge(True)
+        assert inspector._click_add_cb is None
+        assert inspector._click_merge_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_merge(False)
+        assert len(self.viewer.mouse_drag_callbacks) == 0
