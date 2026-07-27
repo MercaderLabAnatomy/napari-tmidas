@@ -1665,3 +1665,303 @@ class TestLabelInspectorWidget:
 
         assert np.array_equal(tifffile.imread(str(label_path)), edited)
         assert save_widget.call_button.enabled is False
+
+
+class TestClickToGrow:
+    """Growing an under-segmented label out to the full cell with SAM2.
+
+    The model itself is not exercised here — a fake worker stands in for the
+    subprocess, so these cover the parts that decide whether an edit is safe:
+    prompt construction, mask selection, the neighbor/runaway constraints,
+    the write and the undo.
+    """
+
+    def setup_method(self):
+        self.viewer = Mock()
+        self.viewer.mouse_drag_callbacks = []
+        self.viewer.status = ""
+
+    class _FakeLabels:
+        def __init__(self, data):
+            self.data = data
+
+        def refresh(self):
+            pass
+
+    class _FakeWorker:
+        """Stands in for the SAM2 subprocess.
+
+        Returns *truth* (cropped to whatever image it is handed) as the
+        winning candidate, plus two decoys, and records every prompt so the
+        tests can assert on what SAM2 would have been told.
+        """
+
+        def __init__(self, truth):
+            self.truth = truth
+            self.calls = []
+            self.last_crop = None
+
+        def _crop_truth(self, shape):
+            return self.truth[: shape[0], : shape[1]]
+
+        def segment(self, image, coords, labels):
+            self.calls.append(
+                {
+                    "image": image,
+                    "coords": np.asarray(coords),
+                    "labels": np.asarray(labels),
+                }
+            )
+            good = self._crop_truth(image.shape[:2])
+            tiny = np.zeros_like(good)
+            tiny[:2, :2] = True  # a decoy that does not cover the label
+            huge = np.ones_like(good)  # a decoy covering everything
+            self.last = np.stack([tiny, good, huge])
+            return self.last, np.array([0.9, 0.8, 0.7], dtype=np.float32)
+
+        def refine(self, index, coords, labels):
+            return self.last[index], 0.95
+
+    @staticmethod
+    def _disc(shape, center, radius):
+        yy, xx = np.ogrid[: shape[0], : shape[1]]
+        return (yy - center[0]) ** 2 + (xx - center[1]) ** 2 <= radius**2
+
+    def _pair(self, n_t=2, n_z=1):
+        """A TZYX raw with one bright disc per plane, and a label covering
+        only the disc's left half — the under-segmentation to repair."""
+        raw = np.full((n_t, n_z, 21, 21), 10, dtype=np.uint16)
+        disc = self._disc((21, 21), (10, 10), 6)
+        raw[:, :, disc] = 200
+        labels = np.zeros((n_t, n_z, 21, 21), dtype=np.uint32)
+        half = disc.copy()
+        half[:, 11:] = False  # only the left half of the disc is labeled
+        labels[0, :, half] = 1
+        return raw, labels, disc
+
+    def _inspector(self, raw, labels, truth=None):
+        """Inspector wired to a fake raw image and a fake SAM2 worker."""
+        import contextlib as _ctx
+
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "raw_labels.tif")]
+        inspector.current_index = 0
+        layer = self._FakeLabels(labels)
+        self.viewer.layers = [layer]
+        worker = self._FakeWorker(
+            self._disc((21, 21), (10, 10), 6) if truth is None else truth
+        )
+
+        @_ctx.contextmanager
+        def _patched():
+            with (
+                patch(
+                    "napari_tmidas._label_inspection._load_image",
+                    return_value=raw,
+                ),
+                patch(
+                    "napari_tmidas._sam2_worker.Sam2Worker.instance",
+                    return_value=worker,
+                ),
+                patch(
+                    "napari_tmidas._label_inspection.Labels", self._FakeLabels
+                ),
+            ):
+                yield
+
+        return inspector, layer, worker, _patched
+
+    def test_grow_extends_the_label_to_the_sam2_mask(self):
+        """The label takes on the object SAM2 returned, at that timepoint."""
+        raw, labels, disc = self._pair()
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+
+        grown = labels[0, 0]
+        assert grown[10, 14] == 1  # the unlabeled right half is now label 1
+        assert (grown[disc] == 1).mean() > 0.9
+        assert grown[0, 0] == 0  # background outside the disc untouched
+        assert not labels[1].any()  # only the clicked timepoint changed
+        assert "SAM2" in self.viewer.status
+
+    def test_prompts_mark_the_label_positive_and_neighbours_negative(self):
+        """The existing label and its neighbours become the point prompt."""
+        raw, labels, _ = self._pair()
+        labels[0, 0, 3, 3] = 7  # a neighbouring label inside the crop
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+
+        call = worker.calls[0]
+        coords, kinds = call["coords"], call["labels"]
+        assert (kinds == 1).any() and (kinds == 0).any()
+        # No box prompt is sent; the image is the uint8 RGB SAM2 expects.
+        assert call["image"].ndim == 3 and call["image"].shape[2] == 3
+        assert call["image"].dtype == np.uint8
+        # The negative point sits on the neighbour, the positives on label 1.
+        neg = coords[kinds == 0]
+        assert len(neg) == 1
+        pos = coords[kinds == 1]
+        assert len(pos) >= 1
+
+    def test_grow_never_claims_a_neighbouring_label(self):
+        """SAM2 returning the whole clump must not steal the neighbour."""
+        raw, labels, _ = self._pair()
+        labels[0, 0, 10, 13] = 2  # a foreign label inside the returned mask
+        labels[0, 0, 10, 14] = 2
+        # The fake worker returns everything, as an over-eager model would.
+        inspector, layer, worker, patched = self._inspector(
+            raw, labels, truth=np.ones((21, 21), dtype=bool)
+        )
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+
+        assert labels[0, 0, 10, 13] == 2
+        assert labels[0, 0, 10, 14] == 2
+
+    def test_max_growth_caps_a_runaway_mask(self):
+        """An all-covering mask is still bounded by 'Max growth'."""
+        raw, labels, _ = self._pair()
+        inspector, layer, worker, patched = self._inspector(
+            raw, labels, truth=np.ones((21, 21), dtype=bool)
+        )
+        inspector.grow_max_px = 1
+        inspector.grow_smooth_px = 0
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+
+        assert labels[0, 0, 10, 11] == 1  # one pixel out: reached
+        assert labels[0, 0, 0, 0] == 0  # far corner: capped
+
+    def test_grow_undo_removes_exactly_what_it_added(self):
+        """Ctrl+Z restores the original label pixel for pixel."""
+        raw, labels, _ = self._pair()
+        before = labels.copy()
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+            assert not np.array_equal(labels, before)
+            inspector._on_undo_key()
+
+        np.testing.assert_array_equal(labels, before)
+
+    def test_each_plane_runs_separately(self):
+        """One SAM2 call per Z-plane the label appears on, and no others."""
+        raw, labels, _ = self._pair(n_z=3)
+        labels[0, 2] = 0  # the label is absent from the top plane
+        inspector, layer, worker, patched = self._inspector(raw, labels)
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+
+        assert len(worker.calls) == 2  # planes 0 and 1 only
+        assert (labels[0, 0] == 1).any()
+        assert (labels[0, 1] == 1).any()
+        assert not labels[0, 2].any()  # no seed there → never segmented
+
+    def test_grow_on_a_dask_wrapper(self):
+        """Wrapper-backed labels take the sparse per-slice write path."""
+        import dask.array as da
+
+        from napari_tmidas._label_inspection import _DaskFancyIndexWrapper
+
+        raw, labels, _ = self._pair()
+        wrapper = _DaskFancyIndexWrapper(
+            da.from_array(labels, chunks=(1, *labels.shape[1:]))
+        )
+        inspector, layer, worker, patched = self._inspector(raw, wrapper)
+
+        with patched():
+            inspector.grow_label_at_timepoint(1, 0)
+            result = np.asarray(wrapper)
+            assert result[0, 0, 10, 14] == 1
+            assert not result[1].any()
+
+            inspector._on_undo_key()
+            np.testing.assert_array_equal(np.asarray(wrapper), labels)
+
+    def test_missing_sam2_reports_instead_of_editing(self):
+        """Without the SAM2 environment the click explains itself."""
+        from napari_tmidas._sam2_worker import Sam2Unavailable
+
+        raw, labels, _ = self._pair()
+        before = labels.copy()
+        inspector = LabelInspector(self.viewer)
+        inspector.image_label_pairs = [("raw.tif", "raw_labels.tif")]
+        self.viewer.layers = [self._FakeLabels(labels)]
+
+        with (
+            patch(
+                "napari_tmidas._label_inspection._load_image", return_value=raw
+            ),
+            patch(
+                "napari_tmidas._sam2_worker.Sam2Worker.instance",
+                side_effect=Sam2Unavailable("SAM2 is not installed."),
+            ),
+            patch("napari_tmidas._label_inspection.Labels", self._FakeLabels),
+        ):
+            inspector.grow_label_at_timepoint(1, 0)
+
+        np.testing.assert_array_equal(labels, before)
+        assert "not installed" in self.viewer.status
+
+    def test_to_uint8_rgb_stretches_contrast(self):
+        """A 16-bit plane becomes a full-range uint8 RGB image."""
+        plane = np.zeros((16, 16), dtype=np.uint16)
+        plane[4:12, 4:12] = 4000
+        rgb = LabelInspector._to_uint8_rgb(plane)
+        assert rgb.shape == (16, 16, 3)
+        assert rgb.dtype == np.uint8
+        assert rgb.max() == 255 and rgb.min() == 0
+        assert np.array_equal(rgb[..., 0], rgb[..., 2])  # grey, replicated
+
+        flat = LabelInspector._to_uint8_rgb(np.full((8, 8), 7, np.uint16))
+        assert flat.shape == (8, 8, 3) and not flat.any()
+
+    def test_grow_click_resolves_the_timepoint(self):
+        """The click's position picks which timepoint is grown."""
+        inspector = LabelInspector(self.viewer)
+        calls = []
+        inspector.grow_label_at_timepoint = lambda i, t: calls.append((i, t))
+
+        class _FakeEvent:
+            dims_displayed = [2, 3]
+            modifiers = ()
+            position = (1.0, 0.0, 2.0, 2.0)
+            view_direction = None
+
+        class _FakeLayer:
+            data = np.zeros((3, 1, 5, 5), dtype=np.uint32)
+
+            def world_to_data(self, position):
+                return np.asarray(position, dtype=float)
+
+        inspector._on_click_grow(_FakeLayer(), 4, _FakeEvent())
+        assert calls == [(4, 1)]
+
+        inspector._on_click_grow(_FakeLayer(), 0, _FakeEvent())
+        assert calls == [(4, 1)]  # background click does nothing
+
+    def test_grow_is_mutually_exclusive_with_the_other_click_modes(self):
+        self.viewer.layers = []
+        inspector = LabelInspector(self.viewer)
+
+        inspector.enable_click_merge(True)
+        inspector.enable_click_grow(True)
+        assert inspector._click_merge_cb is None
+        assert inspector._click_grow_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_delete(True)
+        assert inspector._click_grow_cb is None
+        assert inspector._click_delete_cb is not None
+        assert len(self.viewer.mouse_drag_callbacks) == 1
+
+        inspector.enable_click_delete(False)
+        assert len(self.viewer.mouse_drag_callbacks) == 0

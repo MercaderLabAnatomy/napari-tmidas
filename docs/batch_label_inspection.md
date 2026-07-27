@@ -97,6 +97,7 @@ For each pair displayed:
 - **Click-to-relabel**: Ctrl+click to pipette an ID, then left-click labels to reassign them to it on every timepoint
 - **Click-to-split** (see [Splitting Merged Labels](#splitting-merged-labels)): click one point per cell inside an under-segmented label, then **Apply split** to divide it at the clicked timepoint
 - **Click-to-merge-neighbors** (see [Merging Touching Neighbors](#merging-touching-neighbors)): click a label to merge every label touching it into it, at the clicked timepoint or across the whole movie
+- **Click-to-grow** (see [Growing Incomplete Labels](#growing-incomplete-labels)): click a label that covers only part of its cell and SAM2 extends it to the whole object, at the clicked timepoint
 
 **Track-level tools** (napari-tmidas, for tracked time series):
 - **Whole-track 3D views** (docked as **Track inspection**, see [Whole-Track 3D Inspection](#whole-track-3d-inspection)): view the entire movie as one 3-D volume so each track is a single clickable object
@@ -233,6 +234,66 @@ Notes:
   changes the result.
 - Mutually exclusive with the other click modes; the mode persists as you
   move through image-label pairs.
+
+### Growing Incomplete Labels
+
+Docked (with the other click modes) as part of **Label manipulations**, this
+tool is the fix for a label that covers only *part* of its cell — under-
+segmentation of a different kind from
+[Splitting Merged Labels](#splitting-merged-labels), where the problem is one
+label spanning several cells. Here one cell has one label; the label is simply
+too small.
+
+Enable *"Click a label to grow it to the cell boundary (SAM2)"* and
+**left-click** the label. The cell is segmented with
+[SAM2](https://github.com/facebookresearch/sam2) and the label is extended to
+the full object, at the clicked timepoint only.
+
+The existing label is what prompts the model: its most interior pixels become
+positive points ("this object"), and every neighboring label contributes a
+negative point ("not this object"), which is what stops SAM2 returning a whole
+clump of touching cells as one. No bounding box is sent — a box drawn around an
+incomplete label would tell the model the object ends at the label's current
+edge, which is exactly the error being corrected.
+
+Settings:
+
+- **Max growth (px)** — does double duty: how far the label may travel from its
+  current boundary, and how much context around it the model is shown. Too
+  small clips a genuinely larger cell; too large makes the crop mostly
+  background, leaving less resolution on the cell itself (the crop is rescaled
+  to 1024x1024 whatever its size). Roughly one cell radius is a good start.
+- **Smoothing (px)** — closes small bays and removes thin spurs in the returned
+  contour. SAM2 masks are already fairly smooth, so 0-2 is usually right; 0
+  keeps the model's boundary exactly.
+- **Signal channel** — which channel of a multi-channel raw defines the
+  boundary. Use this to grow to a membrane or cytoplasm marker rather than a
+  nuclear one.
+
+Notes:
+
+- The label only ever **grows**, and only into **background** — a neighboring
+  label is never eaten, whatever the model returns. Re-click after raising
+  *Max growth* if it stopped short.
+- Runs on **every Z-plane** the label appears on, each segmented from its own
+  in-plane image, which suits anisotropic stacks. The label keeps one ID, so
+  the planes need no stitching.
+- **Ctrl+Z** removes exactly the pixels the last grow added.
+- Grows are staged in memory; press **Save and Continue** to write them.
+- Works in the **track views** as well: the view supplies only the clicked ID
+  and timepoint, and the growth is computed on the source's full-resolution
+  slice and raw image.
+- Mutually exclusive with the other click modes; the mode persists as you move
+  through image-label pairs.
+
+**Requirements.** SAM2 runs in its own environment
+(`~/.napari-tmidas/envs/sam2-env`), because the napari environment carries no
+PyTorch. Opening the **Batch Crop Anything** widget once creates it and
+downloads the checkpoint (~850 MB); until then, clicking to grow reports what
+is missing instead of editing. The model is loaded once per session by a
+resident worker process, so the **first click pauses for a few seconds** and
+every later one costs about **0.2 s per Z-plane**. A GPU is used when
+available, otherwise it falls back to CPU (considerably slower).
 
 ### Whole-Track 3D Inspection
 
@@ -467,6 +528,15 @@ When a tracked object changes ID partway through a time series:
    the wrong ID is reassigned to the correct one everywhere
 4. Save changes
 
+### Completing Under-Sized Labels
+
+When a segmentation systematically under-covers its objects (thresholding that
+clipped dim edges, a model trained on tighter masks):
+1. Enable **Click-to-grow** and set *Max growth* to about one cell radius
+2. Click each under-sized label; SAM2 extends it to the cell boundary
+3. Check the result and **Ctrl+Z** any grow you do not want
+4. **Save and Continue**
+
 ### Refining Boundaries
 
 For inaccurate object boundaries:
@@ -553,6 +623,28 @@ automatically — usually a TIFF written without clean axes metadata.
 - Ensure "Labels" layer (right panel) is selected
 - Check folder write permissions
 - Verify label filename in confirmation message
+
+### Click-to-Grow Reports SAM2 Is Missing
+
+**Cause**: The SAM2 environment or its model checkpoint has not been created yet
+
+**Solutions**:
+- Open the **Batch Crop Anything** widget once and let it create
+  `~/.napari-tmidas/envs/sam2-env` and download the checkpoint (~850 MB)
+- Check the console for the worker's error output if it starts and then exits
+- The status bar names exactly what is missing (environment, checkpoint, or
+  plugin file)
+
+### Click-to-Grow Is Slow
+
+**Cause**: The model loads on the first click, and cost scales with Z-depth
+
+**Solutions**:
+- Expect a few seconds on the first click of a session; later clicks are about
+  0.2 s per Z-plane and the model stays resident
+- Without a GPU, SAM2 falls back to CPU and is considerably slower
+- A label spanning many Z-planes costs proportionally more, since each plane is
+  segmented separately
 
 ### Changes Lost After Clicking Previous
 

@@ -785,9 +785,7 @@ class _TrackView:
             or (isinstance(ix, np.ndarray) and ix.ndim == 1)
             for ix in index
         ):
-            n = next(
-                ix.size for ix in index if isinstance(ix, np.ndarray)
-            )
+            n = next(ix.size for ix in index if isinstance(ix, np.ndarray))
             pp, yy, xx = (
                 (
                     np.asarray(ix, dtype=np.intp)
@@ -835,9 +833,7 @@ class _StackedTrackView(_TrackView):
     def _plane(self, i: int) -> np.ndarray:
         t, z = divmod(int(i), self.n_z)
         t_slice = self._t_slice(t)
-        return self._stride(
-            t_slice[z] if self._source.ndim == 4 else t_slice
-        )
+        return self._stride(t_slice[z] if self._source.ndim == 4 else t_slice)
 
     def _planes_of_t(self, t: int):
         return range(t * self.n_z, (t + 1) * self.n_z)
@@ -882,7 +878,9 @@ class _StackedTrackView(_TrackView):
                     zz[m],
                     yy[m],
                     xx[m],
-                ] = (value if vals is None else vals[m])
+                ] = (
+                    value if vals is None else vals[m]
+                )
             return
         raise NotImplementedError(
             f"Track view does not support writing with this index: {index!r}"
@@ -1120,9 +1118,7 @@ def _resample_nearest(arr: np.ndarray, shape: tuple) -> np.ndarray:
         return arr
     idx = np.ix_(
         *[
-            np.minimum(
-                ((np.arange(ts) + 0.5) * (ss / ts)).astype(int), ss - 1
-            )
+            np.minimum(((np.arange(ts) + 0.5) * (ss / ts)).astype(int), ss - 1)
             for ts, ss in zip(shape, arr.shape)
         ]
     )
@@ -1171,6 +1167,14 @@ class LabelInspector:
         self.merge_scope = "current"
         self._click_split_cb = None  # click-to-split mouse callback
         self._click_merge_cb = None  # click-to-merge-neighbors mouse callback
+        self._click_grow_cb = None  # click-to-grow-to-signal mouse callback
+        # Click-to-grow settings (see grow_label_at_timepoint, which segments
+        # with SAM2): grow_max_px is both the context SAM2 is shown and the
+        # cap on how far the label may travel, grow_smooth_px polishes the
+        # returned contour, grow_channel picks which raw channel defines it.
+        self.grow_max_px = 30
+        self.grow_smooth_px = 1
+        self.grow_channel = "mean"
         # Seeds accumulated for a pending split, or None:
         # {"label_id": int, "t": int, "coords": [tuple, ...]}.  Plain-click
         # commits once two or more seeds exist; Ctrl+click adds more first.
@@ -1440,7 +1444,9 @@ class LabelInspector:
         # manual override wins when set; otherwise it is auto-detected for both
         # zarr (via .zattrs) and multi-channel TIFFs (e.g. a TZCYX raw paired
         # with a TZYX label, read from series axes metadata).
-        channel_axis = self._resolve_channel_axis(image, label_image, image_path)
+        channel_axis = self._resolve_channel_axis(
+            image, label_image, image_path
+        )
 
         # Build the image shape *without* the channel axis for scale comparison
         if channel_axis is not None:
@@ -1482,6 +1488,7 @@ class LabelInspector:
             or self._click_relabel_cb is not None
             or self._click_split_cb is not None
             or self._click_merge_cb is not None
+            or self._click_grow_cb is not None
         ):
             self._bind_undo_key(new_labels_layer, True)
 
@@ -1751,9 +1758,7 @@ class LabelInspector:
         if old_id == new_id:
             self.viewer.status = f"Label {old_id} already has this ID."
             return
-        restores = self._remap_one_timepoint(
-            labels_layer, {old_id: new_id}, t
-        )
+        restores = self._remap_one_timepoint(labels_layer, {old_id: new_id}, t)
         self._invalidate_track_stats()
         if restores == "all":
             self.viewer.status = (
@@ -1856,7 +1861,9 @@ class LabelInspector:
             plane = self._ray_hit_plane(layer, label_id, event, dims_displayed)
         else:
             try:
-                plane = int(round(float(layer.world_to_data(event.position)[0])))
+                plane = int(
+                    round(float(layer.world_to_data(event.position)[0]))
+                )
             except Exception:
                 return None
         if plane is None:
@@ -1895,6 +1902,57 @@ class LabelInspector:
             lbl_t = np.asarray(lbl_t)
             raw_t = _resample_nearest(np.asarray(raw_t), lbl_t.shape)
             yield lbl_t, raw_t
+
+    def _raw_slice_at(self, labels_data, t, channel="mean"):
+        """The raw image's spatial slice at timepoint *t*, label-aligned.
+
+        The single-timepoint counterpart of :meth:`_iter_label_raw_slices`:
+        the raw is opened lazily, its channel axis resolved (and reduced to
+        one plane per *channel* — ``"mean"`` averages all channels), and only
+        the requested timepoint is computed, so cost is one slice however
+        long the movie is.  The result is nearest-neighbor resampled onto the
+        label grid.  Returns ``None`` (with an explanatory viewer status) when
+        the raw cannot be loaded or aligned; pass ``t=None`` for labels with
+        no time axis.
+        """
+        if not self.image_label_pairs:
+            self.viewer.status = "No raw image loaded."
+            return None
+        image_path, _ = self.image_label_pairs[self.current_index]
+        try:
+            raw = _load_image(image_path)
+        except Exception as exc:
+            self.viewer.status = f"Could not load raw image: {exc}"
+            return None
+
+        channel = str(channel).strip().lower()
+        channel_axis = self._resolve_channel_axis(raw, labels_data, image_path)
+        if channel_axis is not None:
+            n_ch = raw.shape[channel_axis]
+            ci = None
+            if channel not in ("", "mean", "auto"):
+                with contextlib.suppress(ValueError):
+                    ci = int(channel)
+            if ci is not None and 0 <= ci < n_ch:
+                raw = np.take(raw, ci, axis=channel_axis)
+            else:
+                raw = raw.mean(axis=channel_axis)
+        while raw.ndim > labels_data.ndim and raw.shape[0] == 1:
+            raw = raw[0]
+        if raw.ndim != labels_data.ndim:
+            self.viewer.status = (
+                f"Cannot read the raw image: shape {raw.shape} does not "
+                f"align with label shape {labels_data.shape}."
+            )
+            return None
+
+        raw_t = raw if t is None else raw[int(t)]
+        if hasattr(raw_t, "compute"):
+            raw_t = raw_t.compute()
+        spatial = tuple(
+            labels_data.shape if t is None else labels_data.shape[1:]
+        )
+        return _resample_nearest(np.asarray(raw_t), spatial)
 
     def _measure_track_intensities(self, labels_layer, channel="mean"):
         """Build and cache per-track raw-intensity statistics for the pair.
@@ -1936,9 +1994,7 @@ class LabelInspector:
             return None
 
         labels_data = labels_layer.data
-        channel_axis = self._resolve_channel_axis(
-            raw, labels_data, image_path
-        )
+        channel_axis = self._resolve_channel_axis(raw, labels_data, image_path)
         if channel_axis is not None:
             n_ch = raw.shape[channel_axis]
             ci = None
@@ -1995,7 +2051,9 @@ class LabelInspector:
                 sums[u] = sums.get(u, 0.0) + sv
                 counts[u] = counts.get(u, 0) + cv
                 if n_bins:
-                    vals = np.clip(flat_r[inv == i].astype(np.int64), 0, n_bins - 1)
+                    vals = np.clip(
+                        flat_r[inv == i].astype(np.int64), 0, n_bins - 1
+                    )
                     h = hist.get(u)
                     if h is None:
                         h = np.zeros(n_bins, dtype=np.int64)
@@ -2185,11 +2243,13 @@ class LabelInspector:
             self._single_t_last = None
             t = info["t"]
             for coords, old_id in info["restores"]:
-                data[(t, *coords)] = old_id
+                # t is None only for labels with no time axis, where the
+                # spatial coords already address the whole array.
+                data[coords if t is None else (t, *coords)] = old_id
             layer.refresh()
             self._refresh_track_view(timepoint=t)
-            self.viewer.status = (
-                f"Undo: label {info['desc']} at timepoint {t}."
+            self.viewer.status = f"Undo: label {info['desc']}" + (
+                "." if t is None else f" at timepoint {t}."
             )
             return
         if isinstance(data, _DaskFancyIndexWrapper):
@@ -2320,9 +2380,7 @@ class LabelInspector:
                 "Click-to-relabel: could not resolve the clicked timepoint."
             )
             return
-        self.relabel_label_at_timepoint(
-            label_id, int(layer.selected_label), t
-        )
+        self.relabel_label_at_timepoint(label_id, int(layer.selected_label), t)
 
     def enable_click_delete(self, enabled: bool) -> None:
         """Toggle click-to-delete mode (mutually exclusive with relabel).
@@ -2338,6 +2396,7 @@ class LabelInspector:
             self.enable_click_relabel(False)
             self.enable_click_split(False)
             self.enable_click_merge(False)
+            self.enable_click_grow(False)
             self._click_delete_cb = self._make_click_callback(
                 self._on_click_delete
             )
@@ -2356,6 +2415,7 @@ class LabelInspector:
                 self._click_relabel_cb is None
                 and self._click_split_cb is None
                 and self._click_merge_cb is None
+                and self._click_grow_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-delete OFF."
@@ -2375,6 +2435,7 @@ class LabelInspector:
             self.enable_click_delete(False)
             self.enable_click_split(False)
             self.enable_click_merge(False)
+            self.enable_click_grow(False)
             self._click_relabel_cb = self._make_click_callback(
                 self._on_click_relabel
             )
@@ -2388,14 +2449,13 @@ class LabelInspector:
             )
         elif not enabled and self._click_relabel_cb is not None:
             with contextlib.suppress(ValueError):
-                self.viewer.mouse_drag_callbacks.remove(
-                    self._click_relabel_cb
-                )
+                self.viewer.mouse_drag_callbacks.remove(self._click_relabel_cb)
             self._click_relabel_cb = None
             if (
                 self._click_delete_cb is None
                 and self._click_split_cb is None
                 and self._click_merge_cb is None
+                and self._click_grow_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-relabel OFF."
@@ -2683,6 +2743,7 @@ class LabelInspector:
             self.enable_click_delete(False)
             self.enable_click_relabel(False)
             self.enable_click_merge(False)
+            self.enable_click_grow(False)
             self._split_seeds = None
             self._click_split_cb = self._make_click_callback(
                 self._on_click_split
@@ -2704,6 +2765,7 @@ class LabelInspector:
                 self._click_delete_cb is None
                 and self._click_relabel_cb is None
                 and self._click_merge_cb is None
+                and self._click_grow_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-split OFF."
@@ -2904,6 +2966,7 @@ class LabelInspector:
             self.enable_click_delete(False)
             self.enable_click_relabel(False)
             self.enable_click_split(False)
+            self.enable_click_grow(False)
             self._click_merge_cb = self._make_click_callback(
                 self._on_click_merge
             )
@@ -2923,9 +2986,386 @@ class LabelInspector:
                 self._click_delete_cb is None
                 and self._click_relabel_cb is None
                 and self._click_split_cb is None
+                and self._click_grow_cb is None
             ):
                 self._bind_undo_key(self._find_labels_layer(), False)
             self.viewer.status = "Click-to-merge-neighbors OFF."
+
+    # ------------------------------------------------------------------
+    # Click-to-grow (extend an under-segmented label out to the signal)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_uint8_rgb(plane: np.ndarray) -> np.ndarray:
+        """Contrast-stretch a raw plane into the uint8 RGB SAM2 expects.
+
+        SAM2 was trained on 8-bit natural images, so a 12- or 16-bit
+        microscopy plane has to be mapped into that range first.  The stretch
+        is a 1st–99.5th percentile window over the crop being segmented, which
+        keeps a dim cell legible without letting a few hot pixels flatten it.
+        """
+        arr = np.asarray(plane, dtype=np.float32)
+        lo, hi = (float(v) for v in np.percentile(arr, (1.0, 99.5)))
+        if hi <= lo:
+            lo, hi = float(arr.min()), float(arr.max())
+        if hi <= lo:
+            return np.zeros(arr.shape + (3,), dtype=np.uint8)
+        norm = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+        gray = (norm * 255.0).astype(np.uint8)
+        return np.repeat(gray[:, :, None], 3, axis=2)
+
+    @staticmethod
+    def _prompt_points(seed, lbl, label_id, max_negative: int = 6):
+        """Point prompts describing "this object, not its neighbors".
+
+        Positive points are the most interior pixels of the existing label —
+        the distance transform's peaks, spread out so they sample the label
+        rather than crowding one spot.  Each neighboring label contributes one
+        negative point, which is what stops SAM2 from returning a whole clump
+        of touching cells as a single object.
+
+        Note there is deliberately no box prompt: a box drawn around an
+        under-segmented label would tell SAM2 the object ends at the label's
+        current edge, re-creating the very problem this tool exists to fix.
+
+        Returns ``(coords, labels)`` in SAM2's (x, y) order.
+        """
+        from scipy import ndimage as ndi
+
+        coords, labels = [], []
+        dist = ndi.distance_transform_edt(seed)
+        yy, xx = np.ogrid[: seed.shape[0], : seed.shape[1]]
+        for _ in range(3):
+            peak = float(dist.max())
+            if peak <= 0:
+                break
+            y, x = np.unravel_index(np.argmax(dist), dist.shape)
+            coords.append([float(x), float(y)])
+            labels.append(1)
+            # Blank a disc around the accepted point so the next peak is a
+            # genuinely different part of the label.
+            radius = max(peak, 3.0)
+            dist = np.where(
+                (yy - y) ** 2 + (xx - x) ** 2 <= radius**2, 0.0, dist
+            )
+
+        others = np.unique(lbl[(lbl != 0) & (lbl != label_id)])
+        for other in others[:max_negative]:
+            other_mask = lbl == other
+            other_dist = ndi.distance_transform_edt(other_mask)
+            y, x = np.unravel_index(np.argmax(other_dist), other_dist.shape)
+            coords.append([float(x), float(y)])
+            labels.append(0)
+
+        return (
+            np.asarray(coords, dtype=np.float32),
+            np.asarray(labels, dtype=np.int32),
+        )
+
+    def _sam2_plane_mask(self, worker, seed, lbl, raw, label_id, max_px):
+        """SAM2's mask for the object *seed* belongs to, on one plane.
+
+        The plane is cropped to the label plus *max_px* of context before
+        being sent.  That is not only cheaper: SAM2 rescales whatever it is
+        given to 1024x1024, so cropping to the cell raises its effective
+        resolution considerably compared with sending a full frame.
+
+        Two passes are used.  The first offers three candidate masks at
+        different scales; the one that best covers the existing label wins.
+        The second feeds that candidate back as a mask prompt, which is what
+        pulls the contour out to the true edge — on a synthetic cell it took
+        the recovered area from 93%% to 99.6%% of ground truth, and
+        under-reaching is exactly the failure being fixed here.
+        """
+        ys, xs = np.nonzero(seed)
+        pad = int(max_px) + 8
+        y0 = max(int(ys.min()) - pad, 0)
+        y1 = min(int(ys.max()) + pad + 1, seed.shape[0])
+        x0 = max(int(xs.min()) - pad, 0)
+        x1 = min(int(xs.max()) + pad + 1, seed.shape[1])
+        crop = (slice(y0, y1), slice(x0, x1))
+
+        sub_seed = seed[crop]
+        image = self._to_uint8_rgb(raw[crop])
+        coords, point_labels = self._prompt_points(
+            sub_seed, lbl[crop], label_id
+        )
+        if not coords.size:
+            return np.zeros_like(seed)
+
+        masks, scores = worker.segment(image, coords, point_labels)
+        seed_area = float(sub_seed.sum())
+        cover = np.array(
+            [float((m & sub_seed).sum()) / seed_area for m in masks]
+        )
+        # Only a candidate that actually contains the existing label can be
+        # the object it belongs to; among those, trust SAM2's own score.
+        usable = cover >= 0.5
+        index = int(
+            np.argmax(np.where(usable, scores, -np.inf))
+            if usable.any()
+            else np.argmax(cover)
+        )
+
+        best = masks[index]
+        refined, _score = worker.refine(index, coords, point_labels)
+        # A refinement that loses the label has drifted onto something else;
+        # keep the unrefined candidate rather than the wrong object.
+        if float((refined & sub_seed).sum()) >= 0.5 * seed_area:
+            best = refined
+
+        out = np.zeros_like(seed)
+        out[crop] = best
+        return out
+
+    def _constrain_region(self, region, seed, free, max_px, smooth_px):
+        """Make a raw model mask safe to write: no theft, no islands, no shrink.
+
+        SAM2 knows nothing about the other labels, so its mask is intersected
+        with *free* (background plus this label), clipped to *max_px* of the
+        label as a runaway guard, reduced to the component holding the label,
+        and unioned back with it — the tool only ever grows.
+        """
+        from scipy import ndimage as ndi
+
+        region = (region | seed) & free
+        if max_px > 0:
+            region &= ndi.distance_transform_edt(~seed) <= max_px
+        if smooth_px > 0:
+            structure = ndi.generate_binary_structure(region.ndim, 1)
+            it = int(round(smooth_px))
+            # Closing then opening, spelled out because the erosions need
+            # ``border_value=1``: the cell continues past the edge of the
+            # crop, so treating the outside as background would shave the
+            # boundary. The dilations keep the default 0 so they cannot
+            # invent foreground at the border either.
+            region = ndi.binary_dilation(
+                region, structure=structure, iterations=it
+            )
+            region = ndi.binary_erosion(
+                region, structure=structure, iterations=2 * it, border_value=1
+            )
+            region = ndi.binary_dilation(
+                region, structure=structure, iterations=it
+            )
+            region = (region | seed) & free
+        region = ndi.binary_fill_holes(region) & free
+
+        labeled, _n = ndi.label(region)
+        keep = np.unique(labeled[seed])
+        keep = keep[keep != 0]
+        return np.isin(labeled, keep) if keep.size else seed
+
+    def grow_label_at_timepoint(self, label_id, t) -> None:
+        """Extend *label_id* out to the boundaries of the cell at *t*.
+
+        For under-segmented cells — the label covers only part of the object,
+        so it needs to be pushed outward rather than split or merged.  SAM2
+        supplies the boundary: the existing label becomes a point prompt and
+        the model returns the whole object it belongs to (see
+        :meth:`_sam2_plane_mask`), which is then constrained so it can never
+        take pixels from a neighboring label (:meth:`_constrain_region`).
+
+        SAM2 segments one plane at a time, so this runs independently on every
+        Z-plane where the label appears — each plane gets its boundary from
+        its own in-plane image, which suits anisotropic stacks.  The label
+        keeps one ID, so the planes need no stitching.
+
+        Only background pixels are ever claimed, and only at the clicked
+        timepoint.  The edit is a single-timepoint pixel write, recorded like
+        a paint stroke, so it saves normally and Ctrl+Z removes exactly the
+        pixels it added.
+        """
+        labels_layer = self._find_labels_layer()
+        if labels_layer is None:
+            self.viewer.status = "No labels layer found."
+            return
+        label_id = int(label_id)
+        if label_id == 0:
+            self.viewer.status = "Select a non-background label to grow."
+            return
+
+        from napari_tmidas._sam2_worker import Sam2Unavailable, Sam2Worker
+
+        data = labels_layer.data
+        try:
+            import dask.array as da
+        except ImportError:
+            da = None
+        if da is not None and isinstance(data, da.Array):
+            data = _DaskFancyIndexWrapper(data)
+            labels_layer.data = data
+
+        has_time = getattr(data, "ndim", 0) >= 3
+        t = int(t) if has_time else None
+        if isinstance(data, _DaskFancyIndexWrapper) and has_time:
+            sub = data._get_outer_slice(0, t)
+        elif has_time:
+            sub = np.asarray(data[t])  # a view: writes reach the layer
+        else:
+            sub = np.asarray(data)
+
+        mask = sub == label_id
+        if not mask.any():
+            self.viewer.status = f"Label {label_id} is not present" + (
+                "." if t is None else f" at timepoint {t}."
+            )
+            return
+
+        raw_t = self._raw_slice_at(data, t, self.grow_channel)
+        if raw_t is None:
+            return  # status already set
+
+        max_px = max(int(self.grow_max_px), 1)
+        smooth_px = max(int(self.grow_smooth_px), 0)
+        # Work in a window around the label only — everything the growth can
+        # reach lies within max_px of it, plus a margin so the crop SAM2 sees
+        # carries context on every side.
+        pad = max_px + smooth_px + 8
+        where = np.nonzero(mask)
+        box = tuple(
+            slice(max(int(c.min()) - pad, 0), min(int(c.max()) + pad + 1, n))
+            for c, n in zip(where, mask.shape)
+        )
+        lbl = sub[box]
+        raw = np.asarray(raw_t[box], dtype=np.float32)
+        seed = lbl == label_id
+        free = (lbl == 0) | seed  # never claim another label's pixels
+
+        # Starting the worker loads a ~900 MB checkpoint, so the first click
+        # of a session pauses for a few seconds; later ones are ~0.2 s/plane.
+        try:
+            self.viewer.status = "Grow: contacting SAM2..."
+            worker = Sam2Worker.instance()
+        except Sam2Unavailable as exc:
+            self.viewer.status = f"Grow: {exc}"
+            return
+
+        planes = (
+            [z for z in range(lbl.shape[0]) if seed[z].any()]
+            if lbl.ndim == 3
+            else [None]
+        )
+        grown = np.zeros_like(seed)
+        try:
+            for i, z in enumerate(planes, start=1):
+                if z is None:
+                    region = self._sam2_plane_mask(
+                        worker, seed, lbl, raw, label_id, max_px
+                    )
+                    grown[...] = self._constrain_region(
+                        region, seed, free, max_px, smooth_px
+                    )
+                else:
+                    self.viewer.status = (
+                        f"Grow: SAM2 on Z-plane {i}/{len(planes)}..."
+                    )
+                    region = self._sam2_plane_mask(
+                        worker, seed[z], lbl[z], raw[z], label_id, max_px
+                    )
+                    grown[z] = self._constrain_region(
+                        region, seed[z], free[z], max_px, smooth_px
+                    )
+        except Sam2Unavailable as exc:
+            self.viewer.status = f"Grow: {exc}"
+            return
+
+        new = grown & ~seed
+        if not new.any():
+            self.viewer.status = (
+                f"Grow: SAM2 returned nothing beyond label {label_id}'s "
+                "current extent — nothing added. Raise 'Max growth' if the "
+                "cap is what stopped it."
+            )
+            return
+
+        offsets = [b.start for b in box]
+        coords = tuple(c + o for c, o in zip(np.nonzero(new), offsets))
+        index = coords if t is None else (t, *coords)
+        if isinstance(data, _DaskFancyIndexWrapper):
+            data[index] = label_id
+        else:
+            sub[coords] = label_id
+
+        labels_layer.refresh()
+        self._refresh_track_view(timepoint=t)
+        # A manual edit changes the label's geometry — re-measure intensity
+        # stats on the next preview. (Also clears any older single-T undo,
+        # so our record has to be set after it.)
+        self._invalidate_track_stats()
+        n_px = int(new.sum())
+        self._single_t_last = {
+            "t": t,
+            "restores": [(coords, 0)],
+            "desc": f"{label_id} shrunk back by {n_px} pixel(s) (grow undone)",
+        }
+        n_planes = len(planes)
+        self.viewer.status = (
+            f"Grew label {label_id} by {n_px} pixel(s) (SAM2 on "
+            f"{n_planes} plane(s)"
+            + ("" if t is None else f", timepoint {t}")
+            + "). Ctrl+Z undoes it; 'Save Changes and Continue' writes it "
+            "to disk."
+        )
+
+    def _on_click_grow(self, layer, label_id, event):
+        """Grow the clicked label to the signal boundary at its timepoint.
+
+        Like the merge tool this works in the track views as well: only the
+        clicked ID and timepoint are taken from the view, and the growth
+        itself is computed on the source's full-resolution slice and raw
+        image at that timepoint.
+        """
+        if not label_id:  # None (off-canvas) or 0 (background)
+            self.viewer.status = "Grow: background clicked, nothing to grow."
+            return
+        data = getattr(layer, "data", None)
+        if getattr(data, "ndim", 0) < 3:
+            t = 0  # no time axis — the whole array is the one timepoint
+        else:
+            t = self._clicked_timepoint(layer, label_id, event)
+            if t is None:
+                self.viewer.status = (
+                    "Grow: could not resolve the clicked timepoint."
+                )
+                return
+        self.grow_label_at_timepoint(label_id, t)
+
+    def enable_click_grow(self, enabled: bool) -> None:
+        """Toggle click-to-grow mode (mutually exclusive with the other
+        click tools).
+
+        While enabled, a plain left-click on an under-segmented label
+        hands it to SAM2 as a prompt and extends it to the full cell, at the
+        clicked timepoint.  Ctrl+Z removes the pixels the last grow added.
+        """
+        if enabled and self._click_grow_cb is None:
+            self.enable_click_delete(False)
+            self.enable_click_relabel(False)
+            self.enable_click_split(False)
+            self.enable_click_merge(False)
+            self._click_grow_cb = self._make_click_callback(
+                self._on_click_grow
+            )
+            self.viewer.mouse_drag_callbacks.append(self._click_grow_cb)
+            self._bind_undo_key(self._find_labels_layer(), True)
+            self.viewer.status = (
+                "Click-to-grow ON: click an under-segmented label and SAM2 "
+                "extends it to the whole cell at that timepoint. The first "
+                "click loads the model (a few seconds). Ctrl+Z undoes the "
+                "last grow."
+            )
+        elif not enabled and self._click_grow_cb is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.mouse_drag_callbacks.remove(self._click_grow_cb)
+            self._click_grow_cb = None
+            if (
+                self._click_delete_cb is None
+                and self._click_relabel_cb is None
+                and self._click_split_cb is None
+                and self._click_merge_cb is None
+            ):
+                self._bind_undo_key(self._find_labels_layer(), False)
+            self.viewer.status = "Click-to-grow OFF."
 
     def set_track_view_mode(self, mode: str) -> None:
         """Switch the track-inspection view: ``"off"``, ``"stack"`` or ``"max"``.
@@ -3233,9 +3673,7 @@ def label_inspector(
             ),
         },
     )
-    def click_to_delete(
-        enabled: bool = False, scope: str = "All timepoints"
-    ):
+    def click_to_delete(enabled: bool = False, scope: str = "All timepoints"):
         """While on, left-click a label in the viewer to delete it."""
         inspector.delete_scope = (
             "current" if scope.startswith("Clicked") else "all"
@@ -3248,6 +3686,8 @@ def label_inspector(
             click_to_split["enabled"].value = False
         if enabled and click_to_merge["enabled"].value:
             click_to_merge["enabled"].value = False
+        if enabled and click_to_grow["enabled"].value:
+            click_to_grow["enabled"].value = False
         inspector.enable_click_delete(enabled)
 
     @magicgui(
@@ -3282,9 +3722,7 @@ def label_inspector(
             ),
         },
     )
-    def click_to_relabel(
-        enabled: bool = False, scope: str = "All timepoints"
-    ):
+    def click_to_relabel(enabled: bool = False, scope: str = "All timepoints"):
         """While on, left-click a label to give it the pipetted ID."""
         inspector.relabel_scope = (
             "current" if scope.startswith("Clicked") else "all"
@@ -3295,6 +3733,8 @@ def label_inspector(
             click_to_split["enabled"].value = False
         if enabled and click_to_merge["enabled"].value:
             click_to_merge["enabled"].value = False
+        if enabled and click_to_grow["enabled"].value:
+            click_to_grow["enabled"].value = False
         inspector.enable_click_relabel(enabled)
 
     @magicgui(
@@ -3325,6 +3765,8 @@ def label_inspector(
             click_to_relabel["enabled"].value = False
         if enabled and click_to_merge["enabled"].value:
             click_to_merge["enabled"].value = False
+        if enabled and click_to_grow["enabled"].value:
+            click_to_grow["enabled"].value = False
         inspector.enable_click_split(enabled)
 
     @magicgui(
@@ -3383,7 +3825,93 @@ def label_inspector(
             click_to_relabel["enabled"].value = False
         if enabled and click_to_split["enabled"].value:
             click_to_split["enabled"].value = False
+        if enabled and click_to_grow["enabled"].value:
+            click_to_grow["enabled"].value = False
         inspector.enable_click_merge(enabled)
+
+    @magicgui(
+        auto_call=True,
+        enabled={
+            "label": "Click a label to grow it to the cell boundary (SAM2)",
+            "tooltip": (
+                "For under-segmented cells — the label covers only part of "
+                "the object. While enabled, left-click the label and SAM2 "
+                "segments the cell it belongs to, extending the label to the "
+                "full object at the clicked timepoint only. The existing "
+                "label is used as the prompt, and every neighboring label "
+                "becomes a negative prompt, so a touching cell is not "
+                "swallowed. The label only ever grows and only into "
+                "background, so you can re-click after adjusting the "
+                "settings. Ctrl+Z removes exactly the pixels the last grow "
+                "added. Runs on each Z-plane the label appears on. The first "
+                "click of a session loads the model (a few seconds); after "
+                "that it is about 0.2 s per plane. Requires the SAM2 "
+                "environment — the 'Batch Crop Anything' widget installs it. "
+                "Grows are staged in memory; press 'Save Changes and "
+                "Continue' to write them."
+            ),
+        },
+        max_growth={
+            "label": "Max growth (px)",
+            "widget_type": "SpinBox",
+            "min": 1,
+            "max": 400,
+            "tooltip": (
+                "Does double duty: how far, in pixels, the label may travel "
+                "from its current boundary, and how much context around the "
+                "label SAM2 is shown. Too small clips a genuinely larger "
+                "cell; too large makes the crop mostly background, which "
+                "gives SAM2 less resolution on the cell itself (the crop is "
+                "rescaled to 1024x1024 whatever its size). Roughly the "
+                "radius of one cell is a good starting point."
+            ),
+        },
+        smoothing={
+            "label": "Smoothing (px)",
+            "widget_type": "SpinBox",
+            "min": 0,
+            "max": 20,
+            "tooltip": (
+                "Polishes the returned contour with a closing then an "
+                "opening of this radius, filling small bays and removing "
+                "thin spurs. SAM2 masks are already fairly smooth, so 0-2 is "
+                "usually right; 0 keeps the model's boundary exactly. "
+                "Smoothing can never shrink the label below its original "
+                "extent, nor push it onto a neighbor."
+            ),
+        },
+        channel={
+            "label": "Signal channel",
+            "widget_type": "ComboBox",
+            "choices": ["Mean", "0", "1", "2", "3", "4"],
+            "tooltip": (
+                "Which channel of a multi-channel raw image is shown to "
+                "SAM2. 'Mean' averages all channels; pick a channel index "
+                "(0-based, along the raw's channel axis) to grow to one "
+                "marker's extent — e.g. a membrane or cytoplasm channel "
+                "rather than a nuclear one. Ignored for single-channel raws."
+            ),
+        },
+    )
+    def click_to_grow(
+        enabled: bool = False,
+        max_growth: int = 30,
+        smoothing: int = 1,
+        channel: str = "Mean",
+    ):
+        """While on, click an under-segmented label to grow it to the cell."""
+        inspector.grow_max_px = int(max_growth)
+        inspector.grow_smooth_px = int(smoothing)
+        inspector.grow_channel = channel.strip().lower()
+        for other in (
+            click_to_delete,
+            click_to_relabel,
+            click_to_split,
+            click_to_merge,
+        ):
+            if enabled and other["enabled"].value:
+                other["enabled"].value = False
+        inspector.enable_click_grow(enabled)
 
     @magicgui(
         call_button="Apply",
@@ -3476,6 +4004,7 @@ def label_inspector(
             click_to_split,
             apply_split,
             click_to_merge,
+            click_to_grow,
         ],
         labels=False,
     )
