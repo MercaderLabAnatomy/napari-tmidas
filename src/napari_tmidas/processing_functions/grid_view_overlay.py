@@ -194,44 +194,43 @@ def _create_overlay(
             # No labels found - image will be grayscale only
             pass  # rgb already has intensity in all channels (grayscale)
         elif len(unique_labels) > 0:
-            # Create a simple colormap using hue variation
-            # Use modulo to cycle through distinct colors even with many labels
-            for i, label_id in enumerate(unique_labels):
-                mask = label_image == label_id
+            # Build the colour table once, then map every voxel through it in
+            # a single pass. Scanning the whole image per label made this
+            # O(labels x pixels) — seconds per frame once a tracked movie has
+            # a few thousand labels.
+            #
+            # Colours cycle through hue by the golden angle for good spread.
+            hues = (np.arange(len(unique_labels)) * 137.5) % 360
+            h_norm = hues / 60.0
+            h_int = h_norm.astype(int) % 6
+            f = h_norm - np.floor(h_norm)
 
-                # Generate color by cycling through hue values (0-360 degrees)
-                hue = (
-                    i * 137.5
-                ) % 360  # Golden angle for better color distribution
+            colors = np.empty((len(unique_labels), 3), dtype=np.float64)
+            ones = np.ones_like(f)
+            zeros = np.zeros_like(f)
+            # Same six hue sectors as the original per-label branching
+            sectors = [
+                (ones, f, zeros),
+                (1.0 - f, ones, zeros),
+                (zeros, ones, f),
+                (zeros, 1.0 - f, ones),
+                (f, zeros, ones),
+                (ones, zeros, 1.0 - f),
+            ]
+            for sector_index, (r, g, b) in enumerate(sectors):
+                selected = h_int == sector_index
+                colors[selected, 0] = r[selected]
+                colors[selected, 1] = g[selected]
+                colors[selected, 2] = b[selected]
 
-                # Convert HSV to RGB (H=hue, S=1, V=1)
-                h_norm = hue / 60.0
-                h_int = int(h_norm) % 6
-                f = h_norm - int(h_norm)
-
-                if h_int == 0:
-                    r, g, b = 1.0, f, 0.0
-                elif h_int == 1:
-                    r, g, b = 1.0 - f, 1.0, 0.0
-                elif h_int == 2:
-                    r, g, b = 0.0, 1.0, f
-                elif h_int == 3:
-                    r, g, b = 0.0, 1.0 - f, 1.0
-                elif h_int == 4:
-                    r, g, b = f, 0.0, 1.0
-                else:
-                    r, g, b = 1.0, 0.0, 1.0 - f
-
-                # Blend with opacity
-                rgb[mask, 0] = (1 - label_opacity) * rgb[
-                    mask, 0
-                ] + label_opacity * r
-                rgb[mask, 1] = (1 - label_opacity) * rgb[
-                    mask, 1
-                ] + label_opacity * g
-                rgb[mask, 2] = (1 - label_opacity) * rgb[
-                    mask, 2
-                ] + label_opacity * b
+            # Rank of each labelled voxel within unique_labels == the `i` the
+            # original loop used to pick a hue
+            foreground = label_image > 0
+            ranks = np.searchsorted(unique_labels, label_image[foreground])
+            blended = (1 - label_opacity) * rgb[foreground] + (
+                label_opacity * colors[ranks]
+            )
+            rgb[foreground] = blended
 
     # Convert to uint8
     rgb_uint8 = (rgb * 255).astype(np.uint8)

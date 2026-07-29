@@ -45,10 +45,20 @@ def discover_and_load_processing_functions(reload: bool = False) -> List[str]:
                 # Log the error but continue with other modules
                 # ValueError catches NumPy binary incompatibility issues
                 error_msg = str(e)
-                if "numpy.dtype size changed" in error_msg:
+                if (
+                    "numpy.dtype size changed" in error_msg
+                    or "numpy.core.multiarray failed to import" in error_msg
+                ):
+                    # A package was compiled against a different NumPy major
+                    # version.  Reinstalling rarely helps — the package needs a
+                    # wheel built for the installed NumPy, which unmaintained
+                    # projects do not have.
                     print(
-                        f"Failed to import {module_name}: NumPy binary incompatibility. "
-                        "Try: pip install --force-reinstall --no-cache-dir scikit-learn-extra"
+                        f"Failed to import {module_name}: NumPy binary incompatibility "
+                        f"({error_msg}). A dependency was compiled against a different "
+                        "NumPy major version. Check which package it is and whether it "
+                        "publishes a wheel for your NumPy; reinstalling it will not "
+                        "help if it does not."
                     )
                 else:
                     print(f"Failed to import {module_name}: {e}")

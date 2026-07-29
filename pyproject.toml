@@ -53,13 +53,9 @@ testing = [
     "napari",
     "pyqt5",
     "psygnal>=0.8.0",
-    "scikit-learn-extra>=0.3.0",
-]
-clustering = [
-    "scikit-learn-extra>=0.3.0",
 ]
 all = [
-    "napari-tmidas[testing,clustering]",
+    "napari-tmidas[testing]",
 ]
 
 [project.entry-points."napari.manifest"]

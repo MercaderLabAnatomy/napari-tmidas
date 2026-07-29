@@ -324,6 +324,38 @@ class TestResizeImageFixedYX:
             resize_image_fixed_yx(image, scale_factor=0)
 
     def test_invalid_dim_order(self):
+        """Orders that do not end in YX are rejected."""
         image = np.random.rand(100, 120).astype(np.float32)
         with pytest.raises(ValueError, match="Unsupported dim_order"):
-            resize_image_fixed_yx(image, dim_order="CZYX")
+            resize_image_fixed_yx(image, dim_order="ZXY")
+
+    def test_dim_order_ndim_mismatch(self):
+        """A valid order that does not match the image's ndim is rejected."""
+        image = np.random.rand(100, 120).astype(np.float32)
+        with pytest.raises(ValueError, match="incompatible with image.ndim"):
+            resize_image_fixed_yx(image, dim_order="TCZYX")
+
+    @pytest.mark.parametrize(
+        "dim_order,shape",
+        [
+            ("YX", (20, 30)),
+            ("CYX", (2, 20, 30)),
+            ("TYX", (3, 20, 30)),
+            ("ZYX", (3, 20, 30)),
+            ("TCYX", (2, 2, 20, 30)),
+            ("TZYX", (2, 3, 20, 30)),
+            ("ZCYX", (3, 2, 20, 30)),
+            ("TZCYX", (2, 2, 2, 20, 30)),
+            ("TCZYX", (2, 2, 2, 20, 30)),
+        ],
+    )
+    def test_resize_accepts_every_dim_order(self, dim_order, shape):
+        """Every order offered by the dimension-order dropdown is supported."""
+        image = np.random.rand(*shape).astype(np.float32)
+
+        result = resize_image_fixed_yx(
+            image, scale_factor=2.0, dim_order=dim_order
+        )
+
+        assert result.shape == shape[:-2] + (40, 60)
+        assert result.dtype == image.dtype

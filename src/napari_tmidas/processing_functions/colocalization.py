@@ -619,24 +619,50 @@ def roi_colocalization(
     results = []
     roi_sizes = {}
 
-    # Pre-calculate sizes for image_c1 if needed
-    if get_sizes:
-        for prop in measure.regionprops(image_c1.astype(np.uint32)):
-            label = int(prop.label)
-            roi_sizes[label] = int(prop.area)
+    # Pre-calculate sizes for image_c1 if needed.  np.bincount does this in a
+    # single pass with no full-size copy, unlike regionprops on an
+    # .astype(np.uint32) duplicate — which additionally refuses anything with
+    # more than 3 dimensions.
+    if get_sizes and image_c1.size:
+        areas = np.bincount(image_c1.ravel())
+        for label in np.nonzero(areas)[0]:
+            if label:
+                roi_sizes[int(label)] = int(areas[label])
+
+    # Restrict each label's work to its own bounding box.  Every statistic
+    # below is local to the ROI, so a full-array `image_c1 == label_id` scan
+    # per label made the whole function O(labels x voxels) — thousands of
+    # passes over the stack for a tracked movie. find_objects gets every box
+    # in one pass.
+    bboxes = None
+    if np.issubdtype(image_c1.dtype, np.integer):
+        from scipy.ndimage import find_objects
+
+        bboxes = find_objects(image_c1)
+
+    def _crop(array, window):
+        if array is None or window is None:
+            return array
+        return array[window]
 
     for label_id in label_ids:
+        window = None
+        if bboxes is not None and 0 < label_id <= len(bboxes):
+            window = bboxes[label_id - 1]
+            if window is None:
+                continue  # label absent from the image
+
         result = process_single_roi(
             label_id,
-            image_c1,
-            image_c2,
-            image_c3,
+            _crop(image_c1, window),
+            _crop(image_c2, window),
+            _crop(image_c3, window),
             get_sizes,
             roi_sizes,
             channel2_is_labels,
             channel3_is_labels,
-            image_c2_intensity,
-            image_c3_intensity,
+            _crop(image_c2_intensity, window),
+            _crop(image_c3_intensity, window),
             count_positive,
             threshold_method,
             threshold_value,
@@ -657,41 +683,30 @@ def roi_colocalization(
     # Fill first channel with original labels
     output[0] = image_c1
 
+    # These channels were filled with one full-array pass *per label*, but
+    # `label_ids` is exactly the set of non-zero values in image_c1, so
+    # iterating them is the same as a single `image_c1 != 0` mask — and the
+    # value written back is always image_c1's own label. One pass each.
+    roi_mask = image_c1 != 0
+
     # Fill second channel based on whether it's labels or intensity
     if channel2_is_labels:
         # Fill with ch1 labels where ch2 overlaps
-        for label_id in label_ids:
-            mask = (image_c1 == label_id) & (image_c2 != 0)
-            if np.any(mask):
-                output[1][mask] = label_id
+        overlap = roi_mask & (image_c2 != 0)
+        output[1][overlap] = image_c1[overlap]
     else:
         # For intensity-based channel 2, show the intensity values within ch1 ROIs
-        for label_id in label_ids:
-            mask = image_c1 == label_id
-            if np.any(mask):
-                output[1][mask] = image_c2[mask]
+        output[1][roi_mask] = image_c2[roi_mask]
 
     # Fill third channel with ch1 labels where ch3 overlaps (if applicable)
     if image_c3 is not None and output_channels > 2:
         if channel3_is_labels:
-            # For label-based channel 3, show overlap
-            if channel2_is_labels:
-                # Ch2 is labels - show ch3 overlap with ch2 in ch1
-                for label_id in label_ids:
-                    mask = (image_c1 == label_id) & (image_c3 != 0)
-                    if np.any(mask):
-                        output[2][mask] = label_id
-            else:
-                # Ch2 is intensity - just show ch3 overlap with ch1
-                for label_id in label_ids:
-                    mask = (image_c1 == label_id) & (image_c3 != 0)
-                    if np.any(mask):
-                        output[2][mask] = label_id
+            # For label-based channel 3, show overlap (identical whether or
+            # not ch2 is labels — the two branches were the same code)
+            overlap = roi_mask & (image_c3 != 0)
+            output[2][overlap] = image_c1[overlap]
         else:
             # For intensity-based channel 3, show the intensity values
-            for label_id in label_ids:
-                mask = image_c1 == label_id
-                if np.any(mask):
-                    output[2][mask] = image_c3[mask]
+            output[2][roi_mask] = image_c3[roi_mask]
 
     return output

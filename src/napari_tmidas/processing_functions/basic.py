@@ -750,14 +750,23 @@ def gamma_correction(image: np.ndarray, gamma: float = 1.0, channel: str = "all"
         else 1.0
     )
 
-    # Normalize image to [0, 1]
-    normalized = image.astype(np.float32) / max_val
+    # Process one YX plane at a time, reusing a single float32 scratch buffer.
+    # The naive chain (astype → divide → power → multiply → clip → astype)
+    # holds five full-size temporaries at once; on a large stack that is the
+    # difference between running and being OOM-killed.
+    result = np.empty(image.shape, dtype=image.dtype)
+    leading = image.shape[:-2] if image.ndim > 2 else ()
+    scratch = np.empty(image.shape[-2:] if image.ndim >= 2 else image.shape,
+                       dtype=np.float32)
 
-    # Apply gamma correction
-    corrected = np.power(normalized, gamma)
+    for index in (np.ndindex(*leading) if leading else [()]):
+        np.divide(image[index], max_val, out=scratch, casting="unsafe")
+        np.power(scratch, gamma, out=scratch)
+        np.multiply(scratch, max_val, out=scratch)
+        np.clip(scratch, 0, max_val, out=scratch)
+        result[index] = scratch
 
-    # Scale back to original range and dtype
-    return (corrected * max_val).clip(0, max_val).astype(image.dtype)
+    return result
 
 
 @BatchProcessingRegistry.register(

@@ -235,29 +235,22 @@ if SCIPY_AVAILABLE:
 
             return result
 
-        # Create the three scaled versions
-        full_labels = work_image.copy()  # Outer boundary (100%)
+        # Bail out before the two expensive zooms if there is nothing to do
+        max_label = int(label_image.max()) if label_image.size else 0
+        if max_label == 0:
+            return np.zeros_like(label_image)
+
+        # Create the two scaled versions.  The outer boundary is `work_image`
+        # itself — copying it into `full_labels` and again into `layer3`, as
+        # well as materialising separate layer1/layer2/layer3 arrays, held
+        # eight full-size arrays at once.  Composing straight into `result`
+        # below needs only work_image + middle + inner + result + one mask.
         middle_labels = create_scaled_labels(
             scale_middle
         )  # Middle boundary (~67%)
         inner_labels = create_scaled_labels(
             scale_inner
         )  # Inner boundary (~33%)
-
-        # Layer 3 (outermost shell): Full - Middle
-        layer3 = full_labels.copy()
-        layer3[middle_labels > 0] = 0
-
-        # Layer 2 (middle shell): Middle - Inner
-        layer2 = middle_labels.copy()
-        layer2[inner_labels > 0] = 0
-
-        # Layer 1 (innermost core): Inner
-        layer1 = inner_labels.copy()
-
-        max_label = int(label_image.max()) if label_image.size else 0
-        if max_label == 0:
-            return np.zeros_like(label_image)
 
         if np.issubdtype(label_image.dtype, np.integer):
             max_needed = max_label * 3
@@ -277,24 +270,35 @@ if SCIPY_AVAILABLE:
 
         result = np.zeros(work_shape, dtype=result_dtype)
 
-        layer1_mask = layer1 > 0
-        if np.any(layer1_mask):
-            result[layer1_mask] = layer1[layer1_mask].astype(
+        # Assign core → middle shell → outer shell, in that order.  Zoom
+        # rounding can leave a voxel claimed by more than one boundary, and
+        # the original built the layers separately and wrote them in this
+        # order, so the outer shell wins those ties.  One reusable boolean
+        # mask is threaded through all three.
+        #
+        # Layer 1 (innermost core): the inner boundary itself
+        mask = inner_labels > 0
+        if mask.any():
+            result[mask] = inner_labels[mask].astype(
                 result_dtype, copy=False
             )
 
-        layer2_mask = layer2 > 0
-        if np.any(layer2_mask):
-            result[layer2_mask] = (
-                layer2[layer2_mask].astype(result_dtype, copy=False)
+        # Layer 2 (middle shell): middle boundary minus the inner boundary
+        np.logical_and(middle_labels > 0, inner_labels == 0, out=mask)
+        if mask.any():
+            result[mask] = (
+                middle_labels[mask].astype(result_dtype, copy=False)
                 + max_label
             )
+        del inner_labels
 
-        layer3_mask = layer3 > 0
-        if np.any(layer3_mask):
-            result[layer3_mask] = layer3[layer3_mask].astype(
+        # Layer 3 (outermost shell): work_image minus the middle boundary
+        np.logical_and(work_image > 0, middle_labels == 0, out=mask)
+        if mask.any():
+            result[mask] = work_image[mask].astype(
                 result_dtype, copy=False
             ) + (2 * max_label)
+        del middle_labels, mask
 
         # If half-body mode, extract back the original half and place in original coordinates
         if is_half_body:

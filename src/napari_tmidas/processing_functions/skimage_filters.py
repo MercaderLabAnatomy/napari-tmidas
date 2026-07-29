@@ -363,81 +363,69 @@ if SKIMAGE_AVAILABLE:
         # Clamp max_workers to reasonable range
         max_workers = max(1, min(max_workers, 16))
 
+        # equalize_adapthist returns float64 — 8 bytes per voxel. Collecting
+        # every slice into a list, np.stack-ing it, and only then converting
+        # back to the input dtype held three full-size copies at once (a float
+        # list, the stacked float array, and the scaled result). Instead,
+        # allocate the final-dtype output up front and convert each slice into
+        # it as soon as it is ready, so only `max_workers` float slices are
+        # ever live.
+        result = np.empty(image.shape, dtype=original_dtype)
+        is_integer_out = np.issubdtype(original_dtype, np.integer)
+
+        def store(destination, float_slice):
+            """Scale a CLAHE result back to the input dtype, in place."""
+            if is_integer_out:
+                iinfo = np.iinfo(original_dtype)
+                scaled = float_slice * (iinfo.max - iinfo.min) + iinfo.min
+                np.copyto(destination, scaled, casting="unsafe")
+            else:
+                np.copyto(destination, float_slice, casting="unsafe")
+
+        def run_parallel(n_slices, label):
+            print(
+                f"Parallelizing CLAHE across {n_slices} {label} "
+                f"using {max_workers} workers..."
+            )
+
+            def process_slice(idx):
+                store(
+                    result[idx],
+                    skimage.exposure.equalize_adapthist(
+                        image[idx],
+                        kernel_size=kernel_size,
+                        clip_limit=clip_limit,
+                    ),
+                )
+                if (idx + 1) % max(1, n_slices // 10) == 0:
+                    print(f"  Processed {idx + 1}/{n_slices} slices")
+
+            # Threads write into disjoint slices of `result`, so no locking is
+            # needed; returning None keeps nothing alive between tasks.
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                list(executor.map(process_slice, range(n_slices)))
+            print("CLAHE processing complete!")
+
         # For 4D data (TZYX), parallelize across first dimension for better performance
         if image.ndim == 4 and image.shape[0] > 1:
-            print(
-                f"Parallelizing CLAHE across {image.shape[0]} timepoints/slices using {max_workers} workers..."
-            )
-
-            def process_slice(idx):
-                """Process a single slice along first dimension"""
-                result_slice = skimage.exposure.equalize_adapthist(
-                    image[idx], kernel_size=kernel_size, clip_limit=clip_limit
-                )
-                if (idx + 1) % max(1, image.shape[0] // 10) == 0:
-                    print(f"  Processed {idx + 1}/{image.shape[0]} slices")
-                return result_slice
-
-            # Process in parallel with limited workers to control memory usage
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                futures = [
-                    executor.submit(process_slice, i)
-                    for i in range(image.shape[0])
-                ]
-                results = [future.result() for future in futures]
-
-            result = np.stack(results, axis=0)
-            print("CLAHE processing complete!")
-
+            run_parallel(image.shape[0], "timepoints/slices")
         elif image.ndim == 3 and image.shape[0] > 5:
             # For 3D data with many slices, also parallelize
-            print(
-                f"Parallelizing CLAHE across {image.shape[0]} slices using {max_workers} workers..."
-            )
-
-            def process_slice(idx):
-                """Process a single 2D slice"""
-                result_slice = skimage.exposure.equalize_adapthist(
-                    image[idx], kernel_size=kernel_size, clip_limit=clip_limit
-                )
-                if (idx + 1) % max(1, image.shape[0] // 10) == 0:
-                    print(f"  Processed {idx + 1}/{image.shape[0]} slices")
-                return result_slice
-
-            # Process in parallel with limited workers to control memory usage
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                futures = [
-                    executor.submit(process_slice, i)
-                    for i in range(image.shape[0])
-                ]
-                results = [future.result() for future in futures]
-
-            result = np.stack(results, axis=0)
-            print("CLAHE processing complete!")
+            run_parallel(image.shape[0], "slices")
         else:
             # For 2D or small 3D data, use native implementation
             if image.ndim > 2:
                 print("Processing...")
-            result = skimage.exposure.equalize_adapthist(
-                image, kernel_size=kernel_size, clip_limit=clip_limit
+            store(
+                result,
+                skimage.exposure.equalize_adapthist(
+                    image, kernel_size=kernel_size, clip_limit=clip_limit
+                ),
             )
             if image.ndim > 2:
                 print("CLAHE processing complete!")
-
-        # Convert back to original dtype to preserve compatibility
-        if np.issubdtype(original_dtype, np.integer):
-            # For integer types, scale back to original range
-            iinfo = np.iinfo(original_dtype)
-            result = (result * (iinfo.max - iinfo.min) + iinfo.min).astype(
-                original_dtype
-            )
-        else:
-            # For float types, keep as is but match dtype
-            result = result.astype(original_dtype)
 
         return result
 
@@ -735,31 +723,33 @@ if SKIMAGE_AVAILABLE:
             ]  # Remove background (0)
 
             # Create an empty output mask
-            result = np.zeros_like(mask_block, dtype=np.uint32)
+            result = np.zeros(mask_block.shape, dtype=np.uint32)
 
-            # Process each class
+            # Process each class.  Classes partition the block, so their
+            # components never overlap — writing each class straight into the
+            # result under a `where` mask is equivalent to the old
+            # `np.maximum(result, labeled)` but avoids allocating a fresh
+            # full-size array on every iteration.
             label_offset = 0
             for class_val in class_values:
-                # Create binary mask for this class
-                binary_mask = (mask_block == class_val).astype(np.uint8)
-
-                # Find connected components
+                # Pass the boolean mask directly; the old .astype(np.uint8)
+                # materialised an extra copy of the block per class
                 labeled = skimage.measure.label(
-                    binary_mask, connectivity=connectivity
+                    mask_block == class_val, connectivity=connectivity
                 )
 
                 # Skip if no components found
-                if np.max(labeled) == 0:
+                n_components = int(labeled.max())
+                if n_components == 0:
                     continue
 
-                # Add offset to avoid label overlap between classes
-                labeled[labeled > 0] += label_offset
-
-                # Add to result
-                result = np.maximum(result, labeled)
-
-                # Update offset for next class
-                label_offset = np.max(result)
+                # Offset so labels stay unique across classes.  measure.label
+                # numbers components 1..n contiguously, so the next offset is
+                # simply the running total — no full rescan of `result`.
+                nonzero = labeled > 0
+                np.add(labeled, label_offset, out=labeled, where=nonzero)
+                np.copyto(result, labeled, casting="unsafe", where=nonzero)
+                label_offset += n_components
 
             return result
         else:
@@ -873,13 +863,13 @@ def binary_to_labels(
         Label image with unique labels per connected component
         (labels restart per timepoint/channel when processed independently)
     """
-    # Make a copy of the input image to avoid modifying the original
-    label_image = image.copy()
-    result = np.zeros_like(label_image, dtype=np.uint32)
-    for index, block in _iter_dimension_blocks(label_image, dimension_order):
-        result[index] = skimage.measure.label(
-            block, connectivity=block.ndim
-        ).astype(np.uint32)
+    # No copy: blocks are only read, and measure.label does not modify its
+    # input, so copying the whole stack just to discard it doubled peak memory.
+    result = np.zeros(image.shape, dtype=np.uint32)
+    for index, block in _iter_dimension_blocks(image, dimension_order):
+        # Assigning into the uint32 result converts in place; an explicit
+        # .astype() would build a second full-size array first.
+        result[index] = skimage.measure.label(block, connectivity=block.ndim)
     return result
 
 
@@ -914,11 +904,38 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
     numpy.ndarray
         8-bit image with shape preserved and values properly scaled
     """
-    # Rescale to 0-1 range (works for any input range, negative or positive)
-    img_rescaled = skimage.exposure.rescale_intensity(image, out_range=(0, 1))
+    # The obvious `img_as_ubyte(rescale_intensity(image))` builds a full-size
+    # float64 image and several more temporaries just to emit one byte per
+    # voxel — ~6x the input in peak memory. Do the same arithmetic one YX plane
+    # at a time into a pre-allocated uint8 result instead.  uint8 input is not
+    # short-circuited: rescale_intensity stretches it to the full range too.
+    imin = float(image.min())
+    imax = float(image.max())
 
-    # Convert the rescaled image to uint8
-    return skimage.img_as_ubyte(img_rescaled)
+    result = np.empty(image.shape, dtype=np.uint8)
+    if imax == imin:
+        # Constant image: rescale_intensity clips the single value into the
+        # output range, so 0 stays 0 and anything else saturates to 255.
+        result.fill(0 if imin <= 0 else 255)
+        return result
+
+    span = imax - imin
+    leading = image.shape[:-2] if image.ndim > 2 else ()
+    plane_shape = image.shape[-2:] if image.ndim >= 2 else image.shape
+    scratch = np.empty(plane_shape, dtype=np.float64)
+
+    for index in (np.ndindex(*leading) if leading else [()]):
+        # Same order of operations as rescale_intensity followed by
+        # img_as_ubyte — subtract, divide, then scale by 255 — so values
+        # landing exactly on .5 round identically.
+        np.subtract(image[index], imin, out=scratch, casting="unsafe")
+        np.divide(scratch, span, out=scratch)
+        np.clip(scratch, 0, 1, out=scratch)
+        np.multiply(scratch, 255, out=scratch)
+        np.rint(scratch, out=scratch)
+        result[index] = scratch
+
+    return result
 
 
 @BatchProcessingRegistry.register(
@@ -956,37 +973,30 @@ def resize_image_fixed_yx(
     """
     Resize image YX plane(s) to fixed dimensions using skimage.
 
-    Supports YX (2D), ZYX (3D), TYX (3D+time), and TZYX (4D+time+depth).
-    T/Z dimensions are preserved; only YX is resized.
+    Supports any dimension order ending in YX (YX, CYX, TYX, ZYX, TCYX, TZYX,
+    ZCYX, TZCYX, TCZYX, …).  All leading T/C/Z dimensions are preserved;
+    only the YX plane is resized.
     """
     from skimage.transform import resize
 
     target_y, target_x = _resolve_resize_target(image.shape[-2:], scale_factor)
 
-    if dim_order == "auto":
-        auto_map = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}
-        dim_order = auto_map.get(image.ndim)
-        if dim_order is None:
-            raise ValueError(
-                f"Unsupported ndim for auto dim_order: {image.ndim}. "
-                "Use explicit dim_order (YX, ZYX, TYX, TZYX, or TCZYX)."
-            )
-
+    # Only the trailing YX plane is resized; any leading axes (T, C, Z, …) are
+    # preserved as-is, so every dimension order ending in YX is supported.
     dim_order = str(dim_order).upper()
-    valid_orders = {"YX", "ZYX", "TYX", "TZYX", "TCZYX"}
-    if dim_order not in valid_orders:
+    if dim_order != "AUTO":
+        if not dim_order.endswith("YX"):
+            raise ValueError(
+                f"Unsupported dim_order '{dim_order}'. The last two axes must "
+                "be Y and X (e.g. YX, CYX, TYX, ZYX, TZYX, TCZYX) or 'auto'."
+            )
+        if len(dim_order) != image.ndim:
+            raise ValueError(
+                f"dim_order '{dim_order}' is incompatible with image.ndim={image.ndim}"
+            )
+    elif image.ndim < 2:
         raise ValueError(
-            f"Unsupported dim_order '{dim_order}'. "
-            "Use one of: YX, ZYX, TYX, TZYX, TCZYX, auto"
-        )
-
-    if (dim_order == "YX" and image.ndim != 2) or (
-        dim_order in {"ZYX", "TYX"} and image.ndim != 3
-    ) or (dim_order == "TZYX" and image.ndim != 4) or (
-        dim_order == "TCZYX" and image.ndim != 5
-    ):
-        raise ValueError(
-            f"dim_order '{dim_order}' is incompatible with image.ndim={image.ndim}"
+            f"Resizing requires at least 2 dimensions, got {image.ndim}"
         )
 
     def _resize_2d(slice_2d: np.ndarray) -> np.ndarray:
@@ -1797,21 +1807,39 @@ if SKIMAGE_AVAILABLE:
                 image, block_size, offset, dimension_order
             )
 
-        # Convert to uint8 if needed
-        if image.dtype != np.uint8:
-            image = skimage.img_as_ubyte(image)
-
         size_tuple = _spatial_window_size_tuple(
             dimension_order, image.ndim, block_size
         )
 
-        # Apply adaptive thresholding
-        threshold = skimage.filters.threshold_local(
-            image, block_size=size_tuple, offset=offset
-        )
+        # Axes carrying a window of 1 are independent, so the filter is
+        # separable over them.  Iterating those axes keeps the float64 array
+        # that threshold_local returns down to one block instead of one the
+        # size of the whole stack (8 bytes per voxel on top of everything
+        # else), and lets the uint8 conversion happen a block at a time too.
+        n_block_axes = 0
+        for size in reversed(size_tuple):
+            if size == 1:
+                break
+            n_block_axes += 1
+        n_block_axes = max(n_block_axes, 1)
 
-        # Create binary mask
-        binary = image > threshold
+        leading = image.shape[: image.ndim - n_block_axes]
+        block_window = size_tuple[image.ndim - n_block_axes :]
 
-        # Return as uint8 (255/0)
-        return (binary * 255).astype(np.uint8)
+        result = np.empty(image.shape, dtype=np.uint8)
+        for index in (np.ndindex(*leading) if leading else [()]):
+            block = image[index]
+            if block.dtype != np.uint8:
+                # img_as_ubyte is a per-element scaling, so doing it per block
+                # gives the same answer as converting the whole stack at once
+                block = skimage.img_as_ubyte(block)
+            threshold = skimage.filters.threshold_local(
+                block, block_size=block_window, offset=offset
+            )
+            # `binary * 255` would go through an int64 temporary the size of
+            # the whole image; write the bytes straight into the result
+            np.multiply(
+                block > threshold, 255, out=result[index], casting="unsafe"
+            )
+
+        return result
