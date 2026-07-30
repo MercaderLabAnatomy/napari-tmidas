@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import glob
+import importlib
 import inspect
 import json
 import os
@@ -1086,19 +1087,23 @@ def save_as_zarr(
                 auto_chunks[i] = 1
             chunks = tuple(auto_chunks)
 
-        # Use zlib compression when available for zarr v3.
+        # Compress zarr v3 output with zstd: it writes several times faster
+        # than gzip -6 at a comparable ratio, and is a core zarr v3 codec so
+        # every v3 reader understands it.  Gzip stays as the fallback.
         if zarr_format == 3:
-            try:
-                from zarr.codecs import GzipCodec as _GzipCodec
-
-                _storage_opts: dict = {
-                    "chunks": chunks,
-                    "compressors": [_GzipCodec(level=6)],
-                }
-            except (ImportError, Exception):
-                _storage_opts = {
-                    "chunks": chunks
-                }  # no compression if codec unavailable
+            _storage_opts: dict = {"chunks": chunks}
+            for _codec_path, _level in (
+                ("ZstdCodec", 3),
+                ("GzipCodec", 6),
+            ):
+                try:
+                    _codec = getattr(
+                        importlib.import_module("zarr.codecs"), _codec_path
+                    )
+                    _storage_opts["compressors"] = [_codec(level=_level)]
+                    break
+                except (ImportError, AttributeError, TypeError):
+                    continue  # no compression if no codec is available
         else:
             _storage_opts = {"chunks": chunks}
 
@@ -1151,13 +1156,13 @@ def save_as_zarr(
                 )
                 arr[:] = data
             else:
-                from zarr.codecs import GzipCodec as _GzipCodec
+                from zarr.codecs import ZstdCodec as _ZstdCodec
 
                 zarr.save(
                     filepath,
                     data,
                     chunks=chunks,
-                    compressors=[_GzipCodec(level=6)],
+                    compressors=[_ZstdCodec(level=3)],
                 )
         except Exception:
             if zarr_format == 2:
@@ -3035,13 +3040,6 @@ class ProcessingWorker(QThread):
                         size_gb = img.size * img.itemsize / (1024**3)
                         print(f"Estimated file size: {size_gb:.2f} GB")
 
-                        # Check data range
-                        data_min = np.min(img) if img.size > 0 else 0
-                        data_max = np.max(img) if img.size > 0 else 0
-                        print(
-                            f"Layer {idx + 1} data range: {data_min} to {data_max}"
-                        )
-
                         # Layer subdivision outputs should always be saved as uint32
                         # to ensure Napari auto-detects them as labels
                         save_dtype = np.uint32
@@ -3054,7 +3052,7 @@ class ProcessingWorker(QThread):
                             f"(dim_order={resolved_dim_order})"
                         )
                         write_labels_with_source_metadata(
-                            img.astype(save_dtype),
+                            img.astype(save_dtype, copy=False),
                             filepath,
                             output_path,
                             self.output_format,
@@ -3085,13 +3083,6 @@ class ProcessingWorker(QThread):
                         size_gb = img.size * img.itemsize / (1024**3)
                         print(f"Estimated file size: {size_gb:.2f} GB")
 
-                        # Check data range
-                        data_min = np.min(img) if img.size > 0 else 0
-                        data_max = np.max(img) if img.size > 0 else 0
-                        print(
-                            f"Output {idx + 1} data range: {data_min} to {data_max}"
-                        )
-
                         # For very large files, use BigTIFF format
                         use_bigtiff = size_gb > 2.0
 
@@ -3111,7 +3102,7 @@ class ProcessingWorker(QThread):
                                 f"(dim_order={resolved_dim_order})"
                             )
                             write_labels_with_source_metadata(
-                                img.astype(save_dtype),
+                                img.astype(save_dtype, copy=False),
                                 filepath,
                                 output_path,
                                 self.output_format,
@@ -3123,7 +3114,7 @@ class ProcessingWorker(QThread):
                             )
                             if self.output_format == "zarr":
                                 save_as_zarr(
-                                    img.astype(image_dtype),
+                                    img.astype(image_dtype, copy=False),
                                     output_path,
                                     axes=resolved_dim_order,
                                     scale=_resolve_output_scale(
@@ -3143,7 +3134,7 @@ class ProcessingWorker(QThread):
                                     ] = "um"
                                 tifffile.imwrite(
                                     output_path,
-                                    img.astype(image_dtype),
+                                    img.astype(image_dtype, copy=False),
                                     ome=True,
                                     photometric="minisblack",
                                     compression="zlib",
@@ -3347,15 +3338,6 @@ class ProcessingWorker(QThread):
                     )
                     print(f"Estimated file size: {size_gb:.2f} GB")
 
-                    # Check data range
-                    data_min = (
-                        np.min(channel_image) if channel_image.size > 0 else 0
-                    )
-                    data_max = (
-                        np.max(channel_image) if channel_image.size > 0 else 0
-                    )
-                    print(f"Channel {i} data range: {data_min} to {data_max}")
-
                     # For very large files, use BigTIFF format
                     use_bigtiff = size_gb > 2.0
 
@@ -3378,7 +3360,7 @@ class ProcessingWorker(QThread):
                             f"(dim_order={resolved_dim_order})"
                         )
                         write_labels_with_source_metadata(
-                            channel_image.astype(save_dtype),
+                            channel_image.astype(save_dtype, copy=False),
                             filepath,
                             channel_filepath,
                             self.output_format,
@@ -3390,7 +3372,7 @@ class ProcessingWorker(QThread):
                         )
                         if self.output_format == "zarr":
                             save_as_zarr(
-                                channel_image.astype(image_dtype),
+                                channel_image.astype(image_dtype, copy=False),
                                 channel_filepath,
                                 axes=resolved_dim_order,
                                 scale=_resolve_output_scale(
@@ -3410,7 +3392,7 @@ class ProcessingWorker(QThread):
                                 ] = "um"
                             tifffile.imwrite(
                                 channel_filepath,
-                                channel_image.astype(image_dtype),
+                                channel_image.astype(image_dtype, copy=False),
                                 ome=True,
                                 photometric="minisblack",
                                 compression="zlib",
@@ -3441,15 +3423,6 @@ class ProcessingWorker(QThread):
                 # For very large files, use BigTIFF format
                 use_bigtiff = size_gb > 2.0
 
-                # Check data range
-                data_min = (
-                    np.min(processed_image) if processed_image.size > 0 else 0
-                )
-                data_max = (
-                    np.max(processed_image) if processed_image.size > 0 else 0
-                )
-                print(f"Data range: {data_min} to {data_max}")
-
                 # Check if this is a label image based on dtype
                 is_label = is_label_image(processed_image)
                 resolved_dim_order = _resolve_output_dim_order(
@@ -3465,7 +3438,7 @@ class ProcessingWorker(QThread):
                         f"(dim_order={resolved_dim_order})"
                     )
                     write_labels_with_source_metadata(
-                        processed_image.astype(save_dtype),
+                        processed_image.astype(save_dtype, copy=False),
                         filepath,
                         new_filepath,
                         self.output_format,
@@ -3475,7 +3448,7 @@ class ProcessingWorker(QThread):
                     print(f"Saving image with dtype {image_dtype}")
                     if self.output_format == "zarr":
                         save_as_zarr(
-                            processed_image.astype(image_dtype),
+                            processed_image.astype(image_dtype, copy=False),
                             new_filepath,
                             axes=resolved_dim_order,
                             scale=_resolve_output_scale(
@@ -3491,7 +3464,7 @@ class ProcessingWorker(QThread):
                             tiff_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
                         tifffile.imwrite(
                             new_filepath,
-                            processed_image.astype(image_dtype),
+                            processed_image.astype(image_dtype, copy=False),
                             ome=True,
                             photometric="minisblack",
                             compression="zlib",

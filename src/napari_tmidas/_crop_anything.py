@@ -1817,13 +1817,12 @@ class BatchCropAnything:
                                     obj_id
                                 )
 
-                                # Update label info
-                                area = np.sum(
+                                # Update label info.  One comparison pass
+                                # serves both the area and the centroid.
+                                y_indices, x_indices = np.nonzero(
                                     self.segmentation_result == obj_id
                                 )
-                                y_indices, x_indices = np.where(
-                                    self.segmentation_result == obj_id
-                                )
+                                area = y_indices.size
                                 center_y = (
                                     np.mean(y_indices)
                                     if len(y_indices) > 0
@@ -2320,11 +2319,12 @@ class BatchCropAnything:
                                     obj_id
                                 )
 
-                            # Update label info
-                            area = np.sum(self.segmentation_result == obj_id)
-                            y_indices, x_indices = np.where(
+                            # Update label info.  One comparison pass serves
+                            # both the area and the centroid.
+                            y_indices, x_indices = np.nonzero(
                                 self.segmentation_result == obj_id
                             )
+                            area = y_indices.size
                             center_y = (
                                 np.mean(y_indices) if len(y_indices) > 0 else 0
                             )
@@ -2645,14 +2645,28 @@ class BatchCropAnything:
             # Set row count
             table.setRowCount(len(unique_labels))
 
-            # Fill in label info for any missing labels
-            for label_id in unique_labels:
-                if label_id not in self.label_info:
-                    # Calculate basic info for this label
-                    mask = self.segmentation_result == label_id
-                    area = np.sum(mask)
-
-                    # Add info to label_info dictionary
+            # Fill in label info for any missing labels.  np.bincount counts
+            # every label in one pass; scanning the whole volume per label
+            # made repopulating the table O(labels x voxels).
+            missing = [
+                label_id
+                for label_id in unique_labels
+                if label_id not in self.label_info
+            ]
+            if missing:
+                if np.issubdtype(self.segmentation_result.dtype, np.integer):
+                    areas = np.bincount(self.segmentation_result.ravel())
+                    label_areas = {
+                        label_id: areas[label_id] for label_id in missing
+                    }
+                else:
+                    label_areas = {
+                        label_id: np.sum(
+                            self.segmentation_result == label_id
+                        )
+                        for label_id in missing
+                    }
+                for label_id, area in label_areas.items():
                     self.label_info[label_id] = {
                         "area": area,
                         "score": 1.0,  # Default score
@@ -2913,6 +2927,17 @@ class BatchCropAnything:
         else:
             self.viewer.status = "No label to delete at this position"
 
+    def _selected_labels_mask(self, label_ids):
+        """Boolean mask of every voxel carrying one of *label_ids*.
+
+        np.isin walks the segmentation once regardless of how many labels are
+        selected, where OR-ing one ``segmentation_result == label_id``
+        comparison per label cost a full pass each.
+        """
+        return np.isin(
+            self.segmentation_result, np.asarray(list(label_ids))
+        )
+
     def preview_crop(self, label_ids=None):
         """Preview the crop result with the selected label IDs."""
         if self.segmentation_result is None or self.image_layer is None:
@@ -2942,33 +2967,19 @@ class BatchCropAnything:
                     self.viewer.layers.selection.active = self.label_layer
                 return
 
-            # Get current image
-            image = self.original_image.copy()
+            # Create mask from selected label IDs.  np.isin does this in a
+            # single pass; the old loop scanned the whole volume once per
+            # selected label, so previewing a large selection was
+            # O(labels x voxels).
+            mask = self._selected_labels_mask(label_ids)
 
-            # Create mask from selected label IDs
-            if self.use_3d:
-                # For 3D data
-                mask = np.zeros_like(self.segmentation_result, dtype=bool)
-                for label_id in label_ids:
-                    mask |= self.segmentation_result == label_id
-
-                # Apply mask
-                preview_image = image.copy()
+            # Apply mask (one copy of the image, not two)
+            preview_image = self.original_image.copy()
+            if self.use_3d or preview_image.ndim == 2:
                 preview_image[~mask] = 0
             else:
-                # For 2D data
-                mask = np.zeros_like(self.segmentation_result, dtype=bool)
-                for label_id in label_ids:
-                    mask |= self.segmentation_result == label_id
-
-                # Apply mask
-                if len(image.shape) == 2:
-                    preview_image = image.copy()
-                    preview_image[~mask] = 0
-                else:
-                    preview_image = image.copy()
-                    for c in range(preview_image.shape[2]):
-                        preview_image[:, :, c][~mask] = 0
+                # Colour image: broadcast the 2D mask across channels
+                preview_image[~mask, :] = 0
 
             # Remove previous preview if exists
             for layer in list(self.viewer.layers):
@@ -3011,59 +3022,23 @@ class BatchCropAnything:
             # Get current image
             image = self.original_image
 
-            # Create mask from all selected label IDs
-            if self.use_3d:
-                # For 3D data, create a 3D mask
-                mask = np.zeros_like(self.segmentation_result, dtype=bool)
-                for label_id in self.selected_labels:
-                    mask |= self.segmentation_result == label_id
+            # Create mask from all selected label IDs in a single pass
+            mask = self._selected_labels_mask(self.selected_labels)
 
-                # Apply mask to image (set everything outside mask to 0)
-                cropped_image = image.copy()
+            # Apply mask to image (set everything outside mask to 0)
+            cropped_image = image.copy()
+            if self.use_3d or len(image.shape) == 2:
                 cropped_image[~mask] = 0
-
-                # Save label image with same dimensions as original
-                label_image = np.zeros_like(
-                    self.segmentation_result, dtype=np.uint32
-                )
-                for label_id in self.selected_labels:
-                    label_image[self.segmentation_result == label_id] = (
-                        label_id
-                    )
             else:
-                # For 2D data, handle as before
-                mask = np.zeros_like(self.segmentation_result, dtype=bool)
-                for label_id in self.selected_labels:
-                    mask |= self.segmentation_result == label_id
+                # Color image - mask must be expanded to match channel dimension
+                cropped_image[~mask, :] = 0
 
-                # Apply mask to image (set everything outside mask to 0)
-                if len(image.shape) == 2:
-                    # Grayscale image
-                    cropped_image = image.copy()
-                    cropped_image[~mask] = 0
-
-                    # Create label image with same dimensions
-                    label_image = np.zeros_like(
-                        self.segmentation_result, dtype=np.uint32
-                    )
-                    for label_id in self.selected_labels:
-                        label_image[self.segmentation_result == label_id] = (
-                            label_id
-                        )
-                else:
-                    # Color image - mask must be expanded to match channel dimension
-                    cropped_image = image.copy()
-                    for c in range(cropped_image.shape[2]):
-                        cropped_image[:, :, c][~mask] = 0
-
-                    # Create label image with 2D dimensions (without channels)
-                    label_image = np.zeros_like(
-                        self.segmentation_result, dtype=np.uint32
-                    )
-                    for label_id in self.selected_labels:
-                        label_image[self.segmentation_result == label_id] = (
-                            label_id
-                        )
+            # Save label image with same dimensions as the segmentation.  The
+            # value written under the mask is the segmentation's own label,
+            # so one masked copy replaces the per-label write loop.
+            label_image = np.where(mask, self.segmentation_result, 0).astype(
+                np.uint32
+            )
 
             # Save cropped image
             image_path = self.images[self.current_index]

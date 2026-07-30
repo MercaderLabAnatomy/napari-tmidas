@@ -521,16 +521,37 @@ class ColocalizationWorker(QThread):
         csv_rows = []
         results = []
 
+        # Restrict each label's work to its own bounding box.  Every statistic
+        # below is local to the ROI, so a full-array `image_c1 == label_id`
+        # scan per label made this O(labels x voxels) — thousands of passes
+        # over a whole-slide image. find_objects gets every box in one pass.
+        bboxes = None
+        if np.issubdtype(image_c1.dtype, np.integer):
+            from scipy.ndimage import find_objects
+
+            bboxes = find_objects(image_c1)
+
+        def _crop(array, window):
+            if array is None or window is None:
+                return array
+            return array[window]
+
         for label_id in label_ids:
+            window = None
+            if bboxes is not None and 0 < label_id <= len(bboxes):
+                window = bboxes[label_id - 1]
+                if window is None:
+                    continue  # label absent from the image
+
             row_or_rows = self.process_single_roi(
                 filename,
                 label_id,
-                image_c1,
-                image_c2,
-                image_c3,
+                _crop(image_c1, window),
+                _crop(image_c2, window),
+                _crop(image_c3, window),
                 roi_sizes,
-                image_c2_intensity,
-                image_c3_intensity,
+                _crop(image_c2_intensity, window),
+                _crop(image_c3_intensity, window),
             )
 
             # Check if we got multiple rows (individual mode) or single row
@@ -876,35 +897,43 @@ class ColocalizationWorker(QThread):
             # Start with the original first channel labels
             output_image = np.zeros((3,) + image_c1.shape, dtype=np.uint32)
 
-            # First layer: original labels from channel 1
-            output_image[0] = image_c1.copy()
+            # First layer: original labels from channel 1 (the assignment
+            # already copies — .copy() only added a full-size temporary)
+            output_image[0] = image_c1
+
+            def _overlap_layer(label_ids):
+                """Channel 1 restricted to *label_ids*, in a single pass.
+
+                The value written under each label is channel 1's own label,
+                so np.isin replaces one full-array scan per overlapping ROI.
+                """
+                if not label_ids:
+                    return np.zeros_like(image_c1)
+                return np.where(
+                    np.isin(image_c1, np.asarray(label_ids)), image_c1, 0
+                )
 
             # Process results to create visualization
             if "results" in results:
                 # Second layer: labels that have overlap with channel 2
                 if has_c2:
-                    ch2_overlap = np.zeros_like(image_c1)
-                    for result in results["results"]:
-                        label_id = result["label_id"]
-                        if result["ch2_in_ch1_count"] > 0:
-                            # This label has overlap with channel 2
-                            mask = image_c1 == label_id
-                            ch2_overlap[mask] = label_id
-                    output_image[1] = ch2_overlap
+                    output_image[1] = _overlap_layer(
+                        [
+                            result["label_id"]
+                            for result in results["results"]
+                            if result["ch2_in_ch1_count"] > 0
+                        ]
+                    )
 
                 # Third layer: labels that have overlap with channel 3
                 if has_c3:
-                    ch3_overlap = np.zeros_like(image_c1)
-                    for result in results["results"]:
-                        label_id = result["label_id"]
-                        if (
-                            "ch3_in_ch2_in_ch1_count" in result
-                            and result["ch3_in_ch2_in_ch1_count"] > 0
-                        ):
-                            # This label has overlap with channel 3
-                            mask = image_c1 == label_id
-                            ch3_overlap[mask] = label_id
-                    output_image[2] = ch3_overlap
+                    output_image[2] = _overlap_layer(
+                        [
+                            result["label_id"]
+                            for result in results["results"]
+                            if result.get("ch3_in_ch2_in_ch1_count", 0) > 0
+                        ]
+                    )
 
             # Save the visualization output
             tifffile.imwrite(output_path, output_image, compression="zlib")
@@ -937,17 +966,45 @@ class ColocalizationWorker(QThread):
         return count
 
     def calculate_all_rois_size(self, image):
-        """Calculate sizes of all ROIs in the given image."""
+        """Calculate sizes of all ROIs in the given image.
+
+        np.bincount does this in a single pass with no full-size copy, unlike
+        regionprops on an ``.astype(np.uint32)`` duplicate — which also
+        refuses anything with more than 3 dimensions.
+        """
         sizes = {}
         try:
-            # Convert to int32 to avoid potential overflow issues with regionprops
-            image_int = image.astype(np.uint32)
-            for prop in measure.regionprops(image_int):
-                label = int(prop.label)
-                sizes[label] = int(prop.area)
+            if not image.size:
+                return sizes
+            areas = np.bincount(image.ravel())
+            for label in np.nonzero(areas)[0]:
+                if label:
+                    sizes[int(label)] = int(areas[label])
         except (Exception, ValueError) as e:
             print(f"Error calculating ROI sizes: {str(e)}")
         return sizes
+
+    @staticmethod
+    def _labels_in_roi(image_c2, mask_roi):
+        """Group the Channel 2 voxels inside an ROI by label, in one pass.
+
+        Returns ``(unique_labels, group_index, roi_selector)``. *roi_selector*
+        picks the same voxels out of any other channel
+        (``other[mask_roi][roi_selector]``), so every per-label statistic
+        becomes a single ``np.bincount`` over *group_index* instead of one
+        full-array ``image_c2 == label`` scan per label.
+        """
+        c2_vals = image_c2[mask_roi]
+        fg = c2_vals != 0
+        c2_vals = c2_vals[fg]
+        if c2_vals.size == 0:
+            return (
+                np.empty(0, dtype=image_c2.dtype),
+                np.empty(0, dtype=np.intp),
+                fg,
+            )
+        uniq, inv = np.unique(c2_vals, return_inverse=True)
+        return uniq, np.ravel(inv), fg
 
     def calculate_coloc_size(
         self, image_c1, image_c2, label_id, mask_c2=None, image_c3=None
@@ -1029,73 +1086,119 @@ class ColocalizationWorker(QThread):
         Returns:
             list of lists: One row per C2 label within the C1 ROI
         """
-        # Get all unique Channel 2 objects in the ROI
-        c2_in_roi = image_c2 * mask_roi
-        c2_labels = np.unique(c2_in_roi)
-        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+        # One grouped pass over the ROI replaces a full-array
+        # `image_c2 == label` scan per Channel 2 object.
+        c2_labels, groups, roi_sel = self._labels_in_roi(image_c2, mask_roi)
 
-        if len(c2_labels) == 0:
+        if c2_labels.size == 0:
             # No c2 labels in this ROI, return empty list (no rows)
             return []
+
+        n_labels = c2_labels.size
+        c2_sizes = np.bincount(groups, minlength=n_labels)
+
+        c3_counts = c3_sizes = None
+        c3_stats = None
+        if image_c3 is not None:
+            c3_vals = image_c3[mask_roi][roi_sel]
+            if self.channel3_is_labels:
+                nonzero = c3_vals != 0
+                c3_sizes = np.bincount(
+                    groups,
+                    weights=nonzero.astype(np.float64),
+                    minlength=n_labels,
+                )
+                # Distinct (c2 object, c3 label) pairs; counting each object's
+                # pairs is the number of unique non-zero C3 labels it contains
+                pairs = np.unique(
+                    np.stack(
+                        (groups[nonzero], c3_vals[nonzero].astype(np.int64)),
+                        axis=1,
+                    ),
+                    axis=0,
+                )
+                c3_counts = np.bincount(pairs[:, 0], minlength=n_labels)
+            else:
+                intensity_img = (
+                    image_c3_intensity
+                    if image_c3_intensity is not None
+                    else image_c3
+                )
+                c3_stats = self._grouped_intensity_stats(
+                    intensity_img[mask_roi][roi_sel], groups, n_labels
+                )
 
         rows = []
         c1_size = (
             roi_sizes.get(int(c1_label_id), 0) if self.get_sizes else None
         )
 
-        for c2_label in sorted(c2_labels):
+        for index, c2_label in enumerate(c2_labels.tolist()):
             # Start row with filename, c1_label_id, c2_label_id
             row = [filename, int(c1_label_id), int(c2_label)]
-
-            # Get mask for this specific Channel 2 object within the ROI
-            mask_c2_obj = (image_c2 == c2_label) & mask_roi
 
             # Add size information if requested
             if self.get_sizes:
                 row.append(c1_size)  # C1 ROI size (same for all c2 labels)
 
                 # C2 label size
-                c2_size = int(np.count_nonzero(mask_c2_obj))
-                row.append(c2_size)
+                row.append(int(c2_sizes[index]))
 
             # Handle C3 channel based on its type
             if image_c3 is not None:
                 if self.channel3_is_labels:
                     # C3 is labels: count unique C3 labels in this C2 label
-                    mask_c3 = image_c3 != 0
-                    mask_c3_in_c2 = mask_c2_obj & mask_c3
-                    c3_count = self.count_unique_nonzero(
-                        image_c3, mask_c3_in_c2
-                    )
-                    row.append(c3_count)
+                    row.append(int(c3_counts[index]))
 
                     # Add C3 size if requested
                     if self.get_sizes:
-                        c3_size = int(np.count_nonzero(mask_c3_in_c2))
-                        row.append(c3_size)
+                        row.append(int(c3_sizes[index]))
                 else:
-                    # C3 is intensity: calculate intensity statistics in this C2 label
-                    intensity_img = (
-                        image_c3_intensity
-                        if image_c3_intensity is not None
-                        else image_c3
+                    # C3 is intensity: statistics of C3 inside this C2 label
+                    row.extend(
+                        [
+                            c3_stats["mean"][index],
+                            c3_stats["median"][index],
+                            c3_stats["std"][index],
+                        ]
                     )
-                    intensity_in_obj = intensity_img[mask_c2_obj]
-
-                    if len(intensity_in_obj) > 0:
-                        c3_mean = float(np.mean(intensity_in_obj))
-                        c3_median = float(np.median(intensity_in_obj))
-                        c3_std = float(np.std(intensity_in_obj))
-                    else:
-                        c3_mean = 0.0
-                        c3_median = 0.0
-                        c3_std = 0.0
-
-                    row.extend([c3_mean, c3_median, c3_std])
 
             rows.append(row)
 
         return rows
+
+    @staticmethod
+    def _grouped_intensity_stats(values, groups, n_groups):
+        """Per-group mean/median/std of *values*, grouped by *groups*.
+
+        Sorting once and slicing each group out of the sorted array costs
+        O(n log n) for the whole ROI, where masking the image per group cost
+        O(groups x voxels).
+        """
+        values = values.astype(np.float64, copy=False)
+        counts = np.bincount(groups, minlength=n_groups)
+        sums = np.bincount(groups, weights=values, minlength=n_groups)
+        means = np.divide(
+            sums, counts, out=np.zeros(n_groups), where=counts > 0
+        )
+
+        order = np.argsort(groups, kind="stable")
+        ordered = values[order]
+        bounds = np.concatenate(([0], np.cumsum(counts)))
+
+        medians = np.zeros(n_groups)
+        stds = np.zeros(n_groups)
+        for index in range(n_groups):
+            block = ordered[bounds[index] : bounds[index + 1]]
+            if block.size:
+                medians[index] = np.median(block)
+                stds[index] = np.std(block)
+
+        return {
+            "mean": means.tolist(),
+            "median": medians.tolist(),
+            "std": stds.tolist(),
+        }
 
     def calculate_individual_c2_intensities(
         self, image_c2, intensity_c3, mask_roi
@@ -1111,28 +1214,19 @@ class ColocalizationWorker(QThread):
         Returns:
             dict: Dictionary mapping c2_label_id -> intensity value (mean of c3 in that c2 label)
         """
-        # Get all unique Channel 2 objects in the ROI
-        c2_in_roi = image_c2 * mask_roi
-        c2_labels = np.unique(c2_in_roi)
-        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+        c2_labels, groups, roi_sel = self._labels_in_roi(image_c2, mask_roi)
+        if c2_labels.size == 0:
+            return {}
 
-        individual_values = {}
-        for c2_label in c2_labels:
-            # Get mask for this specific Channel 2 object within the ROI
-            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+        values = intensity_c3[mask_roi][roi_sel].astype(np.float64)
+        counts = np.bincount(groups, minlength=c2_labels.size)
+        sums = np.bincount(groups, weights=values, minlength=c2_labels.size)
+        means = sums / counts  # every group holds at least one voxel
 
-            # Get intensity values of Channel 3 in this Channel 2 object
-            intensity_in_obj = intensity_c3[mask_c2_obj]
-
-            if len(intensity_in_obj) > 0:
-                # Use mean intensity as the representative value for this c2 label
-                individual_values[int(c2_label)] = float(
-                    np.mean(intensity_in_obj)
-                )
-            else:
-                individual_values[int(c2_label)] = 0.0
-
-        return individual_values
+        return {
+            int(label): float(mean)
+            for label, mean in zip(c2_labels.tolist(), means.tolist())
+        }
 
     def calculate_individual_c2_sizes(self, image_c2, mask_roi, image_c3=None):
         """
@@ -1146,27 +1240,23 @@ class ColocalizationWorker(QThread):
         Returns:
             dict: Dictionary mapping c2_label_id -> size (pixel count)
         """
-        # Get all unique Channel 2 objects in the ROI
-        c2_in_roi = image_c2 * mask_roi
-        c2_labels = np.unique(c2_in_roi)
-        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+        c2_labels, groups, roi_sel = self._labels_in_roi(image_c2, mask_roi)
+        if c2_labels.size == 0:
+            return {}
 
-        individual_sizes = {}
-        for c2_label in c2_labels:
-            # Get mask for this specific Channel 2 object within the ROI
-            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+        if image_c3 is not None:
+            # Voxels of this c2 label that also carry a c3 label
+            overlap = (image_c3[mask_roi][roi_sel] != 0).astype(np.float64)
+            sizes = np.bincount(
+                groups, weights=overlap, minlength=c2_labels.size
+            )
+        else:
+            sizes = np.bincount(groups, minlength=c2_labels.size)
 
-            if image_c3 is not None:
-                # Calculate c3 size within this c2 label
-                mask_with_c3 = mask_c2_obj & (image_c3 != 0)
-                size = int(np.count_nonzero(mask_with_c3))
-            else:
-                # Calculate c2 label size
-                size = int(np.count_nonzero(mask_c2_obj))
-
-            individual_sizes[int(c2_label)] = size
-
-        return individual_sizes
+        return {
+            int(label): int(size)
+            for label, size in zip(c2_labels.tolist(), sizes.tolist())
+        }
 
     def count_positive_objects(
         self,
@@ -1189,12 +1279,9 @@ class ColocalizationWorker(QThread):
         Returns:
             dict: Dictionary with counts and threshold info
         """
-        # Get all unique Channel 2 objects in the ROI
-        c2_in_roi = image_c2 * mask_roi
-        c2_labels = np.unique(c2_in_roi)
-        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+        c2_labels, groups, roi_sel = self._labels_in_roi(image_c2, mask_roi)
 
-        if len(c2_labels) == 0:
+        if c2_labels.size == 0:
             return {
                 "total_c2_objects": 0,
                 "positive_c2_objects": 0,
@@ -1203,34 +1290,25 @@ class ColocalizationWorker(QThread):
                 "threshold_used": 0.0,
             }
 
+        # Channel 3 intensities inside the ROI wherever Channel 2 exists
+        intensity_in_c2 = intensity_c3[mask_roi][roi_sel].astype(np.float64)
+
         # Calculate threshold
         if threshold_method == "percentile":
-            # Calculate threshold from all Channel 3 intensity values within ROI where Channel 2 exists
-            mask_c2_in_roi = c2_in_roi > 0
-            intensity_in_c2 = intensity_c3[mask_c2_in_roi]
-            if len(intensity_in_c2) > 0:
-                threshold = float(
-                    np.percentile(intensity_in_c2, threshold_value)
-                )
-            else:
-                threshold = 0.0
+            threshold = float(
+                np.percentile(intensity_in_c2, threshold_value)
+            )
         else:  # absolute
             threshold = threshold_value
 
         # Count positive objects
-        positive_count = 0
-        for label_id in c2_labels:
-            # Get mask for this specific Channel 2 object
-            mask_c2_obj = (image_c2 == label_id) & mask_roi
+        counts = np.bincount(groups, minlength=c2_labels.size)
+        sums = np.bincount(
+            groups, weights=intensity_in_c2, minlength=c2_labels.size
+        )
+        positive_count = int(np.count_nonzero(sums / counts >= threshold))
 
-            # Get mean intensity of Channel 3 in this Channel 2 object
-            intensity_in_obj = intensity_c3[mask_c2_obj]
-            if len(intensity_in_obj) > 0:
-                mean_intensity = float(np.mean(intensity_in_obj))
-                if mean_intensity >= threshold:
-                    positive_count += 1
-
-        total_count = int(len(c2_labels))
+        total_count = int(c2_labels.size)
         negative_count = total_count - positive_count
         percent_positive = (
             (positive_count / total_count * 100) if total_count > 0 else 0.0
@@ -1256,12 +1334,9 @@ class ColocalizationWorker(QThread):
         Returns:
             dict: Dictionary with positive/negative counts and percentage
         """
-        # Get all unique Channel 2 objects in the ROI
-        c2_in_roi = image_c2 * mask_roi
-        c2_labels = np.unique(c2_in_roi)
-        c2_labels = c2_labels[c2_labels != 0]  # Remove background
+        c2_labels, groups, roi_sel = self._labels_in_roi(image_c2, mask_roi)
 
-        if len(c2_labels) == 0:
+        if c2_labels.size == 0:
             return {
                 "total_c2_objects": 0,
                 "c2_positive_for_c3_count": 0,
@@ -1269,20 +1344,14 @@ class ColocalizationWorker(QThread):
                 "c2_percent_positive_for_c3": 0.0,
             }
 
-        # Count how many C2 objects contain at least one C3 object
-        positive_count = 0
-        for c2_label in c2_labels:
-            # Get mask for this specific Channel 2 object
-            mask_c2_obj = (image_c2 == c2_label) & mask_roi
+        # Count how many C2 objects contain at least one C3 voxel
+        has_c3 = (image_c3[mask_roi][roi_sel] != 0).astype(np.float64)
+        overlaps = np.bincount(
+            groups, weights=has_c3, minlength=c2_labels.size
+        )
+        positive_count = int(np.count_nonzero(overlaps))
 
-            # Check if any C3 objects overlap with this C2 object
-            c3_in_c2 = image_c3[mask_c2_obj]
-            c3_labels_in_c2 = np.unique(c3_in_c2[c3_in_c2 != 0])
-
-            if len(c3_labels_in_c2) > 0:
-                positive_count += 1
-
-        total_count = int(len(c2_labels))
+        total_count = int(c2_labels.size)
         negative_count = total_count - positive_count
         percent_positive = (
             (positive_count / total_count * 100) if total_count > 0 else 0.0

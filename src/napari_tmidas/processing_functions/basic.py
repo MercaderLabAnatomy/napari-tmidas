@@ -786,21 +786,11 @@ def max_z_projection(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Maximum intensity projection along the z-axis
     """
-    # Determine maximum value based on dtype
-    max_val = (
-        np.iinfo(image.dtype).max
-        if np.issubdtype(image.dtype, np.integer)
-        else 1.0
-    )
-
-    # Normalize image to [0, 1]
-    normalized = image.astype(np.float32) / max_val
-
-    # Apply max z projection
-    projection = np.max(normalized, axis=0)
-
-    # Scale back to original range and dtype
-    return (projection * max_val).clip(0, max_val).astype(image.dtype)
+    # A maximum is unchanged by scaling into [0, 1] and back, so project
+    # directly: the round trip through float32 cost a full-size copy of the
+    # stack (4x for uint8) plus three more temporaries, and could shift
+    # values by one unit for wide integer ranges that float32 cannot hold.
+    return np.max(image, axis=0)
 
 
 @BatchProcessingRegistry.register(

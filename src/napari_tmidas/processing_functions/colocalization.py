@@ -120,6 +120,24 @@ def calculate_intensity_stats(intensity_image, mask):
     return stats
 
 
+def labels_in_roi(image_c2, mask_roi):
+    """Group the Channel 2 voxels inside an ROI by label, in one pass.
+
+    Returns ``(unique_labels, group_index, roi_selector)``. *roi_selector*
+    picks the same voxels out of any other channel
+    (``other[mask_roi][roi_selector]``), so every per-label statistic becomes
+    a single ``np.bincount`` over *group_index* instead of one full-array
+    ``image_c2 == label`` scan per label.
+    """
+    c2_vals = image_c2[mask_roi]
+    fg = c2_vals != 0
+    c2_vals = c2_vals[fg]
+    if c2_vals.size == 0:
+        return np.empty(0, dtype=image_c2.dtype), np.empty(0, dtype=np.intp), fg
+    uniq, inv = np.unique(c2_vals, return_inverse=True)
+    return uniq, np.ravel(inv), fg
+
+
 def count_c2_positive_for_c3_labels(image_c2, image_c3, mask_roi):
     """
     Count Channel 2 objects that contain at least one Channel 3 object (label-based).
@@ -132,12 +150,9 @@ def count_c2_positive_for_c3_labels(image_c2, image_c3, mask_roi):
     Returns:
         dict: Dictionary with positive/negative counts and percentage
     """
-    # Get all unique Channel 2 objects in the ROI
-    c2_in_roi = image_c2 * mask_roi
-    c2_labels = np.unique(c2_in_roi)
-    c2_labels = c2_labels[c2_labels != 0]  # Remove background
+    c2_labels, groups, roi_sel = labels_in_roi(image_c2, mask_roi)
 
-    if len(c2_labels) == 0:
+    if c2_labels.size == 0:
         return {
             "total_c2_objects": 0,
             "c2_positive_for_c3_count": 0,
@@ -145,20 +160,12 @@ def count_c2_positive_for_c3_labels(image_c2, image_c3, mask_roi):
             "c2_percent_positive_for_c3": 0.0,
         }
 
-    # Count how many C2 objects contain at least one C3 object
-    positive_count = 0
-    for c2_label in c2_labels:
-        # Get mask for this specific Channel 2 object
-        mask_c2_obj = (image_c2 == c2_label) & mask_roi
+    # Count how many C2 objects contain at least one C3 voxel
+    has_c3 = (image_c3[mask_roi][roi_sel] != 0).astype(np.float64)
+    overlaps = np.bincount(groups, weights=has_c3, minlength=c2_labels.size)
+    positive_count = int(np.count_nonzero(overlaps))
 
-        # Check if any C3 objects overlap with this C2 object
-        c3_in_c2 = image_c3[mask_c2_obj]
-        c3_labels_in_c2 = np.unique(c3_in_c2[c3_in_c2 != 0])
-
-        if len(c3_labels_in_c2) > 0:
-            positive_count += 1
-
-    total_count = int(len(c2_labels))
+    total_count = int(c2_labels.size)
     negative_count = total_count - positive_count
     percent_positive = (
         (positive_count / total_count * 100) if total_count > 0 else 0.0
@@ -192,12 +199,9 @@ def count_positive_objects(
     Returns:
         dict: Dictionary with counts and threshold info
     """
-    # Get all unique Channel 2 objects in the ROI
-    c2_in_roi = image_c2 * mask_roi
-    c2_labels = np.unique(c2_in_roi)
-    c2_labels = c2_labels[c2_labels != 0]  # Remove background
+    c2_labels, groups, roi_sel = labels_in_roi(image_c2, mask_roi)
 
-    if len(c2_labels) == 0:
+    if c2_labels.size == 0:
         return {
             "total_c2_objects": 0,
             "positive_c2_objects": 0,
@@ -206,32 +210,23 @@ def count_positive_objects(
             "threshold_used": 0.0,
         }
 
+    # Channel 3 intensities inside the ROI wherever Channel 2 exists
+    intensity_in_c2 = intensity_c3[mask_roi][roi_sel].astype(np.float64)
+
     # Calculate threshold
     if threshold_method == "percentile":
-        # Calculate threshold from all Channel 3 intensity values within ROI where Channel 2 exists
-        mask_c2_in_roi = c2_in_roi > 0
-        intensity_in_c2 = intensity_c3[mask_c2_in_roi]
-        if len(intensity_in_c2) > 0:
-            threshold = float(np.percentile(intensity_in_c2, threshold_value))
-        else:
-            threshold = 0.0
+        threshold = float(np.percentile(intensity_in_c2, threshold_value))
     else:  # absolute
         threshold = threshold_value
 
     # Count positive objects
-    positive_count = 0
-    for label_id in c2_labels:
-        # Get mask for this specific Channel 2 object
-        mask_c2_obj = (image_c2 == label_id) & mask_roi
+    counts = np.bincount(groups, minlength=c2_labels.size)
+    sums = np.bincount(
+        groups, weights=intensity_in_c2, minlength=c2_labels.size
+    )
+    positive_count = int(np.count_nonzero(sums / counts >= threshold))
 
-        # Get mean intensity of Channel 3 in this Channel 2 object
-        intensity_in_obj = intensity_c3[mask_c2_obj]
-        if len(intensity_in_obj) > 0:
-            mean_intensity = float(np.mean(intensity_in_obj))
-            if mean_intensity >= threshold:
-                positive_count += 1
-
-    total_count = int(len(c2_labels))
+    total_count = int(c2_labels.size)
     negative_count = total_count - positive_count
     percent_positive = (
         (positive_count / total_count * 100) if total_count > 0 else 0.0

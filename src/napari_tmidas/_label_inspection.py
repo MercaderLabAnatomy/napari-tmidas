@@ -2015,9 +2015,10 @@ class LabelInspector:
         In one streaming pass (one T-slice at a time, so peak RAM stays at a
         single slice) this accumulates, for every non-zero label ID:
 
-        * a **histogram** of its voxel intensities — indexed by integer raw
-          value (bounded to ``_INTENSITY_MAX_BINS`` bins), enabling any
-          percentile to be read back later without re-touching the image, and
+        * a **histogram** of its voxel intensities — sparse ``(values,
+          counts)`` arrays over the integer raw values the track actually
+          contains — enabling any percentile to be read back later without
+          re-touching the image, and
         * a **sum and count** as a fallback average for non-integer or
           wide-range raws where a histogram is impractical.
 
@@ -2084,7 +2085,13 @@ class LabelInspector:
             if 0 <= info_max < self._INTENSITY_MAX_BINS:
                 n_bins = info_max + 1
 
+        # Histograms are kept sparse — the (value, count) pairs a track
+        # actually contains — because one dense bin per possible intensity
+        # costs 512 KB per track for a uint16 raw, i.e. gigabytes once a
+        # movie has a few thousand tracks.
+        track_hist = n_bins > 0
         hist: dict = {}
+        hist_parts: dict = {}
         sums: dict = {}
         counts: dict = {}
         raw_min, raw_max = np.inf, -np.inf
@@ -2098,26 +2105,49 @@ class LabelInspector:
             flat_l = flat_l[fg]
             flat_r = raw_t.ravel()[fg]
             uniq, inv = np.unique(flat_l, return_inverse=True)
+            inv = np.ravel(inv)
             s = np.bincount(inv, weights=flat_r.astype(np.float64))
             c = np.bincount(inv)
+            if track_hist:
+                # Sort the voxels by label once so each label's values are a
+                # contiguous slice.  Selecting them with `flat_r[inv == i]`
+                # instead re-scanned every voxel per label, i.e.
+                # O(labels x voxels) for a frame with thousands of tracks.
+                order = np.argsort(inv, kind="stable")
+                ordered = flat_r[order]
+                bounds = np.concatenate(([0], np.cumsum(c)))
             for i, (u, sv, cv) in enumerate(
                 zip(uniq.tolist(), s.tolist(), c.tolist())
             ):
                 sums[u] = sums.get(u, 0.0) + sv
                 counts[u] = counts.get(u, 0) + cv
-                if n_bins:
-                    vals = np.clip(
-                        flat_r[inv == i].astype(np.int64), 0, n_bins - 1
+                if track_hist:
+                    hist_parts.setdefault(u, []).append(
+                        np.unique(
+                            ordered[bounds[i] : bounds[i + 1]],
+                            return_counts=True,
+                        )
                     )
-                    h = hist.get(u)
-                    if h is None:
-                        h = np.zeros(n_bins, dtype=np.int64)
-                        hist[u] = h
-                    h += np.bincount(vals, minlength=n_bins)
+
+        # Merge each track's per-timepoint pairs into one sorted histogram
+        for u, parts in hist_parts.items():
+            if len(parts) == 1:
+                values, freq = parts[0]
+                hist[u] = (values, freq.astype(np.int64))
+                continue
+            values = np.concatenate([p[0] for p in parts])
+            freq = np.concatenate([p[1] for p in parts])
+            merged, inv = np.unique(values, return_inverse=True)
+            hist[u] = (
+                merged,
+                np.bincount(
+                    np.ravel(inv), weights=freq, minlength=merged.size
+                ).astype(np.int64),
+            )
 
         self._track_stats = {
             "channel": channel,
-            "hist": hist if n_bins else None,
+            "hist": hist if track_hist else None,
             "sums": sums,
             "counts": counts,
             "raw_min": raw_min,
@@ -2140,12 +2170,12 @@ class LabelInspector:
         out = {}
         for label_id, count in stats["counts"].items():
             if hist is not None:
-                h = hist[label_id]
-                total = h.sum()
+                values, freq = hist[label_id]
+                total = freq.sum()
                 rank = np.searchsorted(
-                    np.cumsum(h), percentile / 100.0 * total, side="left"
+                    np.cumsum(freq), percentile / 100.0 * total, side="left"
                 )
-                value = float(min(rank, len(h) - 1))
+                value = float(values[min(rank, len(values) - 1)])
             else:
                 value = stats["sums"][label_id] / count
             out[int(label_id)] = (value - raw_min) / span if span > 0 else 0.0

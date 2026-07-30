@@ -706,11 +706,9 @@ if SKIMAGE_AVAILABLE:
         numpy.ndarray
             Inverted image with the same data type as the input
         """
-        # Make a copy to avoid modifying the original
-        image_copy = image.copy()
-
-        # Use skimage's invert function which handles all data types properly
-        return skimage.util.invert(image_copy)
+        # skimage.util.invert already returns a new array, so the defensive
+        # copy the input used to get was a wasted full-size allocation.
+        return skimage.util.invert(image)
 
     def _semantic_to_instance_block(mask_block: np.ndarray) -> np.ndarray:
         """Connected-component labeling for a single 2D or 3D (ZYX) mask block."""
@@ -796,12 +794,10 @@ if SKIMAGE_AVAILABLE:
             Instance segmentation with unique labels for each connected component
             (labels restart per timepoint/channel when processed independently)
         """
-        # Create a copy to avoid modifying the original
-        instance_mask = image.copy()
-        result = np.zeros_like(instance_mask, dtype=np.uint32)
-        for index, block in _iter_dimension_blocks(
-            instance_mask, dimension_order
-        ):
+        # Blocks are only ever read, so iterate the input directly instead of
+        # allocating a full-size copy of it first.
+        result = np.zeros(image.shape, dtype=np.uint32)
+        for index, block in _iter_dimension_blocks(image, dimension_order):
             result[index] = _semantic_to_instance_block(block)
         return result
 

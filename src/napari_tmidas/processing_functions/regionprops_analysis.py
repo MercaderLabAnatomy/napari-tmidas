@@ -261,9 +261,16 @@ def extract_regionprops_recursive(
         # Extract regionprops for this spatial slice
         # Use cache=False for better memory efficiency with large datasets
         try:  # noqa: SIM105
-            # Pass intensity image if provided
+            # Pass intensity image if provided.  Only cast when the labels
+            # aren't already integers — `.astype(int)` on a uint16 label
+            # image duplicates it at 4x the size before any measuring starts.
+            labels = (
+                image
+                if np.issubdtype(image.dtype, np.integer)
+                else image.astype(int)
+            )
             regions = measure.regionprops(
-                image.astype(int), intensity_image=intensity_image, cache=False
+                labels, intensity_image=intensity_image, cache=False
             )
 
             for region in regions:
@@ -381,6 +388,22 @@ def extract_regionprops_recursive(
 
                 # Add intensity measurements if intensity image was provided and requested
                 if intensity_image is not None:
+                    # regionprops runs with cache=False, so each access to
+                    # region.intensity_image / region.image re-crops and
+                    # re-masks the region.  Median and std need the same
+                    # values, so pull them out once.
+                    region_values = None
+                    if (
+                        "median_intensity" in properties
+                        or "std_intensity" in properties
+                    ):
+                        try:  # noqa: SIM105
+                            region_values = region.intensity_image[
+                                region.image
+                            ]
+                        except (NotImplementedError, AttributeError) as e:
+                            print(f"⚠️  Could not read region intensities: {e}")
+
                     if "mean_intensity" in properties:
                         try:  # noqa: SIM105
                             props["mean_intensity"] = float(
@@ -389,11 +412,13 @@ def extract_regionprops_recursive(
                         except (NotImplementedError, AttributeError) as e:
                             print(f"⚠️  Could not extract mean_intensity: {e}")
 
-                    if "median_intensity" in properties:
+                    if (
+                        "median_intensity" in properties
+                        and region_values is not None
+                    ):
                         try:  # noqa: SIM105
-                            # Median intensity requires accessing the intensity values
                             props["median_intensity"] = float(
-                                np.median(region.intensity_image[region.image])
+                                np.median(region_values)
                             )
                         except (
                             NotImplementedError,
@@ -404,11 +429,14 @@ def extract_regionprops_recursive(
                                 f"⚠️  Could not extract median_intensity: {e}"
                             )
 
-                    if "std_intensity" in properties:
+                    if (
+                        "std_intensity" in properties
+                        and region_values is not None
+                    ):
                         try:  # noqa: SIM105
                             # Standard deviation of intensity
                             props["std_intensity"] = float(
-                                np.std(region.intensity_image[region.image])
+                                np.std(region_values)
                             )
                         except (
                             NotImplementedError,
