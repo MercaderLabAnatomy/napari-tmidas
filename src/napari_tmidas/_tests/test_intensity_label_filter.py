@@ -1,6 +1,8 @@
 # src/napari_tmidas/_tests/test_intensity_label_filter.py
 """Tests for intensity-based label filtering functions."""
 
+import tracemalloc
+
 import numpy as np
 import pytest
 import tifffile
@@ -414,7 +416,7 @@ class TestMemoryBehaviour:
         )
 
     def test_filter_allocates_only_the_output(self):
-        """Peak RSS growth must stay near one output array, not a multiple."""
+        """Peak allocation must stay near one output array, not a multiple."""
         shape = (40, 200, 200)  # 1.6 M voxels, int64 = 12.8 MB
         labels = np.empty(shape, dtype=np.int64)
         labels.fill(0)
@@ -422,25 +424,28 @@ class TestMemoryBehaviour:
             labels[:, (lab % 20) * 10 : (lab % 20) * 10 + 6, lab % 190] = lab
         intensities = {lab: float(lab) for lab in range(1, 200)}
 
-        def rss():
-            with open("/proc/self/statm") as f:
-                return int(f.read().split()[1]) * 4096
-
-        before = rss()
-        result = _filter_labels_by_threshold(
-            labels,
-            intensities,
-            threshold=100.0,
-            out_dtype=np.dtype(np.uint16),
-            spatial_ndim=2,
-        )
-        growth = rss() - before
+        # tracemalloc traces numpy's allocations too, and unlike reading RSS
+        # back from /proc (Linux-only, and blurred by allocator caching) it
+        # reports the true peak of just this call.
+        tracemalloc.start()
+        try:
+            result = _filter_labels_by_threshold(
+                labels,
+                intensities,
+                threshold=100.0,
+                out_dtype=np.dtype(np.uint16),
+                spatial_ndim=2,
+            )
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
 
         # Output is 2 bytes/voxel; allow generous headroom but far below the
         # 8 bytes/voxel a full-size int64 intermediate would add.
         assert result.dtype == np.uint16
-        assert growth < labels.size * 4, (
-            f"grew {growth / 1e6:.1f} MB for a {result.nbytes / 1e6:.1f} MB output"
+        assert peak < labels.size * 4, (
+            f"peaked at {peak / 1e6:.1f} MB for a "
+            f"{result.nbytes / 1e6:.1f} MB output"
         )
 
 
