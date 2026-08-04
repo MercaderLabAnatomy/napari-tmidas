@@ -368,7 +368,10 @@ class TestMergeSmallLabelsStreaming:
 
     def test_never_materialises_the_stack(self, tmp_path):
         """Peak allocation stays near one block, not the whole stack."""
-        shape = (6, 16, 512, 512)  # 100 MB dense, 16.8 MB per block
+        # Deep enough that one block and the whole stack are far apart, and
+        # deep enough to cross the block count where tifffile switches on
+        # threaded compression (see the maxworkers=1 note in the source).
+        shape = (40, 16, 512, 512)  # 671 MB dense, 16.8 MB per block
         dense_bytes = int(np.prod(shape)) * 4
         block_bytes = int(np.prod(shape[1:])) * 4
         rng = np.random.default_rng(42)
@@ -393,17 +396,20 @@ class TestMergeSmallLabelsStreaming:
             tracemalloc.stop()
 
         # One block, plus scipy's transient working room during the merge.
-        # That working room is not a fixed constant: it drifts with process
-        # history and interpreter version (measured 9-16 MB on this 16.8 MB
-        # block across py3.11/3.12 and warm vs cold processes), so a bound of
-        # "one block + a constant" is cut too fine and flakes.  What the bound
-        # has to catch is a regression that scales with the *block* — e.g.
-        # np.bincount upcasting a whole volume to int64, which cost 2x the
-        # block and would land near 3x here.  2.5x block leaves headroom for
-        # the transient while still failing on that.
+        # That transient is not a fixed constant — it drifts with process
+        # history and interpreter version (9-16 MB on this 16.8 MB block
+        # across py3.11/3.12, warm vs cold) — so bound by a multiple of the
+        # block rather than "one block + a constant", which is cut too fine
+        # and flakes.  2.5x still fails on the regressions this guards: a
+        # np.bincount int64 upcast of the whole volume (2x the block), and
+        # tifffile's threaded compression queueing the whole output (32x).
         assert (
             peak < block_bytes * 2.5
         ), f"peak {peak/1e6:.1f} MB vs block {block_bytes/1e6:.1f} MB"
+        # Independently: nowhere near the dense stack.  With 40 blocks this is
+        # ~13x the block, so it is a genuinely separate check rather than a
+        # tighter restatement of the one above (at 6 blocks dense/3 was 2x the
+        # block, i.e. stricter, and it was what failed in CI).
         assert (
-            peak < dense_bytes / 3
+            peak < dense_bytes / 8
         ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"

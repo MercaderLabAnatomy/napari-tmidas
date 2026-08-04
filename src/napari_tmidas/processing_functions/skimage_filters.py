@@ -198,6 +198,10 @@ def _stream_remove_small_labels(
                 # (e.g. 4 z-slices) as RGB samples and stores the stack as
                 # separate component planes, which breaks the plane iterator.
                 photometric="minisblack",
+                # Threaded compression queues encoded segments with no
+                # backpressure, so peak scales with the whole output instead
+                # of one plane.  See merge_small_labels for the measurements.
+                maxworkers=1,
                 metadata={"axes": axes} if axes else None,
             )
 

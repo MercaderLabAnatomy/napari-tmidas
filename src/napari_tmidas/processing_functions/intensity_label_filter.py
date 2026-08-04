@@ -845,6 +845,10 @@ def _stream_filter_labels_by_intensity(
                 # component planes, and the plane iterator raises on the first
                 # write.
                 photometric="minisblack",
+                # Threaded compression queues encoded segments with no
+                # backpressure, so peak scales with the whole output instead
+                # of one plane.  See merge_small_labels for the measurements.
+                maxworkers=1,
                 metadata={"axes": axes} if axes else None,
             )
 
