@@ -15,6 +15,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,24 @@ from tifffile import imwrite
 from napari_tmidas._registry import BatchProcessingRegistry
 
 _SUPPORTED_IMAGE_SUFFIXES = (".tif", ".tiff", ".zarr")
+
+# --- Lazy input staging -----------------------------------------------------
+# HOCT's loader (``hoct._io.load_array``) only returns *lazy* dask arrays for
+# Zarr stores and folders of single-frame TIFFs; a single multi-page TIFF is
+# read eagerly with ``tifffile.asarray()``, so the whole (T, [Z,] Y, X) volume
+# is resident for the entire run. Downstream, tracksdata's RegionPropsNodes
+# reads one timepoint at a time (``np.asarray(labels[t])``), so a Zarr-backed
+# input keeps peak RAM at roughly one timepoint instead of the full movie.
+# Therefore we stage large TIFF inputs into temporary Zarr stores (chunked one
+# timepoint at a time, written by streaming, never fully materialised) before
+# handing them to the CLI.
+_STAGE_MIN_BYTES = 1 * 1024**3  # below this an eager TIFF load is harmless
+_STAGE_CHUNK_HINT = (16, 512, 512)  # per-axis chunk cap for (Z, Y, X)
+# Napari only shows unsigned-integer label images as a Labels layer, and
+# uint32 is the narrowest dtype the rest of the plugin uses for labels, so
+# staged label volumes are cast down to it (int64 label TIFFs are common and
+# cost twice the RAM for no extra label capacity in practice).
+_STAGE_LABEL_DTYPE = np.uint32
 
 
 # --- Multi-GPU distribution -------------------------------------------------
@@ -369,33 +388,300 @@ def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
     return out_shape
 
 
+def _open_zarr_array(zarr_path: str):
+    """Open the full-resolution array of a Zarr store (OME group or plain)."""
+    import zarr
+
+    root = zarr.open(str(zarr_path), mode="r")
+    if hasattr(root, "shape"):  # plain array store
+        return root
+
+    # OME-NGFF: the multiscales metadata names the highest-resolution level
+    # (v0.4 keeps it at the top level, v0.5 nests it under "ome").
+    attrs = dict(root.attrs)
+    multiscales = attrs.get("multiscales")
+    if multiscales is None and isinstance(attrs.get("ome"), dict):
+        multiscales = attrs["ome"].get("multiscales")
+    if multiscales:
+        try:
+            return root[multiscales[0]["datasets"][0]["path"]]
+        except (KeyError, IndexError, TypeError):
+            pass
+
+    for candidate in ("0", "s0", "data"):
+        try:
+            return root[candidate]
+        except (KeyError, IndexError):
+            continue
+    raise ValueError(f"Could not find an array in Zarr store {zarr_path}")
+
+
 def _peek_raw_shape(raw_path: str):
     """Read only shape metadata for a raw TIFF/Zarr image (no pixel data)."""
     if raw_path.lower().endswith(".zarr"):
-        import zarr
-
-        root = zarr.open(raw_path, mode="r")
-        for candidate in ("0", "s0", "data"):
-            try:
-                return root[candidate].shape
-            except Exception:
-                continue
-        return getattr(root, "shape", None)
+        try:
+            return _open_zarr_array(raw_path).shape
+        except Exception:
+            return None
 
     with tifffile.TiffFile(raw_path) as tif:
         return tif.series[0].shape
 
 
-def _maybe_extract_raw_channel(
+def _movie_shape(shape, axes: str = None):
+    """Frame shape HOCT sees after dropping channel and length-1 axes.
+
+    Mirrors ``hoct._io._reduce_to_movie``: a channel/sample axis is reduced to
+    its first index and remaining length-1 axes (except the trailing Y, X) are
+    collapsed. Used to check whether an input can be handed to HOCT as-is.
+    """
+    if shape is None:
+        return None
+    dims = list(shape)
+    if axes:
+        names = [a.lower() for a in axes]
+        if len(names) == len(dims):
+            for channel in ("c", "s"):
+                if channel in names:
+                    index = names.index(channel)
+                    names.pop(index)
+                    dims.pop(index)
+    keep_from = len(dims) - 2
+    return tuple(d for i, d in enumerate(dims) if i >= keep_from or d != 1)
+
+
+def _zarr_axes(zarr_path: str):
+    """Axes string ('TCZYX') of a Zarr store, from OME metadata if present."""
+    from napari_tmidas._file_selector import detect_axes_from_zarr_path
+
+    try:
+        return detect_axes_from_zarr_path(zarr_path)
+    except Exception:
+        return None
+
+
+def _stage_chunks(frame_shape):
+    """Chunk shape for a staged store: one timepoint, capped spatial blocks."""
+    hint = _STAGE_CHUNK_HINT[-len(frame_shape) :]
+    return (1,) + tuple(min(s, c) for s, c in zip(frame_shape, hint))
+
+
+def _create_stage_array(dest: Path, shape, dtype):
+    """Create the destination Zarr array for a staged input."""
+    import zarr
+
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    return zarr.create_array(
+        store=str(dest),
+        shape=tuple(shape),
+        chunks=_stage_chunks(tuple(shape)[1:]),
+        dtype=dtype,
+        overwrite=True,
+    )
+
+
+def _stage_tiff_as_zarr(
+    src_path: str,
+    dest: Path,
+    out_dtype=None,
+    channel_axis: int = None,
+    ch_idx: int = 0,
+) -> Path:
+    """Stream a multi-page TIFF into a Zarr store, one timepoint at a time.
+
+    Peak RAM is one timepoint (optionally including its channels), not the
+    whole movie, because pages are read per timepoint via
+    ``TiffPageSeries.asarray(key=...)`` rather than in one ``asarray()`` call.
+    ``channel_axis`` (in *source* axis numbering) selects a single channel on
+    the way out, so a multichannel raw image needs no separate extraction pass.
+    """
+    with tifffile.TiffFile(src_path) as tif:
+        series = tif.series[0]
+        src_shape = tuple(series.shape)
+        n_timepoints = src_shape[0]
+        block_shape = src_shape[1:]
+
+        # How many TIFF pages make up one timepoint. This is *not* simply
+        # prod(shape[1:-2]): tifffile writes some stacks as volumetric pages
+        # that already hold (Z, Y, X), so ask the series how many pages it has.
+        # A layout whose pages don't split evenly across time (e.g. the whole
+        # stack in one page) can't be read per timepoint; read it in one go
+        # instead, which still writes a store HOCT can then read lazily.
+        n_pages = len(series.pages)
+        pages_per_t = (
+            n_pages // n_timepoints
+            if n_timepoints >= 1 and n_pages % n_timepoints == 0
+            else None
+        )
+        if pages_per_t is None:
+            print(
+                f"{os.path.basename(src_path)}: {n_pages} TIFF pages do not "
+                f"split evenly across {n_timepoints} timepoints; reading the "
+                "whole array once to stage it."
+            )
+            whole = series.asarray()
+
+        if channel_axis is not None:
+            # Index within a single timepoint block (source axis 0 is time).
+            block_channel_axis = channel_axis - 1
+            frame_shape = tuple(
+                d for i, d in enumerate(block_shape) if i != block_channel_axis
+            )
+        else:
+            block_channel_axis = None
+            frame_shape = block_shape
+
+        out_shape = (n_timepoints,) + frame_shape
+        out_dtype = out_dtype if out_dtype is not None else series.dtype
+        zdst = _create_stage_array(dest, out_shape, out_dtype)
+
+        for t in range(n_timepoints):
+            if pages_per_t is None:
+                block = whole[t]
+            else:
+                block = series.asarray(
+                    key=slice(t * pages_per_t, (t + 1) * pages_per_t)
+                ).reshape(block_shape)
+            if block_channel_axis is not None:
+                block = np.take(block, ch_idx, axis=block_channel_axis)
+            zdst[t] = block.astype(out_dtype, copy=False)
+    return dest
+
+
+def _stage_zarr_as_zarr(
+    src_path: str,
+    dest: Path,
+    out_dtype=None,
+    channel_axis: int = None,
+    ch_idx: int = 0,
+) -> Path:
+    """Copy a Zarr store timepoint by timepoint, optionally taking one channel.
+
+    Used when a Zarr input cannot be handed to HOCT unchanged (e.g. a channel
+    other than the first is requested). Only one timepoint is in RAM at a time.
+    """
+    src = _open_zarr_array(src_path)
+    src_shape = tuple(src.shape)
+    n_timepoints = src_shape[0]
+
+    index = [slice(None)] * len(src_shape)
+    index[0] = 0
+    if channel_axis is not None:
+        index[channel_axis] = ch_idx
+    # Frame shape after dropping time and channel, then collapsing length-1
+    # axes the same way HOCT's reader would.
+    frame_shape = _movie_shape(
+        tuple(d for i, d in enumerate(src_shape) if i not in (0, channel_axis))
+    )
+
+    out_shape = (n_timepoints,) + frame_shape
+    out_dtype = out_dtype if out_dtype is not None else src.dtype
+    zdst = _create_stage_array(dest, out_shape, out_dtype)
+
+    for t in range(n_timepoints):
+        index[0] = t
+        block = np.asarray(src[tuple(index)]).reshape(frame_shape)
+        zdst[t] = block.astype(out_dtype, copy=False)
+    return dest
+
+
+def _stage_input_as_zarr(
+    src_path: str,
+    dest: Path,
+    out_dtype=None,
+    channel_axis: int = None,
+    ch_idx: int = 0,
+) -> Path:
+    """Stage a TIFF or Zarr input into a temporary Zarr store (streaming)."""
+    if str(src_path).lower().endswith(".zarr"):
+        return _stage_zarr_as_zarr(
+            src_path, dest, out_dtype, channel_axis, ch_idx
+        )
+    return _stage_tiff_as_zarr(src_path, dest, out_dtype, channel_axis, ch_idx)
+
+
+def _uncompressed_bytes(shape, dtype) -> int:
+    """In-RAM size of an array, i.e. what an eager TIFF load would cost."""
+    if shape is None:
+        return 0
+    return int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
+
+
+def _stage_label_input(
+    mask_path: str, work_dir: Path, stage_mode: str, tag: str
+):
+    """Give HOCT a lazily-readable segmentation input.
+
+    A label TIFF is streamed into a temporary uint32 Zarr store when an eager
+    load would be expensive; Zarr inputs and small TIFFs are passed through
+    untouched. Returns (path_for_hoct, staged_path_or_None).
+    """
+    if stage_mode == "off" or mask_path.lower().endswith(".zarr"):
+        return mask_path, None
+
+    with tifffile.TiffFile(mask_path) as tif:
+        series = tif.series[0]
+        shape, dtype = tuple(series.shape), series.dtype
+
+    eager_bytes = _uncompressed_bytes(shape, dtype)
+    if stage_mode == "auto" and eager_bytes < _STAGE_MIN_BYTES:
+        return mask_path, None
+
+    dest = work_dir / f"hoct_labels_{_unique_tag()}.zarr"
+    staged_bytes = _uncompressed_bytes(shape, _STAGE_LABEL_DTYPE)
+    print(
+        f"[{tag}] Staging segmentation to Zarr for lazy per-timepoint reads "
+        f"({dtype} {shape}: {eager_bytes / 1024**3:.1f} GB in RAM if loaded "
+        f"eagerly, {staged_bytes / 1024**3:.1f} GB as uint32)..."
+    )
+    _stage_input_as_zarr(mask_path, dest, out_dtype=_STAGE_LABEL_DTYPE)
+    print(f"[{tag}] Segmentation staged at: {dest}")
+    return str(dest), str(dest)
+
+
+def _unique_tag() -> str:
+    """Unique suffix for temporary files.
+
+    The PID alone is not enough: a batch run tracks several files concurrently
+    from *threads of one process*, so PID-named temporaries collide and jobs
+    overwrite each other's staged raw image.
+    """
+    return f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+
+def _cleanup_paths(paths) -> None:
+    """Delete temporary staged inputs (files or Zarr directories)."""
+    for path in paths:
+        target = Path(path)
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            target.unlink(missing_ok=True)
+
+
+def _prepare_raw_input(
     raw_path: str,
     channel_param: str,
     dimension_order_param: str,
     work_dir: Path,
+    stage_mode: str = "auto",
+    label_shape=None,
+    tag: str = "",
 ):
     """
+    Give HOCT a raw image it can read lazily, with no channel axis.
+
     HOCT expects the raw image to have the same shape as the label image
-    (TYX or TZYX, no channel axis). If the raw file is multichannel, extract
-    a single channel into a temporary TIFF and return that path instead.
+    (TYX or TZYX). Three cases, cheapest first:
+
+    * the file already reduces to the label shape on HOCT's side (a
+      single-channel input, or an OME-Zarr whose first channel is the one
+      requested) — pass the path straight through, nothing is read;
+    * otherwise stream the requested channel into a temporary Zarr store, one
+      timepoint at a time;
+    * with staging disabled, fall back to the previous behaviour (load the
+      whole array, slice the channel, write a temporary TIFF).
 
     Returns (path_to_use, temp_path_or_None); the caller must delete
     temp_path_or_None (if not None) once the HOCT subprocess has finished.
@@ -426,7 +712,23 @@ def _maybe_extract_raw_channel(
 
         num_channels, channel_axis = detect_channels_for_file(raw_path)
 
+    is_zarr = raw_path.lower().endswith(".zarr")
+    raw_shape = _peek_raw_shape(raw_path)
+
     if num_channels <= 1 or channel_axis is None:
+        # Single-channel input: HOCT can open it directly. A big TIFF is still
+        # staged, since HOCT would otherwise read the whole movie into RAM.
+        if (
+            stage_mode != "off"
+            and not is_zarr
+            and raw_shape is not None
+            and (
+                stage_mode == "on"
+                or _uncompressed_bytes(raw_shape, _peek_raw_dtype(raw_path))
+                >= _STAGE_MIN_BYTES
+            )
+        ):
+            return _stage_raw_to_zarr(raw_path, work_dir, None, 0, tag)
         return raw_path, None
 
     print(
@@ -452,19 +754,26 @@ def _maybe_extract_raw_channel(
         )
         ch_idx = 0
 
-    if raw_path.lower().endswith(".zarr"):
-        import zarr
+    # HOCT's Zarr reader already keeps only the *first* channel and reads the
+    # store lazily, so when channel 0 is what we want and the reduced shape
+    # matches the segmentation, the store can be handed over untouched — no
+    # extraction pass, no temporary copy, no full array in RAM.
+    if is_zarr and ch_idx == 0 and label_shape is not None:
+        reduced = _movie_shape(raw_shape, _zarr_axes(raw_path))
+        if reduced is not None and tuple(reduced) == tuple(label_shape):
+            print(
+                f"[{tag}] Raw Zarr store reduces to {reduced} (channel 0) and "
+                "matches the segmentation; passing it to HOCT directly "
+                "(read lazily, no channel extraction)."
+            )
+            return raw_path, None
 
-        root = zarr.open(raw_path, mode="r")
-        arr = None
-        for candidate in ("0", "s0", "data"):
-            try:
-                arr = root[candidate]
-                break
-            except Exception:
-                continue
-        if arr is None:
-            arr = root
+    if stage_mode != "off":
+        return _stage_raw_to_zarr(raw_path, work_dir, channel_axis, ch_idx, tag)
+
+    # stage_mode="off": original eager path (whole array in RAM at once).
+    if is_zarr:
+        arr = _open_zarr_array(raw_path)
         channel_data = np.asarray(np.take(arr, ch_idx, axis=channel_axis))
     else:
         # tifffile has no cheap partial-page read for an arbitrary channel
@@ -472,13 +781,38 @@ def _maybe_extract_raw_channel(
         full = tifffile.imread(raw_path)
         channel_data = np.take(full, ch_idx, axis=channel_axis)
 
-    temp_raw_path = work_dir / f"hoct_raw_ch{ch_idx}_{os.getpid()}.tif"
+    temp_raw_path = work_dir / f"hoct_raw_ch{ch_idx}_{_unique_tag()}.tif"
     imwrite(str(temp_raw_path), channel_data)
     print(
         f"Extracted channel {ch_idx} to temporary raw file: {temp_raw_path} "
         f"(shape {channel_data.shape})"
     )
     return str(temp_raw_path), str(temp_raw_path)
+
+
+def _peek_raw_dtype(raw_path: str):
+    """Read only the dtype of a raw TIFF/Zarr image (no pixel data)."""
+    if raw_path.lower().endswith(".zarr"):
+        return _open_zarr_array(raw_path).dtype
+    with tifffile.TiffFile(raw_path) as tif:
+        return tif.series[0].dtype
+
+
+def _stage_raw_to_zarr(
+    raw_path: str, work_dir: Path, channel_axis, ch_idx: int, tag: str
+):
+    """Stream a raw image (one channel of it) into a temporary Zarr store."""
+    dest = work_dir / f"hoct_raw_ch{ch_idx}_{_unique_tag()}.zarr"
+    print(
+        f"[{tag}] Staging raw image to Zarr for lazy per-timepoint reads "
+        f"(channel {ch_idx})..."
+    )
+    _stage_input_as_zarr(
+        raw_path, dest, out_dtype=None, channel_axis=channel_axis, ch_idx=ch_idx
+    )
+    from_zarr = _open_zarr_array(str(dest))
+    print(f"[{tag}] Raw image staged at: {dest} (shape {tuple(from_zarr.shape)})")
+    return str(dest), str(dest)
 
 
 @BatchProcessingRegistry.register(
@@ -562,7 +896,7 @@ def _maybe_extract_raw_channel(
         "gpus": {
             "type": str,
             "default": "",
-            "description": "Comma-separated GPU ids to use (e.g. '0' or '0,1'). Leave empty to auto-detect and use all available GPUs. Set to 'cpu' or 'none' to disable GPU pinning. Each pinned GPU runs its own subprocess that loads the full raw+segmentation arrays into RAM, so restrict this on large datasets to limit memory use, not just VRAM.",
+            "description": "Comma-separated GPU ids to use (e.g. '0' or '0,1'). Leave empty to auto-detect and use all available GPUs. Set to 'cpu' or 'none' to disable GPU pinning. Each pinned GPU runs its own subprocess, so this also bounds how many movies are held in RAM at once (see 'stage_inputs', which is what keeps that per-movie cost small).",
         },
         "workers_per_gpu": {
             "type": int,
@@ -570,6 +904,18 @@ def _maybe_extract_raw_channel(
             "min": 1,
             "max": 8,
             "description": "Number of concurrent HOCT jobs to run per GPU. Increase if a single card has enough VRAM to run more than one tracking job at once (multi-GPU workstations benefit most). Only used when device='cuda'.",
+        },
+        "stage_inputs": {
+            "type": str,
+            "default": "auto",
+            "options": ["auto", "on", "off"],
+            "description": (
+                "Stage large TIFF inputs into temporary Zarr stores so HOCT "
+                "reads them one timepoint at a time instead of loading the "
+                "whole movie into RAM (a 4D label TIFF can be tens of GB). "
+                "'auto' stages inputs above 1 GB, 'off' restores the old "
+                "load-everything behaviour."
+            ),
         },
         "label_pattern": {
             "type": str,
@@ -593,6 +939,7 @@ def hoct_tracking(
     gurobi_license: str = "",
     gpus: str = "",
     workers_per_gpu: int = 1,
+    stage_inputs: str = "auto",
     label_pattern: str = "_labels.tif",
     _source_filepath: str = None,
     _output_folder: str = None,
@@ -652,11 +999,16 @@ def hoct_tracking(
         Comma-separated GPU ids to pin to (e.g. '0' or '0,1'). Empty
         auto-detects and uses all available GPUs; 'cpu'/'none' disables
         pinning. Restricting this bounds how many concurrent HOCT
-        subprocesses run, which bounds RAM use as well as VRAM, since each
-        pinned GPU loads its own full copy of the raw + segmentation arrays.
+        subprocesses run, which bounds RAM use as well as VRAM.
     workers_per_gpu : int
         Number of concurrent HOCT jobs to run per GPU (default: 1). Only
         used when device='cuda'.
+    stage_inputs : str
+        'auto' (default), 'on' or 'off'. HOCT reads a single multi-page TIFF
+        eagerly (the whole T×Z×Y×X volume stays in RAM for the entire run)
+        but reads Zarr stores lazily, one timepoint at a time. Staging
+        streams large TIFF inputs into temporary Zarr stores first, which is
+        what keeps big movies from being OOM-killed.
     label_pattern : str
         To identify label images
 
@@ -696,6 +1048,12 @@ def hoct_tracking(
     if tile not in ("auto", "on", "off"):
         print(f"Warning: invalid tile mode '{tile}'. Using 'auto' instead.")
         tile = "auto"
+
+    if stage_inputs not in ("auto", "on", "off"):
+        print(
+            f"Warning: invalid stage_inputs '{stage_inputs}'. Using 'auto' instead."
+        )
+        stage_inputs = "auto"
 
     # Ensure HOCT environment exists and the CLI is usable.
     if not HoctEnvManager.ensure_env_ready():
@@ -760,16 +1118,41 @@ def hoct_tracking(
     # HOCT's CTC exporter writes into a fresh directory (it refuses to write
     # into a non-empty one without --overwrite). Use a per-file unique name
     # so concurrent jobs (multi-GPU batches) never collide.
-    ctc_dir = temp_dir / f"hoct_ctc_{output_stem}_{os.getpid()}"
+    ctc_dir = temp_dir / f"hoct_ctc_{output_stem}_{_unique_tag()}"
     if ctc_dir.exists():
         shutil.rmtree(ctc_dir)
 
-    # If the raw image is multichannel, extract the requested (or default)
-    # channel to a temp TIFF so HOCT sees a channel-free array matching the
-    # mask's shape.
-    raw_path, temp_raw_path = _maybe_extract_raw_channel(
-        str(raw_path), channel, dimension_order, temp_dir
-    )
+    label_tag = os.path.basename(mask_path)
+
+    # Both inputs are prepared so the HOCT subprocess can read them one
+    # timepoint at a time (see _STAGE_MIN_BYTES): the segmentation is streamed
+    # into a temporary uint32 Zarr store when it is large, and the raw image
+    # is either passed through (already lazily readable and channel-free) or
+    # streamed into a Zarr store with the requested channel selected.
+    staged_paths = []
+    try:
+        mask_path, staged_mask = _stage_label_input(
+            str(mask_path), temp_dir, stage_inputs, label_tag
+        )
+        if staged_mask:
+            staged_paths.append(staged_mask)
+
+        label_shape = _peek_raw_shape(str(mask_path))
+        raw_path, temp_raw_path = _prepare_raw_input(
+            str(raw_path),
+            channel,
+            dimension_order,
+            temp_dir,
+            stage_mode=stage_inputs,
+            label_shape=_movie_shape(label_shape),
+            tag=label_tag,
+        )
+        if temp_raw_path:
+            staged_paths.append(temp_raw_path)
+    except Exception as exc:
+        print(f"[{label_tag}] Failed to prepare HOCT inputs: {exc}")
+        _cleanup_paths(staged_paths)
+        return None
 
     conda_cmd = HoctEnvManager.get_conda_cmd()
     cmd = [
@@ -832,7 +1215,6 @@ def hoct_tracking(
         pool, gpu_ids = _get_gpu_pool(workers_per_gpu, gpus)
         gpu_id = pool.get() if gpu_ids else None
 
-    label_tag = os.path.basename(mask_path)
     if gpu_id is not None:
         run_env["CUDA_VISIBLE_DEVICES"] = gpu_id
         print(f"[{label_tag}] Running HOCT tracking on GPU {gpu_id}...")
@@ -845,8 +1227,7 @@ def hoct_tracking(
         if gpu_id is not None:
             pool.put(gpu_id)
             print(f"[{label_tag}] Released GPU {gpu_id}")
-        if temp_raw_path is not None:
-            Path(temp_raw_path).unlink(missing_ok=True)
+        _cleanup_paths(staged_paths)
 
     if result.returncode != 0:
         print(f"HOCT error (exit code {result.returncode}):")
