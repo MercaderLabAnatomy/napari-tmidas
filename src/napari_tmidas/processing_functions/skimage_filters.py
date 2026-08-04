@@ -87,6 +87,127 @@ def _iter_dimension_blocks(image: np.ndarray, dimension_order: str):
         yield index, image[index]
 
 
+def _stream_remove_small_labels(
+    source_path, output_path, min_size: int
+) -> str:
+    """
+    Remove small labels from a stack on disk without ever holding it in RAM.
+
+    A tracked stack is mostly background, so a 90 MB compressed TIFF can be
+    70 GB dense — loading it (let alone allocating a same-sized output) is what
+    gets the process OOM-killed.  Both passes here read one YX plane at a time
+    via ``_PlaneReader`` and the result is streamed straight into the writer,
+    so peak memory is a couple of planes regardless of stack size.
+
+    Semantics match the in-memory path exactly: each trailing 3D volume
+    (ZYX) is treated independently, label IDs are the objects (no
+    re-labelling), and every label whose voxel count in that volume is
+    ``<= min_size`` is set to 0.
+
+    Returns the path written.
+    """
+    import tifffile
+
+    from napari_tmidas.processing_functions.intensity_label_filter import (
+        _PlaneReader,
+    )
+
+    with _PlaneReader(source_path) as labels:
+        shape = labels.shape
+        ndim = len(shape)
+        if ndim < 2:
+            raise ValueError(
+                f"{source_path}: expected a 2D+ label image, got shape {shape}"
+            )
+
+        # Grouping mirrors the recursive in-memory version: everything before
+        # the trailing 3 axes indexes an independent volume.
+        group_shape = shape[:-3] if ndim > 3 else ()
+        inner_shape = shape[len(group_shape) : -2]
+        planes_per_group = int(np.prod(inner_shape)) if inner_shape else 1
+        n_groups = int(np.prod(group_shape)) if group_shape else 1
+        n_planes = n_groups * planes_per_group
+
+        # Keep the input dtype: narrowing would need a global max-label pass
+        # before the writer can be opened, and the in-memory path preserves it
+        # too.  (uint32 is the floor for anything that must stay label-like.)
+        out_dtype = labels.dtype
+        print(
+            f"🔎 Streaming {os.path.basename(str(source_path))} "
+            f"{shape} {labels.dtype}: {n_groups} volume(s) x "
+            f"{planes_per_group} plane(s), removing labels <= {min_size} voxels"
+        )
+
+        def group_indices(group):
+            for inner in np.ndindex(*inner_shape) if inner_shape else [()]:
+                yield tuple(group) + inner
+
+        removed_total = 0
+        kept_total = 0
+        done = 0
+
+        def plane_iterator():
+            nonlocal removed_total, kept_total, done
+            for group in np.ndindex(*group_shape) if group_shape else [()]:
+                # Pass 1: voxel count per label ID within this volume.
+                counts = np.zeros(1, dtype=np.int64)
+                for index in group_indices(group):
+                    flat = labels.plane(index).ravel()
+                    if flat.min() < 0:
+                        raise ValueError(
+                            f"Label image contains negative values at {index}"
+                        )
+                    plane_counts = np.bincount(flat)
+                    if plane_counts.size > counts.size:
+                        grown = np.zeros(plane_counts.size, dtype=np.int64)
+                        grown[: counts.size] = counts
+                        counts = grown
+                    counts[: plane_counts.size] += plane_counts
+
+                # LUT: identity, except small labels (and background) -> 0.
+                lut = np.arange(counts.size, dtype=np.int64)
+                small = counts <= min_size
+                lut[small] = 0
+                lut[0] = 0
+                lut = lut.astype(out_dtype)
+
+                present = np.nonzero(counts)[0]
+                present = present[present > 0]
+                n_removed = int(np.count_nonzero(small[present]))
+                removed_total += n_removed
+                kept_total += present.size - n_removed
+
+                # Pass 2: apply the LUT plane by plane, straight to the writer.
+                for index in group_indices(group):
+                    yield np.take(lut, labels.plane(index))
+                    done += 1
+                    if done % 200 == 0 or done == n_planes:
+                        print(
+                            f"   {done}/{n_planes} planes written", flush=True
+                        )
+
+        axes = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}.get(ndim)
+        print(f"💾 Writing {os.path.basename(str(output_path))} ({out_dtype})")
+        with tifffile.TiffWriter(str(output_path), bigtiff=True) as writer:
+            writer.write(
+                plane_iterator(),
+                shape=shape,
+                dtype=out_dtype,
+                compression="zlib",
+                # Without this, tifffile reads a leading axis of length 3 or 4
+                # (e.g. 4 z-slices) as RGB samples and stores the stack as
+                # separate component planes, which breaks the plane iterator.
+                photometric="minisblack",
+                metadata={"axes": axes} if axes else None,
+            )
+
+        print(
+            f"✅ {os.path.basename(str(output_path))}: "
+            f"removed {removed_total} label(s), kept {kept_total}"
+        )
+    return str(output_path)
+
+
 if SKIMAGE_AVAILABLE:
 
     def _resolve_resize_target(shape_yx, scale_factor):
@@ -615,7 +736,7 @@ if SKIMAGE_AVAILABLE:
     @BatchProcessingRegistry.register(
         name="Remove Small Labels",
         suffix="_rm_small",
-        description="Remove small labels from label images",
+        description="Remove small labels from label images. Streams TIFF/Zarr stacks plane by plane, so memory stays flat regardless of stack size.",
         parameters={
             "min_size": {
                 "type": int,
@@ -627,7 +748,11 @@ if SKIMAGE_AVAILABLE:
         },
     )
     def remove_small_objects(
-        image: np.ndarray, min_size: int = 100
+        image: np.ndarray,
+        min_size: int = 100,
+        _source_filepath: str = None,
+        _output_folder: str = None,
+        _output_suffix: str = None,
     ) -> np.ndarray:
         """
         Remove small labels from label images.
@@ -637,18 +762,49 @@ if SKIMAGE_AVAILABLE:
         Removes connected components (objects) whose area (2D) or volume (3D)
         is smaller than or equal to min_size.
 
+        When the batch widget supplies a TIFF/Zarr source path and an output
+        folder, the stack is streamed plane by plane and the written path is
+        returned (``skip_load`` keeps the worker from loading it densely).
+        Otherwise the in-memory array path below is used unchanged.
+
         Parameters
         ----------
         image : np.ndarray
-            Label image (2D, 3D, 4D, or higher dimensional)
+            Label image (2D, 3D, 4D, or higher dimensional). ``None`` under
+            ``skip_load``.
         min_size : int
             Minimum size threshold in pixels/voxels. Objects with size <= min_size are removed.
 
         Returns
         -------
-        np.ndarray
-            Label image with small objects removed
+        np.ndarray or str
+            Label image with small objects removed, or the path written when
+            streaming from disk.
         """
+        # --- Streaming path: never materialise the stack ------------------
+        if _source_filepath and _output_folder and _output_suffix:
+            suffix = os.path.splitext(_source_filepath)[1].lower()
+            if suffix in (".tif", ".tiff", ".zarr") or os.path.isdir(
+                _source_filepath
+            ):
+                os.makedirs(_output_folder, exist_ok=True)
+                stem = os.path.splitext(
+                    os.path.basename(_source_filepath.rstrip("/"))
+                )[0]
+                output_path = os.path.join(
+                    _output_folder, f"{stem}{_output_suffix}.tif"
+                )
+                return _stream_remove_small_labels(
+                    _source_filepath, output_path, min_size
+                )
+
+        if image is None:
+            # skip_load left the array unloaded and the format isn't one we
+            # can stream — read it here rather than silently doing nothing.
+            from napari_tmidas._file_selector import load_image_file
+
+            image = np.asarray(load_image_file(_source_filepath))
+
         # For 4D+ data, process each 3D volume separately
         if image.ndim > 3:
             print(
@@ -675,6 +831,12 @@ if SKIMAGE_AVAILABLE:
             return skimage.morphology.remove_small_objects(
                 image, min_size=min_size + 1
             )
+
+    # skip_load=True: the worker must NOT call load_image_file for this
+    # function.  A tracked stack that is 90 MB compressed can be 70 GB dense,
+    # and a dense load plus the same-sized output allocation is what got the
+    # process OOM-killed.  The function streams the file itself instead.
+    remove_small_objects.skip_load = True
 
     @BatchProcessingRegistry.register(
         name="Invert Image",

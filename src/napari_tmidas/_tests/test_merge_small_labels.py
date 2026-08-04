@@ -1,11 +1,15 @@
 # src/napari_tmidas/_tests/test_merge_small_labels.py
 """Tests for merge_small_labels processing function."""
 
+import tracemalloc
+
 import numpy as np
 import pytest
+import tifffile
 
 from napari_tmidas.processing_functions.merge_small_labels import (
     _merge_single_frame,
+    _stream_merge_small_labels,
     merge_small_labels,
 )
 
@@ -227,3 +231,175 @@ class TestMergeSmallLabels:
         r1 = merge_small_labels(img, min_size=10)
         r2 = _merge_single_frame(img, min_size=10)
         np.testing.assert_array_equal(r1, r2)
+
+
+class TestMergeSmallLabelsStreaming:
+    """
+    The streaming path must be indistinguishable from the in-memory one.
+
+    Merging is spatial, so it cannot go plane by plane like a pure per-label
+    filter — but each timepoint (and channel) is independent, so only one
+    block is ever resident.  Without this the worker loaded the whole stack
+    densely and allocated a same-sized output, which OOM-killed the process on
+    real tracked data.
+    """
+
+    @staticmethod
+    def _blobby(shape, n_labels, seed):
+        """Label image with contiguous blobs, so merging has real neighbors."""
+        rng = np.random.default_rng(seed)
+        out = np.zeros(shape, dtype=np.uint32)
+        flat = out.reshape(-1, *shape[-2:])
+        for i in range(flat.shape[0]):
+            for lab in range(1, n_labels + 1):
+                y = rng.integers(0, shape[-2] - 3)
+                x = rng.integers(0, shape[-1] - 3)
+                flat[
+                    i,
+                    y : y + rng.integers(1, 4),
+                    x : x + rng.integers(1, 4),
+                ] = lab
+        return out
+
+    @staticmethod
+    def _write(path, array):
+        # photometric is required: without it tifffile reads a leading axis of
+        # length 3 or 4 as RGB samples and stores component planes instead.
+        tifffile.imwrite(
+            str(path), array, compression="zlib", photometric="minisblack"
+        )
+
+    @pytest.mark.parametrize("min_size", [1, 5, 50])
+    @pytest.mark.parametrize(
+        "shape,dim_order",
+        [
+            ((30, 30), "ZYX"),
+            ((4, 24, 24), "ZYX"),
+            ((4, 24, 24), "TYX"),
+            ((4, 24, 24), "Auto"),
+            ((3, 4, 20, 20), "TZYX"),
+            ((2, 2, 3, 18, 18), "TCZYX"),
+        ],
+    )
+    def test_matches_in_memory_result(
+        self, tmp_path, shape, dim_order, min_size
+    ):
+        array = self._blobby(shape, 8, seed=len(shape) * 10 + min_size)
+        expected = merge_small_labels(
+            array.copy(), min_size=min_size, dim_order=dim_order
+        )
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+
+        out = _stream_merge_small_labels(
+            src, tmp_path / "out.tif", min_size, dim_order
+        )
+
+        result = tifffile.imread(out)
+        assert result.dtype == expected.dtype
+        np.testing.assert_array_equal(result, expected)
+
+    def test_tyx_and_zyx_disagree_on_the_same_3d_file(self, tmp_path):
+        """The dim_order hint must reach the streaming path, not be ignored."""
+        array = self._blobby((4, 24, 24), 10, seed=99)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+
+        as_tyx = tifffile.imread(
+            _stream_merge_small_labels(src, tmp_path / "t.tif", 5, "TYX")
+        )
+        as_zyx = tifffile.imread(
+            _stream_merge_small_labels(src, tmp_path / "z.tif", 5, "ZYX")
+        )
+
+        assert not np.array_equal(as_tyx, as_zyx)
+
+    def test_dtype_is_preserved(self, tmp_path):
+        array = self._blobby((2, 3, 16, 16), 8, seed=3).astype(np.int64)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+
+        out = _stream_merge_small_labels(src, tmp_path / "out.tif", 50, "TZYX")
+
+        assert tifffile.imread(out).dtype == np.int64
+
+    def test_declares_skip_load(self):
+        """Without this the worker densely loads the stack before we run."""
+        assert getattr(merge_small_labels, "skip_load", False) is True
+
+    def test_widget_call_writes_its_own_output(self, tmp_path):
+        """label_image=None + source/output params -> returns written path."""
+        array = self._blobby((3, 4, 20, 20), 8, seed=11)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+        outdir = tmp_path / "out"
+
+        result = merge_small_labels(
+            None,
+            min_size=50,
+            dim_order="TZYX",
+            _source_filepath=str(src),
+            _output_folder=str(outdir),
+            _output_suffix="_merged",
+        )
+
+        assert result == str(outdir / "labels_merged.tif")
+        np.testing.assert_array_equal(
+            tifffile.imread(result),
+            merge_small_labels(array.copy(), min_size=50, dim_order="TZYX"),
+        )
+
+    def test_in_memory_call_does_not_mutate_input(self):
+        """copy=False is for the streaming buffer only, never a caller array."""
+        array = self._blobby((3, 4, 20, 20), 8, seed=12)
+        before = array.copy()
+
+        merge_small_labels(array, min_size=50, dim_order="TZYX")
+
+        np.testing.assert_array_equal(array, before)
+
+    def test_merge_single_frame_in_place_returns_same_buffer(self):
+        """copy=False merges into the caller's buffer, no extra allocation."""
+        frame = self._blobby((4, 20, 20), 8, seed=13)
+
+        result = _merge_single_frame(frame, 50, copy=False)
+
+        assert result is frame
+
+    def test_never_materialises_the_stack(self, tmp_path):
+        """Peak allocation stays near one block, not the whole stack."""
+        shape = (6, 16, 512, 512)  # 100 MB dense, 16.8 MB per block
+        dense_bytes = int(np.prod(shape)) * 4
+        block_bytes = int(np.prod(shape[1:])) * 4
+        rng = np.random.default_rng(42)
+        array = np.zeros(shape, dtype=np.uint32)
+        for i in range(300):
+            t, z = rng.integers(0, shape[0]), rng.integers(0, shape[1])
+            y, x = rng.integers(0, 500), rng.integers(0, 500)
+            array[
+                t, z, y : y + rng.integers(2, 6), x : x + rng.integers(2, 6)
+            ] = (i + 1)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+        del array
+
+        tracemalloc.start()
+        try:
+            _stream_merge_small_labels(
+                src, tmp_path / "out.tif", 100, "TZYX"
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        # One block, plus a fixed ~10 MB of scipy/tifffile working room that
+        # does not scale with the stack (on a real 1.69 GB timepoint the peak
+        # is 1.03x the block).  Allowing only a constant on top of one block
+        # is what catches a regression like np.bincount upcasting the whole
+        # volume to int64, which cost 2x the block.
+        assert (
+            peak < block_bytes + 12e6
+        ), f"peak {peak/1e6:.1f} MB vs block {block_bytes/1e6:.1f} MB"
+        assert (
+            peak < dense_bytes / 3
+        ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"

@@ -840,6 +840,11 @@ def _stream_filter_labels_by_intensity(
                 shape=labels.shape,
                 dtype=out_dtype,
                 compression="zlib",
+                # Without this, tifffile reads a leading axis of length 3 or 4
+                # (e.g. a 4-timepoint stack) as RGB samples, stores separate
+                # component planes, and the plane iterator raises on the first
+                # write.
+                photometric="minisblack",
                 metadata={"axes": axes} if axes else None,
             )
 

@@ -1,12 +1,18 @@
 # src/napari_tmidas/_tests/test_skimage_filters.py
+import tracemalloc
+
 import numpy as np
 import pytest
+import skimage.morphology
+import tifffile
 
 from napari_tmidas.processing_functions.skimage_filters import (
     adaptive_threshold_bright,
     equalize_histogram,
     invert_image,
+    _stream_remove_small_labels,
     percentile_threshold,
+    remove_small_objects,
     resize_image_fixed_yx,
     rolling_ball_background,
     simple_thresholding,
@@ -359,3 +365,137 @@ class TestResizeImageFixedYX:
 
         assert result.shape == shape[:-2] + (40, 60)
         assert result.dtype == image.dtype
+
+
+class TestRemoveSmallLabelsStreaming:
+    """
+    The streaming path must be indistinguishable from the in-memory one.
+
+    A tracked stack is >90% background, so a ~90 MB compressed TIFF can be
+    70 GB dense; loading it densely (as the worker did before ``skip_load``)
+    got the process OOM-killed.  These tests pin both the equivalence and the
+    fact that the stack is never materialised.
+    """
+
+    @staticmethod
+    def _reference(image, min_size):
+        if image.ndim > 3:
+            out = np.zeros_like(image)
+            for i in range(image.shape[0]):
+                out[i] = TestRemoveSmallLabelsStreaming._reference(
+                    image[i], min_size
+                )
+            return out
+        try:
+            return skimage.morphology.remove_small_objects(
+                image, max_size=min_size
+            )
+        except TypeError:
+            return skimage.morphology.remove_small_objects(
+                image, min_size=min_size + 1
+            )
+
+    @staticmethod
+    def _write(path, array):
+        # photometric is required: without it tifffile reads a leading axis of
+        # length 3 or 4 as RGB samples and stores component planes instead.
+        tifffile.imwrite(
+            str(path), array, compression="zlib", photometric="minisblack"
+        )
+
+    @pytest.mark.parametrize("min_size", [1, 50, 200])
+    @pytest.mark.parametrize(
+        "shape",
+        [(40, 40), (5, 30, 30), (3, 4, 25, 25), (2, 2, 3, 20, 20)],
+    )
+    def test_matches_in_memory_result(self, tmp_path, shape, min_size):
+        rng = np.random.default_rng(0)
+        array = rng.integers(0, 8, size=shape, dtype=np.uint32)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+
+        out = _stream_remove_small_labels(src, tmp_path / "out.tif", min_size)
+
+        result = tifffile.imread(out)
+        expected = self._reference(array, min_size)
+        assert result.dtype == expected.dtype
+        np.testing.assert_array_equal(result, expected)
+
+    def test_dtype_is_preserved(self, tmp_path):
+        array = np.zeros((2, 3, 10, 10), dtype=np.int64)
+        array[0, 0, :5, :5] = 7
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+
+        out = _stream_remove_small_labels(src, tmp_path / "out.tif", 100)
+
+        assert tifffile.imread(out).dtype == np.int64
+
+    def test_declares_skip_load(self):
+        """Without this the worker densely loads the stack before we run."""
+        assert getattr(remove_small_objects, "skip_load", False) is True
+
+    def test_widget_call_writes_its_own_output(self, tmp_path):
+        """image=None + source/output params -> returns the written path."""
+        rng = np.random.default_rng(1)
+        array = rng.integers(0, 8, size=(3, 4, 25, 25), dtype=np.uint32)
+        src = tmp_path / "labels.tif"
+        self._write(src, array)
+        outdir = tmp_path / "out"
+
+        result = remove_small_objects(
+            None,
+            min_size=50,
+            _source_filepath=str(src),
+            _output_folder=str(outdir),
+            _output_suffix="_rm_small",
+        )
+
+        assert result == str(outdir / "labels_rm_small.tif")
+        np.testing.assert_array_equal(
+            tifffile.imread(result), self._reference(array, 50)
+        )
+
+    def test_in_memory_call_still_returns_an_array(self):
+        """Calling with a plain array (tests, scripts) is unchanged."""
+        rng = np.random.default_rng(2)
+        array = rng.integers(0, 8, size=(3, 4, 25, 25), dtype=np.uint32)
+
+        result = remove_small_objects(array, min_size=50)
+
+        np.testing.assert_array_equal(result, self._reference(array, 50))
+
+    def test_never_materialises_the_stack(self, tmp_path):
+        """Peak allocation stays near one plane, not the whole stack."""
+        shape = (16, 16, 512, 512)
+        dense_bytes = int(np.prod(shape)) * 4  # 268 MB
+        src = tmp_path / "labels.tif"
+
+        # Write the source streamed too, so the test itself never holds the
+        # dense stack and the measured peak is the function's alone.
+        def planes():
+            plane = np.zeros(shape[-2:], dtype=np.uint32)
+            plane[10:60, 10:60] = 3  # one label large enough to survive
+            for _ in range(int(np.prod(shape[:-2]))):
+                yield plane
+
+        with tifffile.TiffWriter(str(src), bigtiff=True) as writer:
+            writer.write(
+                planes(),
+                shape=shape,
+                dtype=np.uint32,
+                compression="zlib",
+                photometric="minisblack",
+            )
+
+        tracemalloc.start()
+        try:
+            _stream_remove_small_labels(src, tmp_path / "out.tif", 100)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        # One plane is 1 MB; allow generous slack but stay far below dense.
+        assert (
+            peak < dense_bytes / 20
+        ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
