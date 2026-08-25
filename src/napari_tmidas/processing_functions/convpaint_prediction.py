@@ -99,6 +99,13 @@ except ImportError:
             "max": 200,
             "description": "Enable Z-batching to reduce memory (0=disabled, processes all Z-planes at once). Set to 10-20 for large datasets if running out of memory. Lower values = less memory but slower.",
         },
+        "n_workers": {
+            "type": int,
+            "default": 1,
+            "min": 1,
+            "max": 16,
+            "description": "Number of timepoints segmented concurrently. Workers are pinned round-robin to the visible CUDA devices, so on a 2-GPU workstation n_workers=2 puts one timepoint on each GPU. Only used for time-series data. Raising this above the GPU count makes workers share a device and can exhaust GPU memory.",
+        },
     },
 )
 def convpaint_predict(
@@ -111,8 +118,13 @@ def convpaint_predict(
     use_cpu: bool = False,
     force_dedicated_env: bool = False,
     z_batch_size: int = 0,
+    n_workers: int = 1,
     tmp_dir: str = None,
-) -> np.ndarray:
+    _source_filepath: str = None,
+    _output_folder: str = None,
+    _output_suffix: str = None,
+    _output_format: str = "tiff",
+) -> "str | np.ndarray":
     """
     Semantic segmentation using pretrained convpaint models.
 
@@ -272,6 +284,37 @@ The output is automatically upsampled to match the input dimensions.
     # Detect data dimensionality
     ndim = image.ndim
 
+    # Time-series inputs are segmented one timepoint at a time and written
+    # straight to disk.  The old path densified the whole input and then
+    # pre-allocated the full uint32 output beside it — on a 31x57x2720x2720
+    # source that is 26 GB plus 52 GB before a single timepoint is touched,
+    # which is the OOM this replaces.  One timepoint is 0.8 GB in, 1.7 GB out.
+    is_time_series = ndim == 4 or (ndim == 3 and image.shape[0] >= 100)
+    if is_time_series and _output_folder and _output_suffix:
+        return _segment_time_series_streaming(
+            image,
+            model_path=model_path,
+            image_downsample=image_downsample,
+            use_dedicated=use_dedicated,
+            use_cpu=use_cpu,
+            is_3d=(ndim == 4),
+            z_batch_size=z_batch_size,
+            n_workers=n_workers,
+            background_label=background_label,
+            output_type=output_type,
+            tmp_dir=tmp_dir,
+            source_filepath=_source_filepath,
+            output_folder=_output_folder,
+            output_suffix=_output_suffix,
+            output_format=_output_format,
+        )
+
+    # Anything else (2D, a single Z-stack) is one volume: materialize it if it
+    # arrived lazy, then fall through to the original in-memory path.
+    if hasattr(image, "compute"):
+        print("Materializing lazy input for single-volume segmentation...")
+        image = np.asarray(image)
+
     # Process image and get result
     result = None
 
@@ -374,7 +417,243 @@ The output is automatically upsampled to match the input dimensions.
     return result
 
 
-def _segment_with_convpaint(image, model_path, image_downsample, use_cpu=False):
+def _resolve_gpu_assignment(n_workers: int, use_cpu: bool, n_tasks: int):
+    """
+    Clamp the worker count and give each worker a CUDA device.
+
+    Returns (n_workers, gpu_ids) where gpu_ids[i] is the device for worker i,
+    or None when that worker should run on CPU.
+    """
+    try:
+        n_workers = int(n_workers)
+    except (TypeError, ValueError):
+        n_workers = 1
+    n_workers = max(1, min(n_workers, max(1, int(n_tasks))))
+
+    if use_cpu:
+        return n_workers, [None] * n_workers
+
+    from napari_tmidas.processing_functions.convpaint_env_manager import (
+        detect_gpu_ids,
+    )
+
+    devices = detect_gpu_ids()
+    if not devices:
+        print("No CUDA devices detected; workers will run on CPU")
+        return n_workers, [None] * n_workers
+
+    if n_workers > len(devices):
+        print(
+            f"⚠️  n_workers={n_workers} exceeds the {len(devices)} "
+            "visible GPU(s); workers will share devices, which can "
+            "exhaust GPU memory"
+        )
+    assignment = [devices[i % len(devices)] for i in range(n_workers)]
+    print(
+        f"Distributing {n_workers} worker(s) across GPU(s) "
+        f"{sorted(set(assignment))}"
+    )
+    return n_workers, assignment
+
+
+def _postprocess_timepoint(
+    labels: np.ndarray, background_label: int, output_type: str, is_3d: bool
+) -> np.ndarray:
+    """
+    Apply the per-timepoint tail of the pipeline.
+
+    Background removal and instance labelling used to run on the assembled
+    stack.  Both are per-timepoint operations already (connected components
+    are computed per volume), so doing them here keeps the full stack from
+    ever needing to exist in memory, and the result is identical.
+    """
+    labels = np.asarray(labels)
+    if background_label > 0:
+        labels[labels == background_label] = 0
+    if output_type == "instance":
+        from skimage import measure
+
+        labels = _apply_connected_components(
+            labels, measure, ndim=3 if is_3d else 2
+        )
+    return labels.astype(np.uint32, copy=False)
+
+
+def _segment_time_series_streaming(
+    image,
+    model_path,
+    image_downsample,
+    use_dedicated,
+    use_cpu,
+    is_3d,
+    z_batch_size,
+    n_workers,
+    background_label,
+    output_type,
+    tmp_dir,
+    source_filepath,
+    output_folder,
+    output_suffix,
+    output_format,
+) -> str:
+    """
+    Segment a time series timepoint by timepoint and write the result itself.
+
+    Peak memory is n_workers timepoints, not the whole stack, so this scales
+    to inputs far larger than RAM.  Timepoints are independent, which is also
+    what makes them the unit of GPU parallelism: each concurrent worker runs
+    its own convpaint subprocess pinned to its own device.
+
+    Completed timepoints land in a temporary on-disk Zarr rather than being
+    accumulated in RAM; the final image is then streamed out of that store in
+    order.  A buffer is needed because workers finish out of order, and Zarr
+    is the one format here that takes random-index writes.
+
+    Returns the path of the file it wrote.
+    """
+    import concurrent.futures
+    import shutil
+    import tempfile
+    import threading
+
+    import zarr
+
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        write_labels_with_source_metadata,
+    )
+
+    n_timepoints = int(image.shape[0])
+    n_workers, gpu_ids = _resolve_gpu_assignment(
+        n_workers, use_cpu, n_timepoints
+    )
+
+    # Keep the scratch store on the output filesystem.  The system temp dir is
+    # tmpfs on many Linux setups, which would put this buffer back in RAM.
+    scratch_root = tmp_dir or output_folder or tempfile.gettempdir()
+    os.makedirs(scratch_root, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix=".convpaint-", dir=scratch_root)
+    store_path = os.path.join(scratch, "labels.zarr")
+
+    base = os.path.splitext(os.path.basename(source_filepath or "image"))[0]
+    extension = ".zarr" if str(output_format).lower() == "zarr" else ".tif"
+    output_path = os.path.join(
+        output_folder, f"{base}{output_suffix}{extension}"
+    )
+
+    shape = tuple(int(s) for s in image.shape)
+    buffer = zarr.open_array(
+        store_path,
+        mode="w",
+        shape=shape,
+        # One YX plane per chunk, matching how the buffer is read back out.
+        # Chunking a whole timepoint instead would make each chunk 1.7 GB on
+        # a 57x2720x2720 volume, and since reading any part of a chunk
+        # decompresses all of it, the streamed write would pull that much per
+        # plane.  Writing a timepoint just touches Z chunks instead of one.
+        chunks=(1,) * (len(shape) - 2) + shape[-2:],
+        dtype="uint32",
+        zarr_format=3,
+    )
+
+    print(
+        f"Segmenting {n_timepoints} timepoints with {n_workers} worker(s); "
+        f"peak is {n_workers} timepoint(s) in memory, not the "
+        f"{np.prod(shape) * 4 / 1e9:.1f} GB stack"
+    )
+
+    # Worker index -> device.  A thread claims a slot for its whole run so a
+    # given GPU only ever has one convpaint process of ours on it.
+    slots = list(range(n_workers))
+    slots_lock = threading.Lock()
+    local = threading.local()
+    done = 0
+    done_lock = threading.Lock()
+
+    def claim_slot():
+        if getattr(local, "slot", None) is None:
+            with slots_lock:
+                local.slot = slots.pop()
+        return local.slot
+
+    def run_timepoint(t: int):
+        nonlocal done
+        gpu_id = gpu_ids[claim_slot()]
+        # Materialize exactly this timepoint; for a lazy input this is the
+        # only point where any pixels are read.
+        frame = np.asarray(image[t])
+
+        if is_3d and z_batch_size > 0 and frame.shape[0] > z_batch_size:
+            labels = _process_zyx_in_batches(
+                frame,
+                model_path,
+                image_downsample,
+                use_dedicated,
+                use_cpu,
+                z_batch_size,
+                tmp_dir=scratch,
+                gpu_id=gpu_id,
+            )
+        elif use_dedicated:
+            labels = run_convpaint_in_env(
+                frame,
+                model_path,
+                image_downsample,
+                use_cpu,
+                tmp_dir=scratch,
+                gpu_id=gpu_id,
+            )
+        else:
+            labels = _segment_with_convpaint(
+                frame, model_path, image_downsample, use_cpu, gpu_id=gpu_id
+            )
+
+        buffer[t] = _postprocess_timepoint(
+            labels, background_label, output_type, is_3d
+        )
+        del frame, labels
+
+        with done_lock:
+            done += 1
+            print(
+                f"   timepoint {done}/{n_timepoints} done"
+                + (f" (gpu {gpu_id})" if gpu_id is not None else ""),
+                flush=True,
+            )
+
+    try:
+        if n_workers == 1:
+            for t in range(n_timepoints):
+                run_timepoint(t)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=n_workers
+            ) as pool:
+                # list() so the first exception propagates instead of being
+                # swallowed with the remaining timepoints left unwritten.
+                list(pool.map(run_timepoint, range(n_timepoints)))
+
+        dim_order = "TZYX" if is_3d else "TYX"
+        print(f"💾 Writing {os.path.basename(output_path)} ({dim_order})")
+        # Handed the zarr array, not a numpy one, so this streams planes
+        # instead of materializing the stack it just avoided building.
+        write_labels_with_source_metadata(
+            buffer,
+            source_filepath,
+            output_path,
+            output_format,
+            dim_order,
+        )
+    finally:
+        del buffer
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    print(f"✓ Segmentation complete: {output_path}")
+    return output_path
+
+
+def _segment_with_convpaint(
+    image, model_path, image_downsample, use_cpu=False, gpu_id=None
+):
     """
     Segment a single image using convpaint (direct import).
 
@@ -388,6 +667,11 @@ def _segment_with_convpaint(image, model_path, image_downsample, use_cpu=False):
         Downsampling factor
     use_cpu : bool
         Force CPU execution
+    gpu_id : int, optional
+        CUDA device to run on.  In-process execution shares one CUDA context
+        across threads, so this selects the device explicitly rather than
+        through CUDA_VISIBLE_DEVICES (which only the subprocess path can set
+        per call, and which would race between concurrent workers here).
 
     Returns:
     --------
@@ -421,6 +705,18 @@ def _segment_with_convpaint(image, model_path, image_downsample, use_cpu=False):
                 model.fe_model.device = torch.device('cpu')
                 model.fe_model.model = model.fe_model.model.cpu()
                 print("  Moved feature extractor model to CPU")
+    elif (
+        gpu_id is not None
+        and torch is not None
+        and torch.cuda.is_available()
+    ):
+        # Move this model instance onto its assigned device, so concurrent
+        # workers in this process do not all pile onto cuda:0.
+        device = torch.device(f"cuda:{int(gpu_id)}")
+        if hasattr(model, "fe_model") and hasattr(model.fe_model, "device"):
+            model.fe_model.device = device
+            model.fe_model.model = model.fe_model.model.to(device)
+            print(f"  Feature extractor pinned to {device}")
     print(f"  Model has classifier: {model.classifier is not None}")
     print(f"  Model device: {model.fe_model.device}")
     print(f"  GPU enabled: {model._param.fe_use_gpu}")
@@ -554,6 +850,7 @@ def _process_zyx_in_batches(
     use_cpu,
     z_batch_size,
     tmp_dir=None,
+    gpu_id=None,
 ):
     """
     Process a 3D ZYX image in batches along the Z-axis to reduce memory usage.
@@ -572,6 +869,8 @@ def _process_zyx_in_batches(
         Force CPU execution
     z_batch_size : int
         Number of Z-planes to process at once
+    gpu_id : int, optional
+        CUDA device this batch should run on
 
     Returns:
     --------
@@ -607,10 +906,11 @@ def _process_zyx_in_batches(
                 image_downsample,
                 use_cpu,
                 tmp_dir=tmp_dir,
+                gpu_id=gpu_id,
             )
         else:
             batch_result = _segment_with_convpaint(
-                batch_img, model_path, image_downsample, use_cpu
+                batch_img, model_path, image_downsample, use_cpu, gpu_id=gpu_id
             )
         
         # Store result

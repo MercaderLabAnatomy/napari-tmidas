@@ -537,3 +537,228 @@ class TestConvpaintBatching:
         # Batching should NOT be called when disabled (even with 98 > 20 planes)
         assert not batch_function_called
         assert result.shape == image.shape
+
+
+class TestConvpaintStreamingAndGpuDistribution:
+    """
+    Time-series convpaint must stream, and spread its work over the GPUs.
+
+    The old path densified the lazy input and then pre-allocated the full
+    uint32 output next to it: on a 31x57x2720x2720 source that is 26 GB plus
+    52 GB before the first timepoint is segmented, which OOM-killed a 91 GB
+    machine.  Timepoints are independent, so segmenting them one at a time
+    both bounds memory and gives the axis to parallelize across devices.
+    """
+
+    @staticmethod
+    def _write_zarr(path, data, axes):
+        import json
+
+        import zarr
+
+        # Deliberately v2 — see the note in test_split_channels: sources
+        # in the wild are v2 and must keep loading.
+        root = zarr.open_group(str(path), mode="w", zarr_format=2)
+        arr = root.create_array(
+            "0",
+            shape=data.shape,
+            chunks=(1,) * (data.ndim - 2) + data.shape[-2:],
+            dtype=str(data.dtype),
+        )
+        arr[:] = data
+        (path / ".zattrs").write_text(
+            json.dumps(
+                {
+                    "multiscales": [
+                        {
+                            "version": "0.4",
+                            "axes": [{"name": a} for a in axes],
+                            "datasets": [{"path": "0"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+    def _run(
+        self,
+        tmp_path,
+        data,
+        monkeypatch,
+        n_workers=1,
+        segmenter=None,
+        **overrides,
+    ):
+        """Drive the real worker with the segmenter subprocess stubbed out."""
+        import threading
+
+        from napari_tmidas._file_selector import ProcessingWorker
+        from napari_tmidas.processing_functions import (
+            convpaint_prediction as cp,
+        )
+
+        seen = []
+        lock = threading.Lock()
+
+        def fake_segment(
+            image,
+            model_path,
+            image_downsample=2,
+            use_cpu=False,
+            tmp_dir=None,
+            gpu_id=None,
+        ):
+            with lock:
+                seen.append(gpu_id)
+            if segmenter is not None:
+                return segmenter(image)
+            return np.where(np.asarray(image) > 2000, 2, 1).astype(np.uint32)
+
+        monkeypatch.setattr(cp, "run_convpaint_in_env", fake_segment)
+
+        src = tmp_path / "src.zarr"
+        axes = "tzyx" if data.ndim == 4 else "tyx"
+        self._write_zarr(src, data, axes)
+        model = tmp_path / "model.pkl"
+        model.write_text("stub")
+        out = tmp_path / "out"
+        out.mkdir(exist_ok=True)
+
+        params = {
+            "model_path": str(model),
+            "image_downsample": 1,
+            "background_label": 1,
+            "output_type": "semantic",
+            "n_workers": n_workers,
+            "channel": "all",
+            "use_cpu": False,
+            "force_dedicated_env": True,
+            "z_batch_size": 0,
+        }
+        params.update(overrides)
+        worker = ProcessingWorker(
+            file_list=[str(src)],
+            processing_func=cp.convpaint_predict,
+            param_values=params,
+            output_folder=str(out),
+            input_suffix=".zarr",
+            output_suffix="_convpaint_labels",
+            output_format="tiff",
+        )
+        return worker.process_file(str(src)), seen, out
+
+    def test_declares_the_lazy_input_contract(self):
+        """
+        _source_filepath is what tells the worker not to densify the input.
+
+        Without it the worker calls .compute() on the Dask array before
+        convpaint is ever entered, so no amount of streaming inside this
+        function can help.
+        """
+        import inspect
+
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            convpaint_predict,
+        )
+
+        params = inspect.signature(convpaint_predict).parameters
+        assert "_source_filepath" in params
+        # Writing its own output is what keeps the full uint32 stack from
+        # having to exist as a return value.
+        assert "_output_folder" in params
+        assert "_output_suffix" in params
+
+    def test_streams_time_series_without_the_full_stack(
+        self, tmp_path, monkeypatch
+    ):
+        """Peak stays at one timepoint as the series gets longer."""
+        pytest.importorskip("zarr")
+        import tracemalloc
+
+        import tifffile
+
+        rng = np.random.default_rng(4)
+        peaks = {}
+        for n_timepoints in (8, 32):
+            data = rng.integers(
+                0, 4000, size=(n_timepoints, 4, 128, 128), dtype=np.uint16
+            )
+            case = tmp_path / f"t{n_timepoints}"
+            case.mkdir()
+
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                result, _, _ = self._run(case, data, monkeypatch)
+                peaks[n_timepoints] = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+
+            expected = np.where(data > 2000, 2, 1).astype(np.uint32)
+            expected[expected == 1] = 0  # background_label
+            written = tifffile.imread(result["processed_file"])
+            assert written.dtype == np.uint32
+            np.testing.assert_array_equal(written, expected)
+
+        # 4x the timepoints must not cost meaningfully more memory.  The old
+        # path allocated the whole stack, so it would land at 4x here.
+        assert peaks[32] < peaks[8] * 1.5, (
+            f"peak grew with the series: {peaks[8]/1e6:.1f} MB at 8 "
+            f"timepoints vs {peaks[32]/1e6:.1f} MB at 32"
+        )
+
+    def test_spreads_workers_over_available_gpus(self, tmp_path, monkeypatch):
+        """Each concurrent worker gets its own device, round-robin."""
+        pytest.importorskip("zarr")
+        from napari_tmidas.processing_functions import (
+            convpaint_prediction as cp,
+        )
+
+        monkeypatch.setattr(
+            cp, "_resolve_gpu_assignment", lambda n, cpu, tasks: (2, [0, 1])
+        )
+        data = np.random.default_rng(4).integers(
+            0, 4000, size=(8, 2, 32, 32), dtype=np.uint16
+        )
+        _, seen, _ = self._run(tmp_path, data, monkeypatch, n_workers=2)
+
+        assert len(seen) == 8, "every timepoint should be segmented once"
+        assert set(seen) == {0, 1}, f"expected both GPUs, saw {set(seen)}"
+
+    def test_worker_count_is_clamped_to_the_work_available(self):
+        """More workers than timepoints would just idle (and claim GPUs)."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _resolve_gpu_assignment,
+        )
+
+        n_workers, gpus = _resolve_gpu_assignment(8, use_cpu=True, n_tasks=3)
+        assert n_workers == 3
+        assert gpus == [None, None, None]
+
+    def test_cpu_mode_claims_no_gpus(self):
+        """use_cpu must win over any device that happens to be visible."""
+        from napari_tmidas.processing_functions.convpaint_prediction import (
+            _resolve_gpu_assignment,
+        )
+
+        _, gpus = _resolve_gpu_assignment(2, use_cpu=True, n_tasks=10)
+        assert gpus == [None, None]
+
+    def test_failed_timepoint_propagates_and_cleans_up(
+        self, tmp_path, monkeypatch
+    ):
+        """A crashed worker must not leave its scratch buffer on disk."""
+        pytest.importorskip("zarr")
+
+        def boom(image):
+            raise RuntimeError("convpaint exploded")
+
+        data = np.random.default_rng(4).integers(
+            0, 4000, size=(4, 2, 32, 32), dtype=np.uint16
+        )
+        with pytest.raises(RuntimeError, match="convpaint exploded"):
+            self._run(tmp_path, data, monkeypatch, segmenter=boom)
+
+        out = tmp_path / "out"
+        leftovers = [p.name for p in out.iterdir() if ".convpaint-" in p.name]
+        assert not leftovers, f"scratch left behind: {leftovers}"

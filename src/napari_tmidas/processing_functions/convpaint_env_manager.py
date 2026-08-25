@@ -326,12 +326,69 @@ def recreate_convpaint_env(cuda_version: str = "auto"):
         return manager.create_env()
 
 
+def detect_gpu_ids() -> list:
+    """
+    CUDA device indices this process may use, or [] when there are none.
+
+    Used to hand each concurrent convpaint worker its own GPU; querying
+    nvidia-smi rather than torch keeps this usable from the main environment,
+    which has no torch installed when convpaint runs in its dedicated env.
+
+    ``CUDA_VISIBLE_DEVICES`` wins over nvidia-smi, which ignores it and always
+    reports every physical card.  A scheduler that restricts a job to a subset
+    would otherwise see its restriction discarded: `run_convpaint_in_env`
+    overwrites the variable in each child, so a worker would be pinned to a
+    card the job does not own.  The indices are physical either way, which is
+    what the child's ``CUDA_VISIBLE_DEVICES`` expects.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        ids = []
+        for entry in visible.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                ids.append(int(entry))
+            except ValueError:
+                # A UUID form ("GPU-<uuid>"): usable by the child, but not as
+                # an integer index.  Pin nothing rather than fall through to
+                # nvidia-smi and hand out cards the restriction excluded.
+                return []
+        return ids
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not enumerate GPUs: {exc}")
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    ids = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                ids.append(int(line))
+            except ValueError:
+                continue
+    return ids
+
+
 def run_convpaint_in_env(
     image,
     model_path,
     image_downsample=2,
     use_cpu=False,
     tmp_dir=None,
+    gpu_id=None,
 ):
     """
     Run convpaint prediction in the dedicated environment.
@@ -348,6 +405,11 @@ def run_convpaint_in_env(
         Force CPU execution even if GPU is available (default: False)
     tmp_dir : str, optional
         Directory for temporary input/output/script files. If None, system temp is used.
+    gpu_id : int, optional
+        CUDA device this call should run on.  Pinning happens through the
+        child's environment rather than inside the script, so the child sees
+        exactly one device and every `cuda`/`cuda:0` reference in convpaint
+        and torch lands on the intended GPU with no further bookkeeping.
 
     Returns:
     --------
@@ -479,12 +541,22 @@ print("Segmentation complete")
         script_path = script_file.name
         script_file.write(script)
 
+    # Pin the child to its device before torch is ever imported.  Setting
+    # CUDA_VISIBLE_DEVICES from inside the script (as the CPU branch below
+    # still does) is too late to be reliable once torch has initialized.
+    child_env = os.environ.copy()
+    if use_cpu:
+        child_env["CUDA_VISIBLE_DEVICES"] = ""
+    elif gpu_id is not None:
+        child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
     try:
         # Run the script in the environment
         result = subprocess.run(
             [env_python, script_path],
             capture_output=True,
             text=True,
+            env=child_env,
         )
 
         if result.returncode != 0:
