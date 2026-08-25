@@ -467,6 +467,34 @@ class TestIntensitySourceResolution:
 
         assert _resolve_intensity_source(label).name == "movie.zarr"
 
+    def test_finds_intensity_for_a_zarr_label_image(self, tmp_path):
+        """
+        Zarr labels are the reference workflow, but ".zarr" was missing from
+        the extension list that strips the extension before matching a known
+        suffix.  "movie_labels.zarr" does not end with "_labels", so the
+        candidate list came out empty and this raised instead of resolving.
+        """
+        (tmp_path / "movie.zarr").mkdir()
+        label = tmp_path / "movie_labels.zarr"
+        label.mkdir()
+
+        assert _resolve_intensity_source(label).name == "movie.zarr"
+
+    def test_zarr_label_resolves_to_a_tif_intensity(self, tmp_path):
+        (tmp_path / "movie.tif").write_bytes(b"x")
+        label = tmp_path / "movie_tracked.zarr"
+        label.mkdir()
+
+        assert _resolve_intensity_source(label).name == "movie.tif"
+
+    def test_explicit_suffix_on_a_zarr_label(self, tmp_path):
+        (tmp_path / "sample.zarr").mkdir()
+        label = tmp_path / "sample_custom.zarr"
+        label.mkdir()
+
+        resolved = _resolve_intensity_source(label, label_suffix="_custom")
+        assert resolved.name == "sample.zarr"
+
     def test_explicit_suffix(self, tmp_path):
         (tmp_path / "sample.tif").write_bytes(b"x")
         label = tmp_path / "sample_my_custom_labels.tif"

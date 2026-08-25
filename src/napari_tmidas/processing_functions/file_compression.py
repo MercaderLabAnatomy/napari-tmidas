@@ -128,10 +128,20 @@ def compress_with_zstandard(
 # This is a bit of a hack, but it allows us to compress files after they've been saved
 # by the batch processing system
 
-# Store the original save_file function
-
-
-original_process_file = ProcessingWorker.process_file
+# Store the original process_file function.
+#
+# Re-importing this module must not wrap an already-wrapped method: the second
+# wrap would capture the first wrapper as its "original", and since the
+# installed wrapper resolves `original_process_file` from this module's
+# namespace at call time, every call would then recurse until the stack runs
+# out.  discover_and_load_processing_functions(reload=True) does exactly that
+# re-import, so remember the first-seen original on the class and only install
+# the patch once.
+if not getattr(ProcessingWorker, "_tmidas_compression_patched", False):
+    original_process_file = ProcessingWorker.process_file
+    ProcessingWorker._tmidas_compression_original = original_process_file
+else:
+    original_process_file = ProcessingWorker._tmidas_compression_original
 
 
 # Replace it with our modified version that compresses after saving
@@ -201,5 +211,9 @@ def process_file_with_compression(self, filepath):
 
 
 # Apply the monkey patch if pzstd is available
-if check_pzstd_installed():
+# (once — see the note above the original capture)
+if check_pzstd_installed() and not getattr(
+    ProcessingWorker, "_tmidas_compression_patched", False
+):
     ProcessingWorker.process_file = process_file_with_compression
+    ProcessingWorker._tmidas_compression_patched = True

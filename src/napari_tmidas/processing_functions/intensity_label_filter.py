@@ -392,7 +392,13 @@ def _resolve_intensity_source(label_path: Path, label_suffix: str = "auto"):
         intensities and produces plausible-looking nonsense.
     """
     stem = label_path.name
-    for ext in (".ome.tif", ".ome.tiff", ".tif", ".tiff"):
+    # Derived from _INTENSITY_EXTENSIONS rather than repeated: a label image
+    # must be strippable in exactly the formats an intensity source may have.
+    # Keeping a second copy is what once left ".zarr" out here, so a Zarr
+    # *label* never had its suffix stripped and could never be paired at all
+    # -- "foo_labels.zarr" does not end with "_labels", so every candidate
+    # list came out empty.  Longest first, so ".ome.tif" wins over ".tif".
+    for ext in sorted(_INTENSITY_EXTENSIONS, key=len, reverse=True):
         if stem.lower().endswith(ext):
             stem = stem[: -len(ext)]
             break

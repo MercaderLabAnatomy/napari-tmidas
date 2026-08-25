@@ -1823,8 +1823,20 @@ try:
             traceback.print_exc()
             raise
 
-    # Store the original process_file function
-    original_process_file = ProcessingWorker.process_file
+    # Store the original process_file function.
+    #
+    # Re-importing this module must not wrap an already-wrapped method: the
+    # second wrap would capture the first wrapper as its "original", and since
+    # the installed wrapper resolves `original_process_file` from this module's
+    # namespace at call time, every call would then recurse until the stack
+    # runs out.  discover_and_load_processing_functions(reload=True) does
+    # exactly that re-import, so remember the first-seen original on the class
+    # and only install the patch once.
+    if not getattr(ProcessingWorker, "_tmidas_tzyx_patched", False):
+        original_process_file = ProcessingWorker.process_file
+        ProcessingWorker._tmidas_tzyx_original = original_process_file
+    else:
+        original_process_file = ProcessingWorker._tmidas_tzyx_original
 
     # Define the custom process_file function
     def process_file_with_tzyx_splitting(self, filepath):
@@ -1972,8 +1984,10 @@ try:
 
         return result
 
-    # Apply the monkey patch
-    ProcessingWorker.process_file = process_file_with_tzyx_splitting
+    # Apply the monkey patch (once — see the note above the original capture)
+    if not getattr(ProcessingWorker, "_tmidas_tzyx_patched", False):
+        ProcessingWorker.process_file = process_file_with_tzyx_splitting
+        ProcessingWorker._tmidas_tzyx_patched = True
 
 except (NameError, AttributeError) as e:
     print(f"Warning: Could not apply TZYX splitting patch: {e}")

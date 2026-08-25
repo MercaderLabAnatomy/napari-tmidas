@@ -1771,18 +1771,39 @@ if SKIMAGE_AVAILABLE:
         """
         from skimage.restoration import rolling_ball
 
-        # Estimate background
-        background = rolling_ball(image, radius=radius)
+        # rolling_ball's kernel spans every axis it is handed, so passing a
+        # whole TZYX stack rolls a *4D* ball: at the default radius the
+        # kernel alone is 101**4 elements (832 MB) and the cost is that
+        # times the pixel count -- a 5 MB stack ran 25 minutes at 13.7 GB
+        # RSS without finishing.  It is also wrong: a ball spanning T/C
+        # blends background across timepoints and channels.  Every
+        # dimension order in _DIMENSION_ORDER_AXES ends in "YX", so the
+        # background is estimated one YX plane at a time, as ImageJ does.
+        if image.ndim < 2:
+            raise ValueError(
+                f"Rolling ball needs a 2D+ image, got {image.ndim}D"
+            )
 
-        # Subtract background and clip to valid range
-        result = image.astype(np.float32) - background
-        result = np.clip(result, 0, None)
-
-        # Convert back to original dtype range if needed
         if image.dtype == np.uint8:
-            result = np.clip(result, 0, 255).astype(np.uint8)
+            out_dtype, ceiling = np.uint8, 255
         elif image.dtype == np.uint16:
-            result = np.clip(result, 0, 65535).astype(np.uint16)
+            out_dtype, ceiling = np.uint16, 65535
+        else:
+            out_dtype, ceiling = np.float32, None
+
+        # Writing each corrected plane straight into the output keeps peak
+        # memory at input + output + one plane; the previous version held a
+        # full-size background and two full-size float copies besides.
+        result = np.empty(image.shape, dtype=out_dtype)
+
+        # ndim == 2 yields a single empty index, i.e. the image itself.
+        for index in np.ndindex(*image.shape[:-2]):
+            plane = image[index]
+            corrected = plane.astype(np.float32) - rolling_ball(
+                plane, radius=radius
+            )
+            np.clip(corrected, 0, ceiling, out=corrected)
+            result[index] = corrected
 
         return result
 

@@ -152,6 +152,90 @@ class TestBrightRegionExtraction:
         assert result.dtype == np.uint8
 
 
+class TestRollingBallPerPlane:
+    """
+    rolling_ball's kernel spans every axis it is handed, so passing a whole
+    stack rolled a ball with as many dimensions as the stack: at the default
+    radius=50 a 5 MB TZYX input ran 25 minutes at 13.7 GB RSS without
+    finishing, and the background it estimated was blended across T/Z/C.
+    The background must be estimated one YX plane at a time.
+    """
+
+    @staticmethod
+    def _reference_plane(plane, radius):
+        """Rolling ball on a single 2D plane, where it was always correct."""
+        from skimage.restoration import rolling_ball
+
+        corrected = plane.astype(np.float32) - rolling_ball(
+            plane, radius=radius
+        )
+        return np.clip(corrected, 0, 65535).astype(plane.dtype)
+
+    @pytest.mark.parametrize("shape", [(3, 40, 40), (2, 3, 32, 32)])
+    def test_matches_per_plane_reference(self, shape):
+        """A stack must equal the 2D result computed plane by plane."""
+        rng = np.random.default_rng(0)
+        image = rng.integers(0, 4000, shape, dtype=np.uint16)
+
+        result = rolling_ball_background(image, radius=5)
+
+        expected = np.empty_like(image)
+        for index in np.ndindex(*shape[:-2]):
+            expected[index] = self._reference_plane(image[index], 5)
+        assert np.array_equal(result, expected)
+
+    def test_planes_are_independent(self):
+        """
+        Editing one plane must not change any other plane's output.  An n-D
+        ball reaches across the leading axes, so this fails outright when the
+        whole stack is handed to rolling_ball at once.
+        """
+        rng = np.random.default_rng(1)
+        image = rng.integers(0, 4000, (3, 40, 40), dtype=np.uint16)
+
+        before = rolling_ball_background(image, radius=5)
+
+        edited = image.copy()
+        edited[0] = rng.integers(0, 4000, (40, 40), dtype=np.uint16)
+        after = rolling_ball_background(edited, radius=5)
+
+        assert np.array_equal(before[1:], after[1:])
+
+    @pytest.mark.parametrize(
+        "dtype", [np.uint8, np.uint16, np.float32]
+    )
+    def test_dtype_is_preserved(self, dtype):
+        rng = np.random.default_rng(2)
+        if dtype is np.float32:
+            image = rng.random((2, 32, 32)).astype(np.float32)
+        else:
+            high = np.iinfo(dtype).max
+            image = rng.integers(0, high, (2, 32, 32), dtype=dtype)
+
+        assert rolling_ball_background(image, radius=5).dtype == dtype
+
+    def test_peak_memory_is_bounded(self):
+        """
+        Peak must stay near input + output.  The old version also held a
+        full-size background plus two full-size float copies on top.
+        """
+        rng = np.random.default_rng(3)
+        image = rng.integers(0, 4000, (8, 4, 128, 128), dtype=np.uint16)
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            rolling_ball_background(image, radius=10)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        # input + output is 2.0x; allow one plane and change on top.
+        assert peak < 2.5 * image.nbytes, (
+            f"peak {peak/1e6:.1f} MB on a {image.nbytes/1e6:.1f} MB input"
+        )
+
+
 class TestCLAHE:
     """Test suite for CLAHE (Contrast Limited Adaptive Histogram Equalization)"""
 
