@@ -409,6 +409,282 @@ class TestTimepointSorting:
             assert copied_store.is_dir()
 
 
+def _write_tczyx_ome_zarr(zarr_path, data):
+    """Write `data` as a TCZYX OME-Zarr, chunked one (t, z) plane at a time."""
+    import zarr
+
+    # Deliberately v2: real acquisitions on disk are v2 (the source this
+    # was built from is), and reading them has to keep working even though
+    # nothing in this package writes v2 any more.
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=2)
+    arr = root.create_array(
+        "0",
+        shape=data.shape,
+        chunks=(1, data.shape[1], 1) + data.shape[3:],
+        dtype=str(data.dtype),
+    )
+    arr[:] = data
+    root.attrs["multiscales"] = [
+        {
+            "version": "0.4",
+            "axes": [
+                {"name": "t", "type": "time"},
+                {"name": "c", "type": "channel"},
+                {"name": "z", "type": "space"},
+                {"name": "y", "type": "space"},
+                {"name": "x", "type": "space"},
+            ],
+            "datasets": [{"path": "0"}],
+        }
+    ]
+
+
+class TestSplitChannelsStreaming:
+    """
+    Splitting a Zarr larger than RAM must not go through a dense array.
+
+    The worker loads Zarr lazily as Dask and split_channels only moves an
+    axis, so the result stays lazy — but the worker used to .compute() it
+    unconditionally before saving, materializing every channel of the stack
+    at once.  On a real 52 GB acquisition that is an OOM kill, so these
+    tests pin both halves of the fix: the result stays lazy, and streaming
+    it to disk produces the same bytes as the dense path.
+    """
+
+    def _run_split(
+        self, tmp_path, src, num_channels, output_format, block_bytes
+    ):
+        import napari_tmidas._file_selector as fs
+        from napari_tmidas._file_selector import ProcessingWorker
+
+        out = tmp_path / "out"
+        out.mkdir(exist_ok=True)
+
+        original_budget = fs._STREAM_BLOCK_BYTES
+        fs._STREAM_BLOCK_BYTES = block_bytes
+        try:
+            worker = ProcessingWorker(
+                file_list=[str(src)],
+                processing_func=split_channels,
+                param_values={
+                    "num_channels": num_channels,
+                    "dimension_order": "Auto",
+                },
+                output_folder=str(out),
+                input_suffix=".zarr",
+                output_suffix="_split",
+                output_format=output_format,
+            )
+            return worker.process_file(str(src))
+        finally:
+            fs._STREAM_BLOCK_BYTES = original_budget
+
+    @pytest.mark.parametrize("output_format", ["tiff", "zarr"])
+    def test_streamed_output_matches_dense_split(
+        self, tmp_path, output_format
+    ):
+        """Streaming each channel to disk reproduces the source bytes."""
+        pytest.importorskip("zarr")
+        pytest.importorskip("dask")
+
+        rng = np.random.default_rng(0)
+        data = rng.integers(0, 4000, size=(5, 2, 4, 64, 64), dtype=np.uint16)
+        src = tmp_path / "src.zarr"
+        _write_tczyx_ome_zarr(src, data)
+
+        # One plane is 8 KB, so this budget forces the deepest descent of the
+        # block iterator: it must recurse past T and Z to a single plane.
+        result = self._run_split(tmp_path, src, 2, output_format, 16 * 1024)
+
+        paths = sorted(result["processed_files"])
+        assert len(paths) == 2
+
+        for channel, path in enumerate(paths):
+            if output_format == "zarr":
+                import zarr
+
+                written = np.asarray(zarr.open_group(path, mode="r")["s0"])
+            else:
+                import tifffile
+
+                written = tifffile.imread(path)
+                with tifffile.TiffFile(path) as tif:
+                    assert tif.series[0].axes == "TZYX"
+            assert written.shape == (5, 4, 64, 64)
+            np.testing.assert_array_equal(written, data[:, channel])
+
+    def test_never_materialises_the_stack(self, tmp_path):
+        """Peak allocation stays near one block, not the whole split."""
+        pytest.importorskip("zarr")
+        pytest.importorskip("dask")
+        import tracemalloc
+
+        # 40 t x 4 z planes of 512x512 uint16: 168 MB dense across both
+        # channels, 2.1 MB per t-block of one channel.  Deep enough that one
+        # block and the whole stack are far apart (80x), and deep enough to
+        # cross the plane count where tifffile switches on threaded
+        # compression (see the maxworkers=1 note in _write_tiff_output).
+        shape = (40, 2, 4, 512, 512)
+        rng = np.random.default_rng(42)
+        data = rng.integers(0, 4000, size=shape, dtype=np.uint16)
+        dense_bytes = data.nbytes
+        # Budget chosen so the iterator computes one whole (z, y, x) block.
+        block_bytes = 4 * 512 * 512 * 2
+
+        src = tmp_path / "src.zarr"
+        _write_tczyx_ome_zarr(src, data)
+        # The measurement below covers the whole process, so the fixture must
+        # not still be resident — it alone is the size this test is asserting
+        # the split never reaches.
+        del data
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            result = self._run_split(tmp_path, src, 2, "tiff", block_bytes)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert len(result["processed_files"]) == 2
+
+        # One block, plus the working room Dask's threaded scheduler needs to
+        # assemble it: each source chunk here spans both channels, so it is
+        # read and decompressed whole before the wanted half is sliced out,
+        # several threads at a time.  That lands at ~7x the block (measured
+        # 14.3-14.5 MB across runs), so bound by a multiple of the block
+        # rather than "one block + a constant" — what has to be caught is a
+        # regression that scales with the *stack*, and 10x still fails hard
+        # on the one this guards: computing the whole lazy result up front is
+        # 40x the block.
+        assert (
+            peak < block_bytes * 10
+        ), f"peak {peak/1e6:.1f} MB vs block {block_bytes/1e6:.1f} MB"
+        # Independently: nowhere near the dense stack.  At 80 blocks this is
+        # a genuinely separate check (42 MB) rather than a looser restatement
+        # of the 21 MB bound above.
+        assert (
+            peak < dense_bytes / 4
+        ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
+
+
+class TestLazyTiffLoading:
+    """
+    A large TIFF is opened page-wise for functions that can consume a lazy
+    array.  Without this the streaming save path above is defeated at the
+    door: tifffile.imread materializes the whole stack before the processing
+    function is ever called, so the same split that handles a 52 GB Zarr in
+    0.4 GB would still OOM on a 52 GB TIFF.
+    """
+
+    def _write_tczyx_tiff(self, path, data):
+        import tifffile
+
+        tifffile.imwrite(
+            str(path),
+            data,
+            ome=True,
+            photometric="minisblack",
+            compression="zlib",
+            metadata={"axes": "TCZYX"},
+        )
+
+    def test_small_tiff_is_not_opened_lazily(self, tmp_path):
+        """Under the threshold a dense read is faster and just as safe."""
+        pytest.importorskip("dask")
+        from napari_tmidas._file_selector import _lazy_load_tiff
+
+        data = np.zeros((4, 2, 3, 32, 32), dtype=np.uint16)
+        src = tmp_path / "small.tif"
+        self._write_tczyx_tiff(src, data)
+        assert _lazy_load_tiff(str(src)) is None
+
+    def test_large_tiff_loads_lazily_with_correct_pages(self, tmp_path):
+        """A large TIFF loads lazily and round-trips byte-identically.
+
+        The fixture is a standard OME layout, where series order and file
+        order coincide, so this pins the round-trip rather than the
+        series-vs-file page mapping itself.
+        """
+        pytest.importorskip("dask")
+        import napari_tmidas._file_selector as fs
+
+        rng = np.random.default_rng(5)
+        data = rng.integers(0, 4000, size=(4, 2, 3, 32, 32), dtype=np.uint16)
+        src = tmp_path / "large.tif"
+        self._write_tczyx_tiff(src, data)
+
+        original = fs._LAZY_TIFF_MIN_BYTES
+        fs._LAZY_TIFF_MIN_BYTES = 1024
+        try:
+            lazy = fs._lazy_load_tiff(str(src))
+        finally:
+            fs._LAZY_TIFF_MIN_BYTES = original
+
+        assert lazy is not None
+        assert hasattr(lazy, "compute"), "expected a lazy array"
+        assert lazy.shape == data.shape
+        np.testing.assert_array_equal(np.asarray(lazy), data)
+
+    def test_split_streams_a_large_tiff(self, tmp_path):
+        """End to end: TIFF in, one channel per file out, nothing dense."""
+        pytest.importorskip("dask")
+        import tifffile
+
+        import napari_tmidas._file_selector as fs
+        from napari_tmidas._file_selector import ProcessingWorker
+
+        rng = np.random.default_rng(6)
+        data = rng.integers(
+            0, 4000, size=(30, 2, 8, 128, 128), dtype=np.uint16
+        )
+        dense_bytes = data.nbytes
+        src = tmp_path / "stack.tif"
+        self._write_tczyx_tiff(src, data)
+        out = tmp_path / "out"
+        out.mkdir()
+
+        budget, threshold = fs._STREAM_BLOCK_BYTES, fs._LAZY_TIFF_MIN_BYTES
+        fs._STREAM_BLOCK_BYTES = 2 * 1024 * 1024
+        fs._LAZY_TIFF_MIN_BYTES = 1024 * 1024
+        try:
+            worker = ProcessingWorker(
+                file_list=[str(src)],
+                processing_func=split_channels,
+                param_values={
+                    "num_channels": 2,
+                    "dimension_order": "TCZYX",
+                },
+                output_folder=str(out),
+                input_suffix=".tif",
+                output_suffix="_split",
+                output_format="tiff",
+            )
+            import tracemalloc
+
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                result = worker.process_file(str(src))
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        finally:
+            fs._STREAM_BLOCK_BYTES = budget
+            fs._LAZY_TIFF_MIN_BYTES = threshold
+
+        paths = sorted(result["processed_files"])
+        assert len(paths) == 2
+        for channel, path in enumerate(paths):
+            np.testing.assert_array_equal(
+                tifffile.imread(path), data[:, channel]
+            )
+        # The dense read alone was 1.9x the stack before this path existed.
+        assert (
+            peak < dense_bytes / 2
+        ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     pytest.main([__file__, "-v"])

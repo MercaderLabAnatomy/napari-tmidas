@@ -30,6 +30,11 @@ except ImportError:
     _HAS_PANDAS = False
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import (
+    chunked,
+    independent_leading,
+    plane_wise_only,
+)
 
 # Dimension-order strings offered by the "dimension_order" dropdown widget.
 _DIMENSION_ORDER_AXES = frozenset(
@@ -219,6 +224,26 @@ if SKIMAGE_AVAILABLE:
         resolved_x = max(1, int(round(shape_yx[1] * scale_factor)))
         return resolved_y, resolved_x
 
+    # Input bytes per CLAHE block.  This deliberately reproduces what Dask's
+    # "auto" chunking picked before (it targets 128 MiB), because CLAHE is an
+    # *adaptive* method: the block grid decides which pixels share a histogram,
+    # so retiling changes the result.  Measured against a single untiled block
+    # on a 4x1536x1536 volume, mean deviation was 0.14% of range at a 926 tile
+    # but 2.1% at 512 and 8.3% at 256 — shrinking tiles to save memory would
+    # quietly degrade output.  Memory is bounded by max_dask_workers instead.
+    #
+    # Lower this only to trade accuracy for a smaller ceiling; the ceiling is
+    # roughly _CLAHE_BLOCK_INPUT_BYTES x 28 x max_dask_workers, since
+    # equalize_adapthist works in float64 and keeps several copies alive
+    # (~56 bytes per voxel of a uint16 block, with a ~150 MB floor).
+    _CLAHE_BLOCK_INPUT_BYTES = 128 * 1024 * 1024
+
+    def _clahe_yx_tile(z_depth: int, itemsize: int) -> int:
+        """Square YX tile holding _CLAHE_BLOCK_INPUT_BYTES per ZYX block."""
+        per_plane = max(1, int(z_depth)) * max(1, int(itemsize))
+        # Dask clamps the tile to the axis length, so no upper bound is needed.
+        return max(256, int((_CLAHE_BLOCK_INPUT_BYTES / per_plane) ** 0.5))
+
     def _equalize_histogram_dask(
         image, clip_limit: float, kernel_size: int, max_workers: int
     ):
@@ -297,6 +322,16 @@ if SKIMAGE_AVAILABLE:
         # Calculate overlap depth for spatial dimensions
         depth = kernel_size // 2
 
+        # YX tile size for the rechunks below; see _clahe_yx_tile.  "auto"
+        # cannot be used directly: it sizes to 128 MiB but Dask then runs one
+        # such block per core, and at ~28x inflation each that is what made
+        # this function peak at 152x its input.
+        z_axis = {5: 2, 4: 1, 3: 0}.get(image.ndim)
+        yx_tile = _clahe_yx_tile(
+            image.shape[z_axis] if z_axis is not None else 1,
+            image.dtype.itemsize,
+        )
+
         # Rechunk to ensure T,C dimensions have chunk size 1
         # and Z dimension is not chunked (complete Z stacks)
         if image.ndim == 5:  # TCZYX
@@ -304,7 +339,7 @@ if SKIMAGE_AVAILABLE:
                 f"Processing {image.shape[0]} timepoints × {image.shape[1]} channels"
             )
             # Rechunk: each chunk should be (1,1,Z,Y,X) to keep complete ZYX volumes
-            target_chunks = (1, 1, image.shape[2], "auto", "auto")
+            target_chunks = (1, 1, image.shape[2], yx_tile, yx_tile)
             image_rechunked = image.rechunk(target_chunks)
             print(f"Rechunked to: {image_rechunked.chunks}")
 
@@ -326,7 +361,7 @@ if SKIMAGE_AVAILABLE:
         elif image.ndim == 4:  # CZYX or TZYX
             print(f"Processing {image.shape[0]} volumes")
             # Rechunk: (1,Z,Y,X) to keep complete ZYX volumes
-            target_chunks = (1, image.shape[1], "auto", "auto")
+            target_chunks = (1, image.shape[1], yx_tile, yx_tile)
             image_rechunked = image.rechunk(target_chunks)
             print(f"Rechunked to: {image_rechunked.chunks}")
 
@@ -341,7 +376,7 @@ if SKIMAGE_AVAILABLE:
         elif image.ndim == 3:  # ZYX
             print("Processing single ZYX volume")
             # Rechunk: (Z,Y,X) complete Z
-            target_chunks = (image.shape[0], "auto", "auto")
+            target_chunks = (image.shape[0], yx_tile, yx_tile)
             image_rechunked = image.rechunk(target_chunks)
 
             result = da.map_overlap(
@@ -388,7 +423,7 @@ if SKIMAGE_AVAILABLE:
                 "default": 1,
                 "min": 1,
                 "max": 16,
-                "description": "Maximum number of parallel workers (default: 1). Higher values use more memory but are faster. Range: 1-16",
+                "description": "Maximum number of parallel workers for in-memory inputs (default: 1). Higher values use more memory but are faster. Range: 1-16. Ignored for Zarr and large TIFF inputs, which stream one block at a time to bound the ~28x float64 inflation of adaptive equalization.",
             },
             "channel": {
                 "type": str,
@@ -548,6 +583,16 @@ if SKIMAGE_AVAILABLE:
 
         return result
 
+    # max_dask_workers: the lazy path returns a graph the worker computes
+    # later, so this is the only way to bound how many equalize_adapthist
+    # blocks are in flight at once.  Without it Dask runs one per core (32 on
+    # the machine this was measured on), and since each block peaks at ~28x
+    # its own size, that alone turned a 31 MB input into a 4.4 GB peak and
+    # would need ~115 GB on a 52 GB source.  One block at a time holds the
+    # ceiling at ~3.8 GB no matter how large the input is, without touching
+    # the block grid the output depends on.
+    equalize_histogram.max_dask_workers = 1
+
     # simple otsu thresholding
     @BatchProcessingRegistry.register(
         name="Otsu Thresholding (semantic)",
@@ -562,6 +607,9 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=plane_wise_only(
+        {"TYX", "ZYX", "CYX", "TCYX", "TZYX", "ZCYX", "TZCYX", "TCZYX"}
+    ))
     def otsu_thresholding(
         image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
@@ -659,6 +707,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=independent_leading())
     def otsu_thresholding_instance(
         image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
@@ -713,6 +762,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=2)
     def simple_thresholding(
         image: np.ndarray, threshold: int = 128, channel: str = "all"
     ) -> np.ndarray:
@@ -849,6 +899,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=2)
     def invert_image(image: np.ndarray, channel: str = "all") -> np.ndarray:
         """
         Invert the image pixel values.
@@ -929,6 +980,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=independent_leading())
     def semantic_to_instance(
         image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
@@ -998,6 +1050,7 @@ else:
         },
     },
 )
+@chunked(trailing_whole=independent_leading())
 def binary_to_labels(
     image: np.ndarray, dimension_order: str = "Auto", channel: str = "all"
 ) -> np.ndarray:
@@ -1120,6 +1173,7 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
         },
     },
 )
+@chunked(trailing_whole=2)
 def resize_image_fixed_yx(
     image: np.ndarray,
     scale_factor: float = 0.5,
@@ -1739,6 +1793,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=2)
     def rolling_ball_background(
         image: np.ndarray, radius: int = 50, channel: str = "all"
     ) -> np.ndarray:

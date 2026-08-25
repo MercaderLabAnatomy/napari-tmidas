@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import chunked, lazy_capable
 from napari_tmidas.processing_functions.ome_output_utils import (
     _extract_source_physical_scale,
 )
@@ -395,6 +396,7 @@ def _align_candidate(
     description="Convert a label image to a binary mask (255 for non-zero, 0 otherwise)",
     parameters={},
 )
+@chunked(trailing_whole=2)
 def labels_to_binary(image: np.ndarray) -> np.ndarray:
     arr = _to_array(image)
     result = np.zeros(arr.shape, dtype=np.uint8)
@@ -408,6 +410,7 @@ def labels_to_binary(image: np.ndarray) -> np.ndarray:
     description="Invert a binary label image (non-zero becomes 0, zero becomes 255)",
     parameters={},
 )
+@chunked(trailing_whole=2)
 def invert_binary_labels(image: np.ndarray) -> np.ndarray:
     arr = _to_array(image)
     result = np.zeros(arr.shape, dtype=np.uint8)
@@ -428,6 +431,7 @@ def invert_binary_labels(image: np.ndarray) -> np.ndarray:
         }
     },
 )
+@chunked(trailing_whole=2)
 def filter_label_by_id(image: np.ndarray, label_id: int = 1) -> np.ndarray:
     """
     Filter a label image to keep only the specified label ID.
@@ -739,6 +743,7 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
         },
     },
 )
+@chunked(trailing_whole=2)
 def gamma_correction(image: np.ndarray, gamma: float = 1.0, channel: str = "all") -> np.ndarray:
     """
     Apply gamma correction to the image
@@ -782,6 +787,7 @@ def gamma_correction(image: np.ndarray, gamma: float = 1.0, channel: str = "all"
         },
     },
 )
+@lazy_capable
 def max_z_projection(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Maximum intensity projection along the z-axis
@@ -806,6 +812,7 @@ def max_z_projection(image: np.ndarray, channel: str = "all") -> np.ndarray:
         },
     },
 )
+@lazy_capable
 def max_z_projection_tzyx(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Memory-efficient maximum intensity projection along the Z-axis for TZYX data.
@@ -826,6 +833,11 @@ def max_z_projection_tzyx(image: np.ndarray, channel: str = "all") -> np.ndarray
     # Validate input dimensions
     if image.ndim != 4:
         raise ValueError(f"Expected 4D image (TZYX), got {image.ndim}D image")
+
+    # A lazy input gets Dask's tree reduction over Z, which is bounded and
+    # parallel; the hand-rolled loop below is the dense equivalent.
+    if hasattr(image, "chunks") and hasattr(image, "compute"):
+        return image.max(axis=1)
 
     # Get dimensions
     t_size, z_size, y_size, x_size = image.shape

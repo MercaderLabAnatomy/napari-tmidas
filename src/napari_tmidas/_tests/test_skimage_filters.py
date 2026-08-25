@@ -583,3 +583,56 @@ class TestRemoveSmallLabelsStreaming:
         assert (
             peak < dense_bytes / 20
         ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
+
+
+class TestCLAHEDaskMemory:
+    """
+    CLAHE's lazy path must be bounded by its block, not by the input.
+
+    equalize_adapthist works in float64 and keeps several copies alive, so a
+    block peaks at roughly 28x its own bytes.  Dask sized blocks at 128 MiB
+    and then ran one per core, which on a 32-core machine multiplied that into
+    ~115 GB for a 52 GB source — measured 4.4 GB on a 31 MB fixture before
+    the cap.  The block grid is deliberately left alone (retiling an *adaptive*
+    method changes its output), so the bound comes from concurrency only.
+    """
+
+    def test_declares_a_worker_cap(self):
+        """The lazy result is computed by the caller, so the cap must ride
+        on the function itself — nothing else knows it is this expensive."""
+        assert getattr(equalize_histogram, "max_dask_workers", None) == 1
+
+    @pytest.mark.parametrize(
+        "shape,dtype,z_axis",
+        [
+            ((31, 2, 57, 2720, 2720), "uint16", 2),
+            ((10, 1, 120, 2048, 2048), "uint16", 2),
+            ((5, 40, 4096, 4096), "uint16", 1),
+            ((60, 4000, 4000), "uint8", 0),
+        ],
+    )
+    def test_explicit_tiling_reproduces_dask_auto(self, shape, dtype, z_axis):
+        """
+        The explicit YX tile must land exactly where "auto" did.
+
+        CLAHE equalizes per block, so the block grid is part of the result:
+        against a single untiled block, mean deviation was 0.14% of range at
+        a 926 tile but 8.3% at 256.  Sizing the tile for memory instead of
+        matching "auto" would silently change everyone's output.
+        """
+        da = pytest.importorskip("dask.array")
+        from napari_tmidas.processing_functions.skimage_filters import (
+            _clahe_yx_tile,
+        )
+
+        lazy = da.zeros(
+            shape, dtype=dtype, chunks=(1,) * (len(shape) - 2) + shape[-2:]
+        )
+        target = [1] * len(shape)
+        target[z_axis] = shape[z_axis]
+        target[-2] = target[-1] = "auto"
+        rechunked = lazy.rechunk(tuple(target))
+        auto_tile = tuple(c[0] for c in rechunked.chunks)[-2:]
+
+        tile = _clahe_yx_tile(shape[z_axis], np.dtype(dtype).itemsize)
+        assert auto_tile == (min(tile, shape[-2]), min(tile, shape[-1]))

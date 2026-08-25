@@ -191,7 +191,11 @@ from napari_tmidas.processing_functions import (
     discover_and_load_processing_functions,
 )
 from napari_tmidas.processing_functions.ome_output_utils import (
+    STREAM_BLOCK_BYTES,
+    _array_nbytes,
     _extract_source_physical_scale,
+    iter_planes_blockwise,
+    stream_planes_to_tiff,
     write_labels_with_source_metadata,
 )
 
@@ -216,6 +220,7 @@ except ImportError:
     )
 
 try:
+    import dask
     import dask.array as da
     from dask.callbacks import Callback as _DaskCallback
 
@@ -962,6 +967,99 @@ def detect_channels_in_image(image_data: Union[np.ndarray, list]) -> Tuple[int, 
     return _detect_channels_from_shape(image_data.shape)
 
 
+# Module-level alias for the shared budget, kept because the streaming tests
+# rebind it here to shrink the block.  See ome_output_utils for the rationale.
+_STREAM_BLOCK_BYTES = STREAM_BLOCK_BYTES
+
+
+def _is_lazy_array(obj) -> bool:
+    """
+    True for Dask-style arrays whose contents are still on disk.
+
+    These carry a full ``shape``/``dtype`` but hold no pixels until computed,
+    so they can be sliced and written block by block.
+    """
+    return (
+        obj is not None
+        and hasattr(obj, "compute")
+        and hasattr(obj, "chunks")
+        and hasattr(obj, "shape")
+        and hasattr(obj, "dtype")
+    )
+
+
+def _iter_lazy_planes(array, dtype, budget_bytes=None, max_workers=None):
+    """
+    ``iter_planes_blockwise`` with this module's block budget as the default.
+
+    The indirection exists so the budget is resolved at call time: the
+    streaming tests rebind ``_STREAM_BLOCK_BYTES`` here to force many small
+    blocks out of a small fixture.
+    """
+    if budget_bytes is None:
+        budget_bytes = _STREAM_BLOCK_BYTES
+    yield from iter_planes_blockwise(
+        array, dtype, budget_bytes, max_workers
+    )
+
+
+def _write_tiff_output(
+    array,
+    output_path: str,
+    dtype,
+    metadata: dict,
+    bigtiff: bool,
+    max_workers=None,
+) -> None:
+    """
+    Write `array` as an OME-TIFF.
+
+    Dense arrays take the plain ``imwrite`` path.  Lazy arrays are streamed
+    plane by plane so a result far larger than RAM (e.g. one channel of a
+    multi-hundred-GB split) is never held in memory as a whole.
+    """
+    if not _is_lazy_array(array):
+        tifffile.imwrite(
+            output_path,
+            np.asarray(array).astype(dtype, copy=False),
+            ome=True,
+            photometric="minisblack",
+            compression="zlib",
+            bigtiff=bigtiff,
+            metadata=metadata,
+        )
+        return
+
+    shape = tuple(int(s) for s in array.shape)
+    n_planes = max(1, int(np.prod(shape[:-2], dtype=np.int64)))
+    print(
+        f"💾 Streaming {os.path.basename(output_path)} {shape} "
+        f"{np.dtype(dtype)}: {n_planes} plane(s), "
+        f"≤{_STREAM_BLOCK_BYTES / 1e6:.0f} MB resident at a time"
+    )
+
+    written = 0
+
+    def plane_iterator():
+        nonlocal written
+        for plane in _iter_lazy_planes(
+            array, dtype, max_workers=max_workers
+        ):
+            yield plane
+            written += 1
+            if written % 50 == 0 or written == n_planes:
+                print(f"   {written}/{n_planes} planes", flush=True)
+
+    stream_planes_to_tiff(
+        output_path,
+        plane_iterator(),
+        shape,
+        dtype,
+        metadata=metadata,
+        bigtiff=bigtiff,
+    )
+
+
 def _resolve_output_dim_order(
     dimension_order_hint: str, channel_was_extracted: bool, ndim: int
 ) -> str:
@@ -1148,9 +1246,83 @@ def save_as_zarr(
         raise ValueError(f"Failed to save Zarr: {e}") from e
 
 
-def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
+# Below this size a TIFF is just read densely: the lazy path costs roughly an
+# order of magnitude in read time (measured 1.4 s vs 0.1 s on a 600-page file),
+# which is only worth paying when the dense read is the thing that would not
+# fit.  Zarr is always lazy — chunked on disk, so laziness is free there.
+_LAZY_TIFF_MIN_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _lazy_load_tiff(filepath: str):
+    """
+    Open a TIFF as a Dask array of YX planes without reading any pixels.
+
+    Returns None when a dense read is the better answer — small files, or
+    layouts that do not decompose into whole YX pages — and the caller then
+    falls back to ``tifffile.imread``.
+    """
+    try:
+        with tifffile.TiffFile(filepath) as tif:
+            series = tif.series[0]
+            shape = tuple(int(s) for s in series.shape)
+            dtype = np.dtype(series.dtype)
+            # A page's position in the file is not always its position in the
+            # series (multi-series files, interleaved OME layouts).  Resolve
+            # the mapping once, here, while the IFDs are already parsed.
+            page_index = [
+                int(getattr(page, "index", i))
+                for i, page in enumerate(series.pages)
+            ]
+    except Exception as exc:
+        print(f"Lazy TIFF open failed ({exc}); reading densely instead")
+        return None
+
+    n_planes = (
+        int(np.prod(shape[:-2], dtype=np.int64)) if len(shape) > 2 else 0
+    )
+    if n_planes <= 1 or len(page_index) != n_planes:
+        # 2D, single-page, or a layout whose pages are not whole YX planes
+        # (tiled RGB, samples-per-pixel > 1): not addressable page-wise.
+        return None
+    if (
+        int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+        < _LAZY_TIFF_MIN_BYTES
+    ):
+        return None
+
+    plane_shape = shape[-2:]
+
+    def read_page(index: int) -> np.ndarray:
+        # Reopened per read: a TiffFile handle is not safe to share across the
+        # worker's threads, and indexing tif.pages avoids the full series scan
+        # that tif.series[0].pages would redo on every single page (measured
+        # 8.2 s vs 1.4 s over 600 pages).
+        with tifffile.TiffFile(filepath) as tif:
+            return tif.pages[index].asarray()
+
+    print(
+        f"Loading {os.path.basename(filepath)} lazily: {shape} {dtype}, "
+        f"{n_planes} pages"
+    )
+    planes = [
+        da.from_delayed(
+            dask.delayed(read_page)(index), shape=plane_shape, dtype=dtype
+        )
+        for index in page_index
+    ]
+    return da.stack(planes).reshape(shape)
+
+
+def load_image_file(
+    filepath: str, prefer_lazy: bool = False
+) -> Union[np.ndarray, List, Any]:
     """
     Load image from file, supporting both TIFF and Zarr formats with proper metadata handling
+
+    `prefer_lazy` is set by callers whose processing function can consume a
+    lazy array (see ProcessingWorker.process_file).  For everyone else a TIFF
+    is read densely, because the worker would only have to materialize it
+    again before calling the function.
     """
     if filepath.lower().endswith(".zarr"):
 
@@ -1181,6 +1353,10 @@ def load_image_file(filepath: str) -> Union[np.ndarray, List, Any]:
             filepath.lower().endswith(".tif")
             or filepath.lower().endswith(".tiff")
         ):
+            if prefer_lazy and DASK_AVAILABLE:
+                lazy = _lazy_load_tiff(filepath)
+                if lazy is not None:
+                    return lazy
             return tifffile.imread(filepath)
         else:
             return imread(filepath)
@@ -2590,13 +2766,33 @@ class ProcessingWorker(QThread):
                     )
                     return None
 
+            # Functions taking _source_filepath opt in to lazy input: they
+            # either stream from the path themselves or handle a Dask array.
+            # This is what decides whether a large TIFF is worth opening
+            # page-wise, so it has to be known before the load, not after.
+            try:
+                accepts_lazy_input = (
+                    "_source_filepath"
+                    in inspect.signature(self.processing_func).parameters
+                )
+            except (ValueError, TypeError):
+                accepts_lazy_input = False
+
+            # Functions whose per-task cost dwarfs their block size cap how
+            # many Dask tasks may run at once (see _compute_block).
+            dask_max_workers = getattr(
+                self.processing_func, "max_dask_workers", None
+            )
+
             # skip_load: function handles all I/O itself (e.g. merge_channels).
             # Pass image=None so the worker never allocates the full array.
             if getattr(self.processing_func, "skip_load", False):
                 image_data = None
             else:
                 # Load the image using the unified loader
-                image_data = load_image_file(filepath)
+                image_data = load_image_file(
+                    filepath, prefer_lazy=accepts_lazy_input
+                )
 
             # Handle multi-layer data from OME-Zarr - extract first layer for processing
             if image_data is None:
@@ -2684,22 +2880,18 @@ class ProcessingWorker(QThread):
 
             # Check if this is a Zarr file - some functions support Dask arrays
             is_zarr_input = filepath.lower().endswith(".zarr")
+            is_zarr_aware = is_zarr_input and accepts_lazy_input
 
-            # Check if function accepts _source_filepath (indicates Zarr-aware)
-            is_zarr_aware = False
-            if is_zarr_input:
-                try:
-                    sig = inspect.signature(self.processing_func)
-                    is_zarr_aware = "_source_filepath" in sig.parameters
-                except (ValueError, TypeError):
-                    pass
-
-            # Convert dask array to numpy for processing functions that don't support dask
-            # Exception: keep as Dask for Zarr-aware functions to enable chunk processing
+            # Convert dask array to numpy for processing functions that don't
+            # support dask.  Exception: keep it lazy for functions that opted
+            # in, so they can process it chunk-wise.  This keys off the
+            # function's own signature rather than the input being Zarr — a
+            # large TIFF is now loaded lazily too (see load_image_file), and
+            # densifying it here would undo that immediately.
             if (
                 hasattr(image, "chunks")
                 and hasattr(image, "compute")
-                and not is_zarr_aware
+                and not accepts_lazy_input
             ):
                 print("Converting dask array to numpy for processing...")
                 # For very large arrays, we might want to process in chunks
@@ -2860,24 +3052,48 @@ class ProcessingWorker(QThread):
 
             processed_result = self.processing_func(image, **processing_params)
 
-            # If result is a Dask array, compute it now (lazy evaluation complete)
-            if hasattr(processed_result, "chunks") and hasattr(
-                processed_result, "compute"
-            ):
-                print(
-                    f"Computing Dask result (shape: {processed_result.shape})..."
-                )
-                try:
-                    progress_cb = _ChunkProgressCallback(
-                        f"{os.path.basename(filepath)} (process)"
+            # A Dask result still has to reach disk.  A small one is
+            # cheapest to compute up front; a large one must not be —
+            # computing e.g. a 5D channel split of a multi-TB-pixel Zarr
+            # materializes the entire stack at once and gets the process OOM
+            # killed, which is precisely what the lazy load was avoiding.  Past
+            # the streaming budget, keep it lazy and let the save paths below
+            # write it out block by block instead.
+            if _is_lazy_array(processed_result):
+                lazy_bytes = _array_nbytes(processed_result)
+                # Folder functions compare their result against the input array
+                # below, which needs it dense either way.
+                if is_folder_function or lazy_bytes <= _STREAM_BLOCK_BYTES:
+                    print(
+                        "Computing Dask result "
+                        f"(shape: {processed_result.shape})..."
                     )
-                    processed_result = processed_result.compute(
-                        callbacks=[progress_cb.pair]
+                    try:
+                        progress_cb = _ChunkProgressCallback(
+                            f"{os.path.basename(filepath)} (process)"
+                        )
+                        compute_kwargs = (
+                            {
+                                "scheduler": "threads",
+                                "num_workers": dask_max_workers,
+                            }
+                            if dask_max_workers
+                            else {}
+                        )
+                        processed_result = processed_result.compute(
+                            callbacks=[progress_cb.pair], **compute_kwargs
+                        )
+                        print("Dask computation complete!")
+                    except MemoryError as e:
+                        print(f"Memory error during Dask computation: {e}")
+                        raise
+                else:
+                    print(
+                        "Keeping Dask result lazy (shape: "
+                        f"{processed_result.shape}, "
+                        f"{lazy_bytes / 1e9:.1f} GB dense) — streaming it "
+                        "to disk instead of materializing it in RAM."
                     )
-                    print("Dask computation complete!")
-                except MemoryError as e:
-                    print(f"Memory error during Dask computation: {e}")
-                    raise
 
             # A function may write its own output (e.g. zarr-based merge) and
             # return the saved file path as a string — treat it as already saved.
@@ -3356,14 +3572,13 @@ class ProcessingWorker(QThread):
                                 tiff_metadata[
                                     f"PhysicalSize{ax_name}Unit"
                                 ] = "um"
-                            tifffile.imwrite(
+                            _write_tiff_output(
+                                channel_image,
                                 channel_filepath,
-                                channel_image.astype(image_dtype, copy=False),
-                                ome=True,
-                                photometric="minisblack",
-                                compression="zlib",
-                                bigtiff=use_bigtiff,
-                                metadata=tiff_metadata,
+                                image_dtype,
+                                tiff_metadata,
+                                use_bigtiff,
+                                max_workers=dask_max_workers,
                             )
 
                     processed_files.append(channel_filepath)
@@ -3428,14 +3643,13 @@ class ProcessingWorker(QThread):
                         ).items():
                             tiff_metadata[f"PhysicalSize{ax_name}"] = ax_scale
                             tiff_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
-                        tifffile.imwrite(
+                        _write_tiff_output(
+                            processed_image,
                             new_filepath,
-                            processed_image.astype(image_dtype, copy=False),
-                            ome=True,
-                            photometric="minisblack",
-                            compression="zlib",
-                            bigtiff=use_bigtiff,
-                            metadata=tiff_metadata,
+                            image_dtype,
+                            tiff_metadata,
+                            use_bigtiff,
+                            max_workers=dask_max_workers,
                         )
 
                 return {

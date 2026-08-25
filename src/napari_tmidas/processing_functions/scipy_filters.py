@@ -13,6 +13,10 @@ except ImportError:
     print("SciPy not available, some processing functions will be disabled")
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import (
+    chunked,
+    plane_wise_only,
+)
 
 if SCIPY_AVAILABLE:
 
@@ -349,6 +353,9 @@ if SCIPY_AVAILABLE:
             },
         },
     )
+    @chunked(trailing_whole=plane_wise_only(
+        {"TYX", "CYX", "TCYX", "TZYX", "ZCYX", "TZCYX", "TCZYX"}
+    ))
     def gaussian_blur(
         image: np.ndarray, sigma: float = 1.0, dimension_order: str = "Auto", channel: str = "all"
     ) -> np.ndarray:
