@@ -721,7 +721,9 @@ def _stream_filter_labels_by_intensity(
     tuple
         (label_intensities, medoids, threshold, out_dtype, n_labels)
     """
-    import tifffile
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        stream_planes_to_tiff,
+    )
 
     with _PlaneReader(label_path) as labels, _PlaneReader(
         intensity_path
@@ -840,23 +842,15 @@ def _stream_filter_labels_by_intensity(
             f"💾 Writing {output_path.name} as {out_dtype} "
             f"(compressed, streamed plane by plane)"
         )
-        with tifffile.TiffWriter(str(output_path), bigtiff=True) as writer:
-            writer.write(
-                plane_iterator(),
-                shape=labels.shape,
-                dtype=out_dtype,
-                compression="zlib",
-                # Without this, tifffile reads a leading axis of length 3 or 4
-                # (e.g. a 4-timepoint stack) as RGB samples, stores separate
-                # component planes, and the plane iterator raises on the first
-                # write.
-                photometric="minisblack",
-                # Threaded compression queues encoded segments with no
-                # backpressure, so peak scales with the whole output instead
-                # of one plane.  See merge_small_labels for the measurements.
-                maxworkers=1,
-                metadata={"axes": axes} if axes else None,
-            )
+        stream_planes_to_tiff(
+            str(output_path),
+            plane_iterator(),
+            labels.shape,
+            out_dtype,
+            metadata={"axes": axes} if axes else None,
+            bigtiff=True,
+            ome=None,
+        )
 
         return (
             label_intensities,

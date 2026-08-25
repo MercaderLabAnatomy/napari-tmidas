@@ -852,7 +852,6 @@ def cellpose_segmentation(
                     data=np.asarray(image),
                     filepath=auto_zarr_path,
                     axes=axes,
-                    zarr_format=3,
                 )
             else:
                 print(
@@ -1683,50 +1682,19 @@ def cellpose_segmentation(
                     )
                     shutil.rmtree(checkpoint_path, ignore_errors=True)
 
-            try:
-                # Prefer v2 metadata where supported; zarr v3 may ignore or
-                # reject v2-only kwargs like zarr_format.
-                checkpoint_open_kwargs = {
-                    "mode": "a",
-                    "shape": checkpoint_shape,
-                    "chunks": checkpoint_chunks,
-                    "dtype": np.uint32,
-                }
-                try:
-                    zarr_major = int(str(getattr(zarr, "__version__", "2")).split(".")[0])
-                except Exception:
-                    zarr_major = 2
-                if zarr_major < 3:
-                    checkpoint_open_kwargs["zarr_format"] = 2
-                    checkpoint_open_kwargs["dimension_separator"] = "/"
-
-                checkpoint = zarr.open_array(
-                    checkpoint_path,
-                    **checkpoint_open_kwargs,
-                )
-            except TypeError:
-                # Older/newer zarr APIs may not accept zarr_format or
-                # dimension_separator in this call signature.
-                checkpoint = zarr.open_array(
-                    checkpoint_path,
-                    mode="a",
-                    shape=checkpoint_shape,
-                    chunks=checkpoint_chunks,
-                    dtype=np.uint32,
-                )
-            except ValueError as exc:
-                # zarr v3 raises when dimension_separator is provided without
-                # V2 format; retry with default chunk key encoding.
-                if "dimension_separator" in str(exc):
-                    checkpoint = zarr.open_array(
-                        checkpoint_path,
-                        mode="a",
-                        shape=checkpoint_shape,
-                        chunks=checkpoint_chunks,
-                        dtype=np.uint32,
-                    )
-                else:
-                    raise
+            # zarr>=3 is a hard requirement of this package and defaults to
+            # v3, so the checkpoint follows suit.  The v2 branch that used to
+            # live here could only fire on a zarr too old to install, and the
+            # two retries below it existed solely to drop the v2-only kwargs
+            # (zarr_format, dimension_separator) that branch had added — with
+            # those gone, both retried with arguments identical to the try.
+            checkpoint = zarr.open_array(
+                checkpoint_path,
+                mode="a",
+                shape=checkpoint_shape,
+                chunks=checkpoint_chunks,
+                dtype=np.uint32,
+            )
             checkpoint.attrs["run_signature"] = run_signature_json
             completed_slabs = int(checkpoint.attrs.get("completed_slabs", 0))
             completed_slabs = max(0, min(completed_slabs, selected_count))

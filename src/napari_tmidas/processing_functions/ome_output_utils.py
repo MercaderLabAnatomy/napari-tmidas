@@ -7,6 +7,13 @@ from typing import Any, Optional
 import numpy as np
 import tifffile
 
+# Upper bound on how much of a lazy result is materialized at once when
+# streaming it to disk.  Peak RAM for such a write is a small multiple of this
+# block -- the threaded scheduler decompresses several source chunks
+# concurrently to fill one, measured at ~7x -- but it stays independent of how
+# large the full output is.  Size it against available RAM with that in mind.
+STREAM_BLOCK_BYTES = 256 * 1024 * 1024
+
 
 def _read_root_attrs(source_path: str) -> dict:
     attrs = {}
@@ -116,6 +123,132 @@ def _extract_source_physical_scale(source_path: Optional[str], axes: str) -> dic
     return {}
 
 
+def _array_nbytes(array, dtype=None) -> int:
+    """Dense size of `array` in bytes, without materializing it."""
+    itemsize = np.dtype(dtype if dtype is not None else array.dtype).itemsize
+    return int(np.prod(array.shape, dtype=np.int64)) * itemsize
+
+
+def _compute_block(array, dtype, max_workers=None):
+    """
+    Materialize one lazy block, optionally bounding scheduler concurrency.
+
+    A byte budget bounds the *result* of a block, not what producing it costs.
+    Where a task inflates its input -- CLAHE's equalize_adapthist works in
+    float64 and peaks at 30-150x its block -- Dask's threaded scheduler
+    running one task per core multiplies that by the core count.  Functions
+    that expensive declare `max_dask_workers` and get it passed through here.
+    `num_workers` is passed per-compute rather than set on the global
+    dask.config, which several files processing concurrently would race on.
+    """
+    if max_workers and hasattr(array, "compute"):
+        block = array.compute(scheduler="threads", num_workers=max_workers)
+    else:
+        block = np.asarray(array)
+    return block.astype(dtype, copy=False)
+
+
+def iter_planes_blockwise(array, dtype, budget_bytes, max_workers=None):
+    """
+    Yield `array` as contiguous YX planes in C order, materializing at most
+    ~`budget_bytes` at a time.
+
+    Descends the leading axes until a sub-block fits the budget, computes that
+    block in one go, then yields its planes.  Computing whole blocks rather
+    than individual planes keeps the number of Dask graph executions down --
+    slicing one plane at a time re-executes the whole containing block for
+    every plane in it, so a 4-block/32-plane array runs the graph 33 times
+    instead of 5 -- while still bounding resident memory by the block size.
+    """
+    if array.ndim <= 2:
+        yield np.ascontiguousarray(_compute_block(array, dtype, max_workers))
+        return
+
+    if _array_nbytes(array, dtype) <= budget_bytes:
+        block = _compute_block(array, dtype, max_workers)
+        for plane in block.reshape(-1, *block.shape[-2:]):
+            # Copy: the block is released once this loop ends, and tifffile
+            # may still hold queued planes for compression at that point.
+            # `copy` defaults to C order, so the result is contiguous.
+            yield plane.copy()
+        return
+
+    for i in range(array.shape[0]):
+        yield from iter_planes_blockwise(
+            array[i], dtype, budget_bytes, max_workers
+        )
+
+
+def iter_planes_for_write(array, dtype, budget_bytes=STREAM_BLOCK_BYTES):
+    """
+    Yield `array` as YX planes, traversing it the way its backend wants.
+
+    A Dask input has to go block by block: slicing it one plane at a time
+    re-executes the whole containing block for every plane in it, so a stack
+    chunked one timepoint per block would relabel that timepoint once per Z
+    slice.  A store-backed array (zarr) has no such recompute -- reading a
+    plane is just reading its chunks -- so it stays plane by plane, which
+    bounds peak by a single plane instead of by the block budget.
+    """
+    if hasattr(array, "compute"):
+        yield from iter_planes_blockwise(array, dtype, budget_bytes)
+        return
+
+    lead_shape = tuple(array.shape)[:-2]
+    if not lead_shape:
+        yield np.asarray(array, dtype=dtype)
+        return
+    for lead_idx in np.ndindex(*lead_shape):
+        yield np.asarray(array[lead_idx], dtype=dtype)
+
+
+def stream_planes_to_tiff(
+    output_path: str,
+    planes,
+    shape,
+    dtype,
+    metadata: Optional[dict] = None,
+    bigtiff: bool = False,
+    ome: Optional[bool] = True,
+) -> str:
+    """
+    Write a TIFF from an iterator of YX planes, never holding it whole.
+
+    `planes` is consumed lazily, so a result far larger than RAM can be
+    written as long as the caller yields one plane (or block of planes) at a
+    time.  `shape` and `dtype` describe the *full* output, since tifffile
+    cannot infer them from a generator.  `ome=None` leaves the choice to
+    tifffile, which turns OME on for a ``.ome.tif`` extension.
+
+    Two of the kwargs below are load-bearing and must not be dropped:
+
+    ``photometric="minisblack"`` -- without it tifffile reads an axis of
+    length 3 or 4 (4 z-slices, say) as RGB samples and stores the stack as
+    separate component planes, which breaks the plane iterator.
+
+    ``maxworkers=1`` -- threaded compression drains the iterator as fast as it
+    can and queues the *encoded* segments with no backpressure, so peak scales
+    with the whole output rather than one block: measured 545 MB vs 3 MB on a
+    48-block write, and unbounded on the multi-GB stacks this path exists for.
+    tifffile enables threading by heuristic once a write looks big enough (the
+    cliff falls between 32 and 36 blocks), which is exactly when it hurts.
+    Costs ~2x write time.
+    """
+    tifffile.imwrite(
+        output_path,
+        data=planes,
+        shape=tuple(int(s) for s in shape),
+        dtype=np.dtype(dtype),
+        ome=ome,
+        metadata=metadata,
+        compression="zlib",
+        photometric="minisblack",
+        bigtiff=bigtiff,
+        maxworkers=1,
+    )
+    return output_path
+
+
 def write_labels_with_source_metadata(
     labels: Any,
     source_path: Optional[str],
@@ -132,6 +265,25 @@ def write_labels_with_source_metadata(
         from ome_zarr.scale import Scaler
         from ome_zarr.writer import write_image
         import zarr
+
+        # write_image() falls back to da.from_array() for anything that is not
+        # already a Dask array, and that auto-chunks to ~128 MiB with no
+        # regard for the array's own on-disk layout.  Peak is then fixed at
+        # roughly one such chunk per Dask thread (~4 GB on a large stack) and
+        # the caller has no way to bound the write, however finely the source
+        # is chunked; on an array below the auto target it is a single
+        # whole-stack chunk, which is what the 1.61x-vs-0.37x measurement saw.
+        # Wrapping with the array's own chunking restores that control, so the
+        # write goes through da.store block by block.  numpy input is left
+        # alone: it is already resident, and one chunk is right for it.
+        if (
+            not isinstance(labels, np.ndarray)
+            and hasattr(labels, "chunks")
+            and not hasattr(labels, "compute")
+        ):
+            import dask.array as da
+
+            labels = da.from_array(labels, chunks=labels.chunks)
 
         attrs = _read_root_attrs(source_path) if source_path else {}
         multiscales = _get_multiscales(attrs)
@@ -306,25 +458,14 @@ def write_labels_with_source_metadata(
                 bigtiff=use_bigtiff,
             )
         else:
-            # For array-like backends (e.g. zarr.Array) stream YX planes via a
-            # generator so the full volume is never materialized in RAM.
-            def _iter_planes():
-                lead_shape = labels_shape[:-2]
-                if not lead_shape:
-                    yield np.asarray(labels, dtype=labels_dtype)
-                    return
-                for lead_idx in np.ndindex(*lead_shape):
-                    yield np.asarray(labels[lead_idx], dtype=labels_dtype)
-
-            tifffile.imwrite(
+            # For array-like backends (zarr.Array, Dask) stream YX planes so
+            # the full volume is never materialized in RAM.
+            stream_planes_to_tiff(
                 tmp_output_path,
-                data=_iter_planes(),
-                shape=labels_shape,
-                dtype=labels_dtype,
-                ome=True,
+                iter_planes_for_write(labels, labels_dtype),
+                labels_shape,
+                labels_dtype,
                 metadata=ome_metadata,
-                compression="zlib",
-                photometric="minisblack",
                 bigtiff=use_bigtiff,
             )
 

@@ -133,10 +133,11 @@ def _stream_merge_small_labels(
 
     Returns the path written.
     """
-    import tifffile
-
     from napari_tmidas.processing_functions.intensity_label_filter import (
         _PlaneReader,
+    )
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        stream_planes_to_tiff,
     )
 
     dim_hint = str(dim_order).upper()
@@ -200,27 +201,15 @@ def _stream_merge_small_labels(
         print(
             f"💾 Writing {os.path.basename(str(output_path))} ({labels.dtype})"
         )
-        with tifffile.TiffWriter(str(output_path), bigtiff=True) as writer:
-            writer.write(
-                plane_iterator(),
-                shape=shape,
-                dtype=labels.dtype,
-                compression="zlib",
-                # Without this, tifffile reads a leading axis of length 3 or 4
-                # (e.g. 4 z-slices) as RGB samples and stores the stack as
-                # separate component planes, breaking the plane iterator.
-                photometric="minisblack",
-                # Threaded compression drains the iterator as fast as it can
-                # and queues the *encoded* segments, with no backpressure, so
-                # peak scales with the whole output rather than one block:
-                # measured 545 MB vs 3 MB on a 48-block write, and unbounded
-                # on the multi-GB stacks this streaming path exists for.
-                # tifffile enables threading by heuristic once a write looks
-                # big enough (the cliff falls between 32 and 36 blocks here),
-                # which is exactly when it hurts.  Costs ~2x write time.
-                maxworkers=1,
-                metadata={"axes": axes} if axes else None,
-            )
+        stream_planes_to_tiff(
+            str(output_path),
+            plane_iterator(),
+            shape,
+            labels.dtype,
+            metadata={"axes": axes} if axes else None,
+            bigtiff=True,
+            ome=None,
+        )
 
         print(
             f"✅ {os.path.basename(str(output_path))}: "

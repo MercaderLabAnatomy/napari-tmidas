@@ -106,10 +106,11 @@ def _stream_remove_small_labels(
 
     Returns the path written.
     """
-    import tifffile
-
     from napari_tmidas.processing_functions.intensity_label_filter import (
         _PlaneReader,
+    )
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        stream_planes_to_tiff,
     )
 
     with _PlaneReader(source_path) as labels:
@@ -188,22 +189,15 @@ def _stream_remove_small_labels(
 
         axes = {2: "YX", 3: "ZYX", 4: "TZYX", 5: "TCZYX"}.get(ndim)
         print(f"💾 Writing {os.path.basename(str(output_path))} ({out_dtype})")
-        with tifffile.TiffWriter(str(output_path), bigtiff=True) as writer:
-            writer.write(
-                plane_iterator(),
-                shape=shape,
-                dtype=out_dtype,
-                compression="zlib",
-                # Without this, tifffile reads a leading axis of length 3 or 4
-                # (e.g. 4 z-slices) as RGB samples and stores the stack as
-                # separate component planes, which breaks the plane iterator.
-                photometric="minisblack",
-                # Threaded compression queues encoded segments with no
-                # backpressure, so peak scales with the whole output instead
-                # of one plane.  See merge_small_labels for the measurements.
-                maxworkers=1,
-                metadata={"axes": axes} if axes else None,
-            )
+        stream_planes_to_tiff(
+            str(output_path),
+            plane_iterator(),
+            shape,
+            out_dtype,
+            metadata={"axes": axes} if axes else None,
+            bigtiff=True,
+            ome=None,
+        )
 
         print(
             f"✅ {os.path.basename(str(output_path))}: "

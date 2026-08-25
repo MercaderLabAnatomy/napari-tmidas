@@ -149,8 +149,15 @@ def test_distributed_kept_for_non_z_time_series(tmp_path, monkeypatch):
     )
 
 
-def test_distributed_auto_conversion_requests_zarr_v3(tmp_path, monkeypatch):
-    """Non-zarr distributed auto-conversion should request zarr v3 output."""
+def test_distributed_auto_conversion_writes_zarr_v3(tmp_path, monkeypatch):
+    """
+    Non-zarr distributed auto-conversion must go through the v3 writer.
+
+    This used to assert the call passed zarr_format=3.  save_as_zarr no
+    longer takes that argument — it writes v3 unconditionally — so what is
+    left to pin is that the conversion still routes through it rather than
+    opening a store itself with whatever default is in scope.
+    """
     conversion_calls = []
 
     fake_module = type(sys)("napari_tmidas._file_selector")
@@ -181,7 +188,11 @@ def test_distributed_auto_conversion_requests_zarr_v3(tmp_path, monkeypatch):
     )
 
     assert len(conversion_calls) == 1
-    assert conversion_calls[0].get("zarr_format") == 3
+    assert "zarr_format" not in conversion_calls[0], (
+        "save_as_zarr is v3-only; a zarr_format argument would mean the v2 "
+        "option came back"
+    )
+    assert conversion_calls[0].get("filepath", "").endswith(".zarr")
 
 
 def test_direct_zarr_output_preserves_source_multiscales_lightweight(

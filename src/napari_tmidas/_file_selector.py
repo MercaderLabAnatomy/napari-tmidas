@@ -1010,7 +1010,6 @@ def save_as_zarr(
     axes: str = "TCZYX",
     scale: tuple = None,
     chunks: tuple = "auto",
-    zarr_format: int = 3,
 ) -> None:
     """
     Save data as OME-Zarr format with metadata
@@ -1027,8 +1026,11 @@ def save_as_zarr(
         Physical scale for each dimension
     chunks : tuple or str
         Chunk size for zarr storage, 'auto' for automatic chunking
-    zarr_format : int
-        Zarr format version for output metadata (2 or 3)
+
+    Always writes Zarr v3.  The package requires zarr>=3, whose own default
+    is v3, so a v2 branch here only existed to produce output older than
+    anything this code can be run with.  Reading v2 is unaffected — sources
+    written by other tools are still opened as they always were.
     """
 
     try:
@@ -1042,18 +1044,13 @@ def save_as_zarr(
                 "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
             )
 
-        if zarr_format not in (2, 3):
-            raise ValueError(
-                f"Unsupported zarr_format={zarr_format}. Use 2 or 3."
-            )
-
         # Ensure filepath ends with .zarr
         if not filepath.endswith(".zarr"):
             filepath = filepath + ".zarr"
 
         # Create zarr store
         store = parse_url(filepath, mode="w").store
-        root = zarr.group(store=store, zarr_format=zarr_format)
+        root = zarr.group(store=store, zarr_format=3)
 
         # Infer axes if not provided
         if not axes or len(axes) != data.ndim:
@@ -1090,26 +1087,22 @@ def save_as_zarr(
         # Compress zarr v3 output with zstd: it writes several times faster
         # than gzip -6 at a comparable ratio, and is a core zarr v3 codec so
         # every v3 reader understands it.  Gzip stays as the fallback.
-        if zarr_format == 3:
-            _storage_opts: dict = {"chunks": chunks}
-            for _codec_path, _level in (
-                ("ZstdCodec", 3),
-                ("GzipCodec", 6),
-            ):
-                try:
-                    _codec = getattr(
-                        importlib.import_module("zarr.codecs"), _codec_path
-                    )
-                    _storage_opts["compressors"] = [_codec(level=_level)]
-                    break
-                except (ImportError, AttributeError, TypeError):
-                    continue  # no compression if no codec is available
-        else:
-            _storage_opts = {"chunks": chunks}
+        _storage_opts: dict = {"chunks": chunks}
+        for _codec_path, _level in (
+            ("ZstdCodec", 3),
+            ("GzipCodec", 6),
+        ):
+            try:
+                _codec = getattr(
+                    importlib.import_module("zarr.codecs"), _codec_path
+                )
+                _storage_opts["compressors"] = [_codec(level=_level)]
+                break
+            except (ImportError, AttributeError, TypeError):
+                continue  # no compression if no codec is available
 
         print(
             f"Saving Zarr: shape={data.shape}, axes={axes}, chunks={chunks}"
-            f", zarr_format={zarr_format}"
         )
 
         # Write as OME-Zarr
@@ -1136,47 +1129,20 @@ def save_as_zarr(
                 "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
             )
 
-        if zarr_format not in (2, 3):
-            raise ValueError(
-                f"Unsupported zarr_format={zarr_format}. Use 2 or 3."
-            )
-
         if chunks == "auto":
             chunks = True  # Let zarr decide
 
         try:
-            if zarr_format == 2:
-                arr = zarr.open_array(
-                    filepath,
-                    mode="w",
-                    shape=data.shape,
-                    dtype=data.dtype,
-                    chunks=chunks,
-                    zarr_format=2,
-                )
-                arr[:] = data
-            else:
-                from zarr.codecs import ZstdCodec as _ZstdCodec
+            from zarr.codecs import ZstdCodec as _ZstdCodec
 
-                zarr.save(
-                    filepath,
-                    data,
-                    chunks=chunks,
-                    compressors=[_ZstdCodec(level=3)],
-                )
+            zarr.save(
+                filepath,
+                data,
+                chunks=chunks,
+                compressors=[_ZstdCodec(level=3)],
+            )
         except Exception:
-            if zarr_format == 2:
-                arr = zarr.open_array(
-                    filepath,
-                    mode="w",
-                    shape=data.shape,
-                    dtype=data.dtype,
-                    chunks=chunks,
-                    zarr_format=2,
-                )
-                arr[:] = data
-            else:
-                zarr.save(filepath, data, chunks=chunks)  # no compression fallback
+            zarr.save(filepath, data, chunks=chunks)  # no compression fallback
         print(f"Saved basic Zarr to: {filepath}")
     except Exception as e:
         raise ValueError(f"Failed to save Zarr: {e}") from e
@@ -2179,7 +2145,7 @@ class ParameterWidget(QWidget):
                 widget.addItem("All channels", "all")
                 widget.setToolTip("Select which channel(s) to process")
                 # Store reference to update later
-                setattr(self, "_channel_selector_widget", widget)
+                self._channel_selector_widget = widget
             elif options:
                 # Use QComboBox for parameters with predefined options
                 widget = QComboBox()
@@ -2379,7 +2345,7 @@ class ParameterWidget(QWidget):
                 label_pattern = None
                 if self.parameters and "label_pattern" in self.parameters:
                     label_pattern = self.parameters["label_pattern"].get("default")
-                
+
                 # Build list of patterns to try: parameter first, then common fallbacks
                 basename = os.path.basename(first_file)
                 patterns_to_try = []
@@ -2388,7 +2354,7 @@ class ParameterWidget(QWidget):
                 # Add fallback patterns if configured pattern doesn't match
                 if not label_pattern or label_pattern not in basename:
                     patterns_to_try.extend(["_labels.tif", "_label.tif"])
-                
+
                 # Try to detect and find raw file
                 for pattern in patterns_to_try:
                     if pattern and pattern in basename:
