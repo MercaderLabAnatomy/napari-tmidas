@@ -434,7 +434,16 @@ def _write_tczyx_ome_zarr(zarr_path, data):
                 {"name": "y", "type": "space"},
                 {"name": "x", "type": "space"},
             ],
-            "datasets": [{"path": "0"}],
+            "datasets": [
+                {
+                    "path": "0",
+                    # Required by NGFF 0.4; napari-ome-zarr >= 0.10 raises
+                    # AttributeError on a dataset that omits them.
+                    "coordinateTransformations": [
+                        {"type": "scale", "scale": [1.0] * data.ndim}
+                    ],
+                }
+            ],
         }
     ]
 

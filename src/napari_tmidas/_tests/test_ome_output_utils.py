@@ -252,11 +252,12 @@ class TestZarrOutputStreaming:
         pytest.importorskip("dask")
         import tracemalloc
 
-        peaks = {}
+        peaks, dense = {}, {}
         for n_timepoints in (10, 40):
             case = tmp_path / f"t{n_timepoints}"
             case.mkdir()
             shape = (n_timepoints, 4, 128, 128)
+            dense[n_timepoints] = int(np.prod(shape)) * 4  # uint32
             buf = self._buffer(case, shape, (1, 1) + shape[2:])
             source = self._source(case, shape)
 
@@ -270,9 +271,27 @@ class TestZarrOutputStreaming:
             finally:
                 tracemalloc.stop()
 
-        assert peaks[40] < peaks[10] * 1.5, (
-            f"peak tracked the stack: {peaks[10]/1e6:.1f} MB at 10 "
-            f"timepoints vs {peaks[40]/1e6:.1f} MB at 40"
+        # What "does not grow with the stack" has to mean here is that the
+        # *marginal* peak per extra timepoint is ~0.  Comparing the two peaks
+        # directly is the obvious formulation and a bad one: the constant
+        # overhead of the write dominates the measurement and varies with the
+        # dask/zarr build, so one healthy streaming write measured a flat
+        # 5.3 MB on the dev machine and 0.9 -> 1.4 MB on macOS CI -- and a
+        # `peaks[40] < peaks[10] * 1.5` bound failed on the latter purely from
+        # that noise.  Bounding peak as a fraction of the stack is no better,
+        # for the same reason: 0.5x passes on CI and fails on the dev machine.
+        #
+        # Marginal cost is immune to both.  A write that materialised the
+        # stack spends ~1 byte of peak per extra byte of data; streaming
+        # spends ~0 (measured -0.03 dev, 0.06 macOS CI), so 0.25 keeps ~4x
+        # headroom over the worst seen while still failing loudly if this
+        # ever starts holding the stack.
+        marginal = (peaks[40] - peaks[10]) / (dense[40] - dense[10])
+        assert marginal < 0.25, (
+            f"peak grew {marginal:.2f} bytes per extra byte of stack "
+            f"({peaks[10]/1e6:.1f} -> {peaks[40]/1e6:.1f} MB as the stack "
+            f"went {dense[10]/1e6:.1f} -> {dense[40]/1e6:.1f} MB); a "
+            f"streaming write should spend ~0"
         )
 
     def test_peak_tracks_the_arrays_own_chunking(self, tmp_path):

@@ -573,7 +573,23 @@ class TestConvpaintStreamingAndGpuDistribution:
                         {
                             "version": "0.4",
                             "axes": [{"name": a} for a in axes],
-                            "datasets": [{"path": "0"}],
+                            "datasets": [
+                                {
+                                    "path": "0",
+                                    # Required by NGFF 0.4, and load-bearing:
+                                    # napari-ome-zarr >= 0.10 builds the layer
+                                    # affine from these and dereferences it
+                                    # unguarded, so a dataset without them
+                                    # raises AttributeError instead of
+                                    # loading.  0.8 tolerated the omission.
+                                    "coordinateTransformations": [
+                                        {
+                                            "type": "scale",
+                                            "scale": [1.0] * len(axes),
+                                        }
+                                    ],
+                                }
+                            ],
                         }
                     ]
                 }

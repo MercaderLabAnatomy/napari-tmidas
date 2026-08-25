@@ -383,7 +383,14 @@ def load_zarr_with_napari_ome_zarr(
                 )
             return None
 
-    except (ImportError, ValueError, TypeError, OSError) as e:
+    # AttributeError belongs here: napari-ome-zarr >= 0.10 builds the layer
+    # affine from datasets[].coordinateTransformations and dereferences the
+    # result unguarded, so a source that omits them -- legal in practice,
+    # and common in older acquisitions -- raises AttributeError rather than
+    # one of the errors below.  Without it that escapes as a hard failure
+    # instead of falling back to the basic zarr reader, which loads such a
+    # source fine.  0.8 returned an identity affine and never raised.
+    except (AttributeError, ImportError, ValueError, TypeError, OSError) as e:
         if verbose:
             print(f"napari-ome-zarr: Failed to load {filepath}: {e}")
             import traceback
@@ -1339,7 +1346,13 @@ def load_image_file(
                             f"Loaded {layer_count} layers from OME-Zarr"
                         )
                     return layer_data_list
-            except (ImportError, ValueError, TypeError, OSError) as e:
+            except (
+                AttributeError,  # see load_zarr_with_napari_ome_zarr
+                ImportError,
+                ValueError,
+                TypeError,
+                OSError,
+            ) as e:
                 print(
                     f"napari-ome-zarr reader failed: {e}, falling back to basic zarr loading"
                 )
@@ -1666,7 +1679,13 @@ class ProcessedFilesTableWidget(QTableWidget):
                         print(
                             "napari-ome-zarr returned no layers, falling back to manual loading"
                         )
-                except (ImportError, ValueError, TypeError, OSError) as e:
+                except (
+                    AttributeError,  # see load_zarr_with_napari_ome_zarr
+                    ImportError,
+                    ValueError,
+                    TypeError,
+                    OSError,
+                ) as e:
                     print(
                         f"napari-ome-zarr failed: {e}, falling back to manual loading"
                     )
@@ -2034,7 +2053,13 @@ class ProcessedFilesTableWidget(QTableWidget):
                         print(
                             "napari-ome-zarr returned no layers for processed image, falling back"
                         )
-                except (ImportError, ValueError, TypeError, OSError) as e:
+                except (
+                    AttributeError,  # see load_zarr_with_napari_ome_zarr
+                    ImportError,
+                    ValueError,
+                    TypeError,
+                    OSError,
+                ) as e:
                     print(
                         f"napari-ome-zarr failed for processed image: {e}, falling back"
                     )

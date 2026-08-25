@@ -4,6 +4,7 @@ import tempfile
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 
 from napari_tmidas._file_selector import (
     FileResultsWidget,
@@ -122,3 +123,67 @@ class TestFileSelector:
         dummy.thread_count.setVisible.assert_called_once_with(True)
         dummy.thread_count.setEnabled.assert_called_once_with(True)
         dummy.thread_count.setValue.assert_not_called()
+
+
+class TestOmeZarrReaderFallback:
+    """
+    A source the napari-ome-zarr reader chokes on must fall back, not crash.
+
+    napari-ome-zarr >= 0.10 builds the layer affine from each dataset's
+    coordinateTransformations and dereferences the result unguarded, so a
+    source that omits them raises AttributeError out of the reader.  That was
+    not one of the errors this load path caught, so it escaped as a hard
+    failure even though the basic zarr reader handles such a source fine.
+    """
+
+    @staticmethod
+    def _zarr_without_transforms(path, data):
+        import json
+
+        import zarr
+
+        root = zarr.open_group(str(path), mode="w", zarr_format=2)
+        arr = root.create_array(
+            "0", shape=data.shape, chunks=data.shape, dtype=str(data.dtype)
+        )
+        arr[:] = data
+        (path / ".zattrs").write_text(
+            json.dumps(
+                {
+                    "multiscales": [
+                        {
+                            "version": "0.4",
+                            "axes": [{"name": a} for a in "tzyx"],
+                            # Deliberately omitted, which is what makes the
+                            # reader raise on >= 0.10.
+                            "datasets": [{"path": "0"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+    def test_reader_attributeerror_falls_back(self, tmp_path, monkeypatch):
+        """The load survives the reader raising, and returns the pixels."""
+        pytest.importorskip("zarr")
+        import napari_tmidas._file_selector as fs
+
+        data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
+        src = tmp_path / "legacy.zarr"
+        self._zarr_without_transforms(src, data)
+
+        def exploding_reader(_filepath):
+            def _read(_path):
+                raise AttributeError(
+                    "'NoneType' object has no attribute 'scale'"
+                )
+
+            return _read
+
+        monkeypatch.setattr(fs, "OME_ZARR_AVAILABLE", True)
+        monkeypatch.setattr(fs, "napari_get_reader", exploding_reader)
+
+        loaded = fs.load_image_file(str(src))
+
+        assert loaded is not None, "reader failure was not survived"
+        np.testing.assert_array_equal(np.asarray(loaded), data)
