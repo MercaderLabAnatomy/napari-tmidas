@@ -1,13 +1,14 @@
 
 # napari-tmidas
 
-[![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/macromeer/napari-tmidas/raw/main/LICENSE)
+[![License BSD-3](https://img.shields.io/pypi/l/napari-tmidas.svg?color=green)](https://github.com/MercaderLabAnatomy/napari-tmidas/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/napari-tmidas.svg?color=green)](https://pypi.org/project/napari-tmidas)
 [![Supported Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://python.org)
 [![Downloads](https://static.pepy.tech/badge/napari-tmidas)](https://pepy.tech/project/napari-tmidas)
 [![GitHub stars](https://badgen.net/github/stars/MercaderLabAnatomy/napari-tmidas)](https://github.com/MercaderLabAnatomy/napari-tmidas/stargazers)
 [![DOI](https://zenodo.org/badge/943353883.svg)](https://doi.org/10.5281/zenodo.17988815)
-[![tests](https://github.com/macromeer/napari-tmidas/workflows/tests/badge.svg)](https://github.com/macromeer/napari-tmidas/actions)
+[![tests](https://github.com/MercaderLabAnatomy/napari-tmidas/actions/workflows/test_and_deploy.yml/badge.svg?branch=main)](https://github.com/MercaderLabAnatomy/napari-tmidas/actions/workflows/test_and_deploy.yml)
+[![codecov](https://codecov.io/gh/MercaderLabAnatomy/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/MercaderLabAnatomy/napari-tmidas)
 
 
 **Need fast batch processing for confocal & whole-slide microscopy images of biological cells and tissues?**

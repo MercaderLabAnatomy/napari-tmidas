@@ -1,0 +1,25 @@
+# https://docs.codecov.com/docs/codecovyml-reference
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        # Small unavoidable drift between platforms in the matrix.
+        threshold: 1%
+    patch:
+      default:
+        target: 70%
+        threshold: 5%
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: true
+
+ignore:
+  - "src/napari_tmidas/_tests/**"
+  - "src/napari_tmidas/_version.py"
+  # Env managers shell out to conda/pip to build isolated environments
+  # for the optional deep-learning backends. There is no meaningful way
+  # to exercise them in CI, and counting them makes the headline number
+  # describe subprocess plumbing rather than the analysis code.
+  - "src/napari_tmidas/processing_functions/*_env_manager.py"
