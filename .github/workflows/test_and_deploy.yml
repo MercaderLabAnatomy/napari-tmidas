@@ -10,11 +10,26 @@ on:
       - npe2
     tags:
       - "v*" # Push events to matching v*, i.e. v1.0, v20.15.10
+    # A docs-only push costs the same 4-job matrix as a code change, so skip
+    # it here. Deliberately not applied to pull_request: if a required status
+    # check is ever added, a paths-ignore skip leaves it pending forever and
+    # blocks the PR. On push there is nothing to block.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
     branches:
       - main
       - npe2
   workflow_dispatch:
+
+# Pushing several commits in a row used to run a full matrix for each one.
+# Only the newest commit's result matters, so cancel the superseded runs --
+# except on tags, where a cancelled run would abort a release upload.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   test:
