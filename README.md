@@ -139,19 +139,19 @@ Interactive object selection and cropping with SAM2.
 
 ## 📋 TODO
 
-### Memory-Efficient Zarr Streaming
+### Memory-Efficient Streaming
 
-**Current Limitation**: Processing functions pre-allocate full output arrays in memory before writing to zarr. For large TZYX time series (e.g., 100 timepoints × 1024×1024×20), this requires ~8+ GB peak memory even when using zarr output.
+Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 15 functions map their existing body over blocks via the `@chunked` decorator, and 6 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. See [docs/memory_audit.md](docs/memory_audit.md) for the method, the measurements and the gotchas.
 
-**Planned Enhancement**: Implement incremental zarr writing across all processing functions:
-- Process one timepoint at a time
-- Write directly to zarr array on disk
-- Keep only single timepoint in memory (~80 MB vs 8 GB)
-- Maintain OME-Zarr metadata and chunking
+What is left:
 
-**Impact**: Enable processing of arbitrarily large time series limited only by disk space, not RAM. Critical for high-throughput microscopy workflows.
+- **CAREamics denoising and VisCy virtual staining still run dense.** Both allocate the full output array and take the input as a NumPy array. Neither has been audited for real — that needs their dedicated virtualenvs installed.
+- **~14 registered functions still scale linearly with input size.** That is now a known list rather than an unknown one. Each needs either a `@chunked` conversion or a check that it cannot take one: functions using global statistics (`Convert to 8-bit` rescales by the whole-stack min/max) and functions with cross-block topology (`Mirror Labels`) both resist it.
+- **The structural decision.** Dense functions opt into laziness one at a time, by accepting `_source_filepath`. Whether to keep converting them individually or change the worker's contract for all of them at once is still open.
 
-**Affected Functions**: Convpaint prediction, Cellpose segmentation, CAREamics denoising, VisCy virtual staining, Trackastra tracking, and all batch processing operations with zarr output.
+### Other Known Issues
+
+- `Resize Zarr by YX Scale (OME-Zarr native)` imports `zarr.storage.FSStore`, which zarr v3 removed, so the native path raises `ImportError` on every run and silently falls back. Fixing it needs a call on the v3 replacement (`LocalStore`, or `FsspecStore` for remote) and on whether napari-ome-zarr still needs `key_separator="/"` stated.
 
 ## 🤝 Contributing
 
