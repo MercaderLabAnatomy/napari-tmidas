@@ -141,7 +141,7 @@ Interactive object selection and cropping with SAM2.
 
 ### Memory-Efficient Streaming
 
-Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 15 functions map their existing body over blocks via the `@chunked` decorator, and 6 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. See [docs/memory_audit.md](docs/memory_audit.md) for the method, the measurements and the gotchas.
+Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 15 functions map their existing body over blocks via the `@chunked` decorator, and 6 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. The mechanism is documented in [`_chunked.py`](src/napari_tmidas/processing_functions/_chunked.py), and the behaviour is pinned by `TestZarrOutputStreaming`, `TestSplitChannelsStreaming`, `TestLazyTiffLoading`, `TestCLAHEDaskMemory` and `TestRollingBallPerPlane`.
 
 What is left:
 
