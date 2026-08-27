@@ -3,11 +3,14 @@ import tracemalloc
 
 import numpy as np
 import pytest
+import skimage.exposure
 import skimage.morphology
+import skimage.util
 import tifffile
 
 from napari_tmidas.processing_functions.skimage_filters import (
     adaptive_threshold_bright,
+    convert_to_uint8,
     equalize_histogram,
     invert_image,
     _stream_remove_small_labels,
@@ -636,3 +639,150 @@ class TestCLAHEDaskMemory:
 
         tile = _clahe_yx_tile(shape[z_axis], np.dtype(dtype).itemsize)
         assert auto_tile == (min(tile, shape[-2]), min(tile, shape[-1]))
+
+
+class TestConvertToUint8:
+    """
+    ``convert_to_uint8`` hand-rolls ``img_as_ubyte(rescale_intensity(image))``
+    one YX plane at a time to avoid the ~6x peak memory of the obvious
+    implementation.  A hand-rolled numeric path is only safe while it is
+    provably identical to the reference, so these tests pin it to skimage
+    rather than to hardcoded numbers.
+    """
+
+    # The reference the implementation is a memory-optimised rewrite of.
+    # Note the float64 cast: for integer dtypes bare ``rescale_intensity``
+    # stretches to the *dtype* range and ``img_as_ubyte`` then bit-shifts,
+    # which is a different (and lossier) operation than what this function
+    # promises.
+    @staticmethod
+    def _reference(image):
+        return skimage.util.img_as_ubyte(
+            skimage.exposure.rescale_intensity(
+                image.astype(np.float64), out_range=(0.0, 1.0)
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "dtype,low,high",
+        [
+            (np.float64, 0.0, 1.0),
+            (np.float64, -5.0, 37.0),
+            (np.float32, 0.0, 100.0),
+            (np.uint16, 300, 40000),
+            (np.uint8, 10, 200),
+            (np.int16, -3000, 3000),
+        ],
+    )
+    @pytest.mark.parametrize("shape", [(8, 8), (4, 8, 8), (2, 3, 4, 5)])
+    def test_matches_skimage_reference_exactly(self, dtype, low, high, shape):
+        """Every dtype and dimensionality must match the reference bit for bit."""
+        rng = np.random.default_rng(0)
+        if np.issubdtype(np.dtype(dtype), np.integer):
+            image = rng.integers(low, high, shape).astype(dtype)
+        else:
+            image = (rng.random(shape) * (high - low) + low).astype(dtype)
+
+        np.testing.assert_array_equal(
+            convert_to_uint8(image), self._reference(image)
+        )
+
+    def test_half_values_round_identically_to_reference(self):
+        """
+        The implementation's comment claims values landing exactly on .5 round
+        the same way as the reference.  np.rint is round-half-to-even, so this
+        is a real claim and not a tautology: with span 2, the midpoint maps to
+        127.5, which must go to 128 (even) rather than 127.
+        """
+        image = np.array([[0.0, 1.0, 2.0]])
+
+        result = convert_to_uint8(image)
+
+        np.testing.assert_array_equal(result, self._reference(image))
+        np.testing.assert_array_equal(result, np.array([[0, 128, 255]]))
+
+    def test_endpoints_span_full_uint8_range(self):
+        """Rescaling must place the input min at 0 and the input max at 255."""
+        rng = np.random.default_rng(2)
+        image = rng.random((3, 16, 16)) * 42.0 - 5.0
+
+        result = convert_to_uint8(image)
+
+        assert result.min() == 0
+        assert result.max() == 255
+        # The extremes land on the extremes, not merely somewhere near them.
+        assert result[np.unravel_index(image.argmin(), image.shape)] == 0
+        assert result[np.unravel_index(image.argmax(), image.shape)] == 255
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [(0.0, 0), (-5.0, 0), (7.0, 255)],
+    )
+    def test_constant_image(self, value, expected):
+        """
+        A constant image has no span to rescale.  The documented behaviour is
+        that 0 (and anything below it) stays 0 while any positive constant
+        saturates, matching how rescale_intensity clips a degenerate range.
+        """
+        image = np.full((4, 4), value)
+
+        result = convert_to_uint8(image)
+
+        assert result.dtype == np.uint8
+        assert np.all(result == expected)
+
+    def test_constant_integer_image(self):
+        """The constant branch is dtype-independent."""
+        assert np.all(convert_to_uint8(np.full((3, 3), 0, dtype=np.uint8)) == 0)
+        assert np.all(
+            convert_to_uint8(np.full((3, 3), 3, dtype=np.uint8)) == 255
+        )
+
+    def test_one_dimensional_input(self):
+        """
+        ndim < 2 has no leading axes and no YX plane; the whole array is one
+        block.  This is the branch where ``plane_shape`` falls back to the
+        full shape.
+        """
+        image = np.array([0.0, 1.0, 2.0, 3.0])
+
+        result = convert_to_uint8(image)
+
+        np.testing.assert_array_equal(result, self._reference(image))
+
+    def test_shape_and_dtype_preserved(self):
+        """TZYX in, same TZYX out, as uint8."""
+        rng = np.random.default_rng(3)
+        image = rng.random((2, 3, 16, 16)) * 500
+
+        result = convert_to_uint8(image)
+
+        assert result.shape == image.shape
+        assert result.dtype == np.uint8
+
+    def test_peak_memory_stays_near_output_size(self):
+        """
+        The entire reason this function is hand-rolled.  The naive
+        ``img_as_ubyte(rescale_intensity(image))`` builds a full-size float64
+        copy plus temporaries (~6x the input); the plane-at-a-time version
+        should only ever hold the uint8 result plus one float64 YX plane.
+        """
+        rng = np.random.default_rng(4)
+        image = (rng.random((16, 256, 256)) * 1000).astype(np.float32)
+        one_plane = 256 * 256 * 8  # a float64 YX scratch plane
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            convert_to_uint8(image)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        # Output (1 byte/voxel) + one scratch plane, with headroom. The naive
+        # version would need image.nbytes * 2 (float64 copy) or more.
+        budget = image.size + 3 * one_plane
+        assert peak < budget, (
+            f"peak {peak/1e6:.1f} MB exceeds {budget/1e6:.1f} MB on a "
+            f"{image.nbytes/1e6:.1f} MB input"
+        )

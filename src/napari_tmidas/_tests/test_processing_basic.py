@@ -11,6 +11,7 @@ from napari_tmidas.processing_functions.basic import (
     labels_to_binary,
     merge_channels,
     mirror_labels,
+    rgb_to_labels,
     split_tzyx_stack,
 )
 
@@ -592,3 +593,82 @@ class TestBasicProcessing:
         np.testing.assert_array_equal(merged[0], ch1)
         np.testing.assert_array_equal(merged[1], ch2)
         np.testing.assert_array_equal(merged[2], ch3)
+
+
+class TestRgbToLabels:
+    """
+    ``rgb_to_labels`` maps three exact primary colours onto label values.
+    Anything that is not exactly one of those colours must stay background --
+    the mapping is by equality, not by nearest colour or by dominant channel.
+    """
+
+    @staticmethod
+    def _rgb(pixels):
+        return np.array(pixels, dtype=np.uint8)
+
+    def test_primaries_map_to_default_labels(self):
+        image = self._rgb(
+            [
+                [(0, 0, 255), (0, 255, 0)],
+                [(255, 0, 0), (0, 0, 0)],
+            ]
+        )
+
+        result = rgb_to_labels(image)
+
+        np.testing.assert_array_equal(result, [[1, 2], [3, 0]])
+
+    def test_custom_label_values(self):
+        image = self._rgb([[(0, 0, 255), (0, 255, 0), (255, 0, 0)]])
+
+        result = rgb_to_labels(
+            image, blue_label=10, green_label=20, red_label=30
+        )
+
+        np.testing.assert_array_equal(result, [[10, 20, 30]])
+
+    def test_returns_uint32(self):
+        """
+        Label images must be uint32 or napari loads them as a grayscale Image
+        layer instead of a Labels layer.
+        """
+        image = self._rgb([[(255, 0, 0)]])
+
+        assert rgb_to_labels(image).dtype == np.uint32
+
+    def test_near_miss_colours_are_background(self):
+        """
+        Off-by-one colours -- what JPEG compression or any interpolating
+        resize produces -- are not the mapped primaries and must not be
+        silently rounded into a label.
+        """
+        image = self._rgb(
+            [
+                [(0, 0, 254), (1, 255, 0)],
+                [(254, 0, 0), (128, 128, 128)],
+            ]
+        )
+
+        result = rgb_to_labels(image)
+
+        np.testing.assert_array_equal(result, [[0, 0], [0, 0]])
+
+    def test_drops_the_channel_axis(self):
+        """A (Z, Y, X, 3) volume becomes a (Z, Y, X) label volume."""
+        image = np.zeros((4, 5, 6, 3), dtype=np.uint8)
+        image[2, 3, 4] = (0, 255, 0)
+
+        result = rgb_to_labels(image)
+
+        assert result.shape == (4, 5, 6)
+        assert result[2, 3, 4] == 2
+        assert result.sum() == 2
+
+    @pytest.mark.parametrize(
+        "shape",
+        [(4, 4), (4, 4, 4), (4, 4, 1)],
+    )
+    def test_rejects_non_rgb_input(self, shape):
+        """Grayscale, 4-channel and single-channel input are all errors."""
+        with pytest.raises(ValueError, match="RGB"):
+            rgb_to_labels(np.zeros(shape, dtype=np.uint8))

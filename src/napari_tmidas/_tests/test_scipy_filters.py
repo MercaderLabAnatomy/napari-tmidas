@@ -166,3 +166,110 @@ class TestScipyFilters:
             subdivide_labels_3layers(
                 label_image, is_half_body=True, cut_axis=5
             )
+
+
+class TestMedianFilter:
+    """
+    The dimension_order hint decides which axes the median window spans.
+    Getting it wrong blends unrelated timepoints or channels together -- a
+    silent corruption that looks like plausible image data, so these tests
+    check the window shape directly as well as end-to-end behaviour.
+    """
+
+    def test_2d_filters_both_axes(self):
+        image = np.zeros((7, 7), dtype=np.uint8)
+        image[3, 3] = 255  # lone impulse, must be removed by a 3x3 median
+
+        result = scipy_filters.median_filter(image, size=3)
+
+        assert result.shape == image.shape
+        assert result[3, 3] == 0
+
+    def test_tyx_keeps_frames_independent(self):
+        """
+        One bright frame between two dark ones. With a per-frame 2D filter the
+        bright frame keeps its (uniform) value; filtering across T would pull
+        the dark neighbours into it.
+        """
+        image = np.zeros((3, 7, 7), dtype=np.uint8)
+        image[1] = 200
+
+        result = scipy_filters.median_filter(
+            image, size=3, dimension_order="TYX"
+        )
+
+        assert result[1].min() == 200
+        assert result[0].max() == 0
+        assert result[2].max() == 0
+
+    def test_zyx_filters_across_z(self):
+        """ZYX is the one 3D hint that *should* span the leading axis."""
+        image = np.zeros((7, 7, 7), dtype=np.uint8)
+        image[3] = 255  # a single bright Z slice is an impulse along Z
+
+        result = scipy_filters.median_filter(
+            image, size=3, dimension_order="ZYX"
+        )
+
+        assert result[3].max() == 0
+
+    def test_auto_on_3d_does_not_blend_leading_axis(self):
+        """
+        Auto must assume the last two axes are spatial. Defaulting to a full
+        3D window would mix unrelated frames for anyone who does not set the
+        hint.
+        """
+        image = np.zeros((3, 7, 7), dtype=np.uint8)
+        image[1] = 200
+
+        result = scipy_filters.median_filter(image, size=3)
+
+        assert result[1].min() == 200
+        assert result[0].max() == 0
+
+    @pytest.mark.parametrize(
+        "dimension_order,ndim,expected",
+        [
+            ("YX", 2, (3, 3)),
+            ("Auto", 2, (3, 3)),
+            ("TYX", 3, (1, 3, 3)),
+            ("CYX", 3, (1, 3, 3)),
+            ("ZYX", 3, (3, 3, 3)),
+            ("TCYX", 4, (1, 1, 3, 3)),
+            ("TZYX", 4, (1, 1, 3, 3)),
+            ("ZCYX", 4, (1, 1, 3, 3)),
+            ("TZCYX", 5, (1, 1, 1, 3, 3)),
+            ("TCZYX", 5, (1, 1, 1, 3, 3)),
+            # Unrecognised hints and mismatched ndim fall back to "last two
+            # axes are spatial" rather than raising.
+            ("Auto", 4, (1, 1, 3, 3)),
+            ("TYX", 4, (1, 1, 3, 3)),
+            ("nonsense", 3, (1, 3, 3)),
+        ],
+    )
+    def test_size_tuple_branches(self, dimension_order, ndim, expected):
+        assert (
+            scipy_filters._median_filter_size_tuple(dimension_order, ndim, 3)
+            == expected
+        )
+
+    def test_dask_input_returns_dask_and_matches_numpy(self):
+        """
+        Dask input takes a separate map_overlap path. It must produce the same
+        answer as the in-memory path, or results silently depend on whether
+        the input happened to be lazy.
+        """
+        da = pytest.importorskip("dask.array")
+        rng = np.random.default_rng(0)
+        image = (rng.random((4, 32, 32)) * 255).astype(np.uint8)
+        lazy = da.from_array(image, chunks=(1, 16, 16))
+
+        result = scipy_filters.median_filter(
+            lazy, size=3, dimension_order="TYX"
+        )
+        expected = scipy_filters.median_filter(
+            image, size=3, dimension_order="TYX"
+        )
+
+        assert hasattr(result, "chunks"), "dask input should stay lazy"
+        np.testing.assert_array_equal(np.asarray(result), expected)
