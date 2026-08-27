@@ -57,3 +57,6 @@ ultrack_data/
 
 # Claude Code
 .claude
+
+# graphify knowledge graph output
+graphify-out/
