@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import time
@@ -13,6 +14,53 @@ import tifffile
 # concurrently to fill one, measured at ~7x -- but it stays independent of how
 # large the full output is.  Size it against available RAM with that in mind.
 STREAM_BLOCK_BYTES = 256 * 1024 * 1024
+
+
+_WRITE_IMAGE_ACCEPTS_SCALE: Optional[bool] = None
+
+
+def _write_image_accepts_scale() -> bool:
+    """Whether the installed ome-zarr takes pixel size via ``scale``."""
+    global _WRITE_IMAGE_ACCEPTS_SCALE
+    if _WRITE_IMAGE_ACCEPTS_SCALE is None:
+        try:
+            from ome_zarr.writer import write_image
+
+            _WRITE_IMAGE_ACCEPTS_SCALE = (
+                "scale" in inspect.signature(write_image).parameters
+            )
+        except (ImportError, TypeError, ValueError):
+            _WRITE_IMAGE_ACCEPTS_SCALE = False
+    return _WRITE_IMAGE_ACCEPTS_SCALE
+
+
+def physical_scale_kwargs(scale_transform: Optional[dict], axes: Any) -> dict:
+    """
+    Build the ``write_image()`` keyword that carries physical pixel size.
+
+    ome-zarr 0.18 deprecated ``coordinate_transformations`` in favour of an
+    axis-keyed ``scale`` dict, and it *silently ignores* the old argument
+    rather than raising -- every axis lands in the file as 1.0, so converted
+    images lose their pixel size with nothing in the output to say so.
+    Releases up to 0.16 have no ``scale`` parameter at all, so neither
+    argument works everywhere; pick whichever the installed version honours.
+    """
+    if not scale_transform:
+        return {}
+    scales = scale_transform.get("scale")
+    if not scales:
+        return {}
+
+    legacy = {"coordinate_transformations": [[scale_transform]]}
+    if not _write_image_accepts_scale():
+        return legacy
+
+    axis_names = [str(axis).lower() for axis in (axes or "")]
+    if len(axis_names) != len(scales):
+        # Without one name per value the axes cannot be keyed reliably, and a
+        # misassigned scale is worse than a dropped one.
+        return legacy
+    return {"scale": dict(zip(axis_names, (float(s) for s in scales)))}
 
 
 def _read_root_attrs(source_path: str) -> dict:

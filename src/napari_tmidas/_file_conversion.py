@@ -2173,15 +2173,18 @@ class ConversionWorker(QThread):
                 else base_name
             )
 
+            from napari_tmidas.processing_functions.ome_output_utils import (
+                physical_scale_kwargs,
+            )
+
             # Build proper OME-Zarr coordinate transformations from metadata
             scale_transform = self._build_scale_transform(
                 metadata, axes, image_data.shape
             )
             # Downstream segmentation workflows use full-resolution data only,
             # so write a single-level OME-Zarr (no multiscale pyramid).
-            base_coordinate_transform = (
-                [[scale_transform]] if scale_transform else None
-            )
+            zarr_axes = axes or "zyx"
+            scale_kwargs = physical_scale_kwargs(scale_transform, zarr_axes)
 
             # Save with OME-ZARR including physical metadata
             with ProgressBar():
@@ -2194,10 +2197,10 @@ class ConversionWorker(QThread):
                 write_image(
                     image_data,
                     group=root,
-                    axes=axes or "zyx",
-                    coordinate_transformations=base_coordinate_transform,
+                    axes=zarr_axes,
                     scaler=Scaler(max_layer=0),
                     storage_options={"compressors": [zarr.codecs.ZstdCodec()]},
+                    **scale_kwargs,
                 )
 
             print(

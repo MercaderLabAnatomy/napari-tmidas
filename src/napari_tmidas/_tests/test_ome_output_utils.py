@@ -6,7 +6,9 @@ import pytest
 import tifffile
 import zarr
 
+from napari_tmidas.processing_functions import ome_output_utils
 from napari_tmidas.processing_functions.ome_output_utils import (
+    physical_scale_kwargs,
     write_labels_with_source_metadata,
 )
 
@@ -356,3 +358,67 @@ class TestZarrOutputStreaming:
         group = zarr.open_group(out, mode="r")
         key = list(group.array_keys())[0]
         np.testing.assert_array_equal(np.asarray(group[key]), np.asarray(buf))
+
+
+class TestPhysicalScaleKwargs:
+    """
+    ome-zarr 0.18 ignores `coordinate_transformations` instead of raising, so
+    every converted image silently lost its pixel size.  Both branches are
+    pinned here because only one of them runs on any given install.
+    """
+
+    SCALE = {"type": "scale", "scale": [5.0, 0.5, 0.5]}
+
+    @pytest.fixture
+    def accepts_scale(self, monkeypatch):
+        def _set(value):
+            monkeypatch.setattr(
+                ome_output_utils,
+                "_write_image_accepts_scale",
+                lambda: value,
+            )
+
+        return _set
+
+    def test_new_ome_zarr_gets_an_axis_keyed_dict(self, accepts_scale):
+        accepts_scale(True)
+        assert physical_scale_kwargs(self.SCALE, "zyx") == {
+            "scale": {"z": 5.0, "y": 0.5, "x": 0.5}
+        }
+
+    def test_old_ome_zarr_gets_the_legacy_argument(self, accepts_scale):
+        accepts_scale(False)
+        assert physical_scale_kwargs(self.SCALE, "zyx") == {
+            "coordinate_transformations": [[self.SCALE]]
+        }
+
+    @pytest.mark.parametrize("transform", [None, {}, {"type": "scale"}])
+    def test_absent_scale_adds_no_keyword(self, transform, accepts_scale):
+        accepts_scale(True)
+        assert physical_scale_kwargs(transform, "zyx") == {}
+
+    def test_axis_count_mismatch_does_not_misassign(self, accepts_scale):
+        """Keying three values onto two axes would silently mislabel them."""
+        accepts_scale(True)
+        assert "scale" not in physical_scale_kwargs(self.SCALE, "yx")
+
+    def test_installed_ome_zarr_honours_the_result(self, tmp_path):
+        """End-to-end guard: whichever branch runs here must reach the file."""
+        pytest.importorskip("ome_zarr")
+        from ome_zarr.scale import Scaler
+        from ome_zarr.writer import write_image
+
+        out = str(tmp_path / "scaled.zarr")
+        root = zarr.group(store=out)
+        write_image(
+            np.zeros((4, 16, 16), dtype=np.uint8),
+            group=root,
+            axes="zyx",
+            scaler=Scaler(max_layer=0),
+            **physical_scale_kwargs(self.SCALE, "zyx"),
+        )
+
+        doc = json.loads((Path(out) / "zarr.json").read_text())
+        dataset = doc["attributes"]["ome"]["multiscales"][0]["datasets"][0]
+        written = dataset["coordinateTransformations"][0]["scale"]
+        assert written == pytest.approx([5.0, 0.5, 0.5])

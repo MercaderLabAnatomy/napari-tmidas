@@ -195,6 +195,7 @@ from napari_tmidas.processing_functions.ome_output_utils import (
     _array_nbytes,
     _extract_source_physical_scale,
     iter_planes_blockwise,
+    physical_scale_kwargs,
     stream_planes_to_tiff,
     write_labels_with_source_metadata,
 )
@@ -1215,11 +1216,9 @@ def save_as_zarr(
             image=data,
             group=root,
             axes=axes,
-            coordinate_transformations=(
-                [[scale_transform]] if scale_transform else None
-            ),
             scaler=Scaler(max_layer=0),
             storage_options=_storage_opts,
+            **physical_scale_kwargs(scale_transform, axes),
         )
 
         print(f"Successfully saved OME-Zarr to: {filepath}")
