@@ -1,4 +1,7 @@
 # src/napari_tmidas/_tests/test_processing_basic.py
+import os
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -672,3 +675,157 @@ class TestRgbToLabels:
         """Grayscale, 4-channel and single-channel input are all errors."""
         with pytest.raises(ValueError, match="RGB"):
             rgb_to_labels(np.zeros(shape, dtype=np.uint8))
+
+
+class TestMergeChannelsStreamingPath:
+    """
+    When the worker injects ``_output_folder`` and ``_output_suffix``,
+    merge_channels stops returning an array and instead writes the merged file
+    itself, streaming through a temporary Zarr store so peak RAM stays at one
+    slice. That path was untested, and it is the one that actually runs in the
+    application -- the ndarray return is documented as the legacy/test path.
+    """
+
+    @staticmethod
+    def _write_channels(folder, shape, n_channels=3, dtype=np.uint16):
+        """One file per channel; channel c is filled with the value c."""
+        tifffile = pytest.importorskip("tifffile")
+        paths = []
+        for c in range(1, n_channels + 1):
+            p = folder / f"sample_channel_{c}.tif"
+            tifffile.imwrite(
+                p, np.full(shape, c, dtype=dtype), photometric="minisblack"
+            )
+            paths.append(p)
+        return paths
+
+    def test_streamed_output_matches_the_in_memory_merge(self, tmp_path):
+        """
+        The two paths must agree exactly. If they diverge, results depend on
+        whether the worker happened to pass an output folder.
+        """
+        tifffile = pytest.importorskip("tifffile")
+        src = tmp_path / "in"
+        src.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        paths = self._write_channels(src, (5, 8, 9))
+        primary = tifffile.imread(str(paths[0]))
+
+        dense = merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+        )
+        written = merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+            _output_folder=str(out), _output_suffix="_merged",
+        )
+
+        assert isinstance(written, str), (
+            "with an output folder the function must save and return the path"
+        )
+        assert os.path.exists(written)
+        np.testing.assert_array_equal(tifffile.imread(written), dense)
+
+    def test_streamed_output_preserves_channel_order_and_dtype(self, tmp_path):
+        tifffile = pytest.importorskip("tifffile")
+        src = tmp_path / "in"
+        src.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        paths = self._write_channels(src, (4, 6, 7), n_channels=3)
+        primary = tifffile.imread(str(paths[0]))
+
+        written = merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+            _output_folder=str(out), _output_suffix="_merged",
+        )
+
+        merged = tifffile.imread(written)
+        assert merged.dtype == np.uint16
+        assert merged.shape == (3, 4, 6, 7)
+        # Channel c was filled with the value c, so order is directly checkable.
+        for c in range(3):
+            assert set(np.unique(merged[c])) == {c + 1}
+
+    def test_streamed_output_lands_in_the_requested_folder(self, tmp_path):
+        tifffile = pytest.importorskip("tifffile")
+        src = tmp_path / "in"
+        src.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        paths = self._write_channels(src, (2, 4, 5))
+        primary = tifffile.imread(str(paths[0]))
+
+        written = merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+            _output_folder=str(out), _output_suffix="_merged",
+        )
+
+        assert Path(written).parent == out
+        assert "_merged" in Path(written).name
+
+    def test_no_temporary_zarr_store_is_left_behind(self, tmp_path):
+        """The intermediate store is a buffer, not an artefact."""
+        tifffile = pytest.importorskip("tifffile")
+        src = tmp_path / "in"
+        src.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        paths = self._write_channels(src, (3, 5, 6))
+        primary = tifffile.imread(str(paths[0]))
+
+        merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+            _output_folder=str(out), _output_suffix="_merged",
+        )
+
+        leftovers = [p.name for p in out.iterdir() if p.suffix == ".zarr"]
+        assert leftovers == []
+
+    def test_missing_filepath_raises(self):
+        """Without a source path there is no folder to find siblings in."""
+        with pytest.raises(ValueError):
+            merge_channels(
+                np.zeros((4, 4), dtype=np.uint16),
+                channel_substring="_channel_",
+            )
+
+    @pytest.mark.parametrize("n_z", [3, 4])
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "The merged CZYX stack is handed to TiffWriter without "
+            "photometric='minisblack', so a Z axis of length 3 or 4 is "
+            "interpreted as RGB(A) samples: the page is tagged PHOTOMETRIC.RGB "
+            "with samplesperpixel=Z. tifffile reads it back correctly from its "
+            "own shaped metadata, which is why a round-trip test misses this, "
+            "but ImageJ, bio-formats and PIL all see a colour image."
+        ),
+    )
+    def test_merged_tiff_is_not_tagged_as_rgb(self, tmp_path, n_z):
+        tifffile = pytest.importorskip("tifffile")
+        src = tmp_path / "in"
+        src.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        paths = self._write_channels(src, (n_z, 6, 7), n_channels=3)
+        primary = tifffile.imread(str(paths[0]))
+
+        written = merge_channels(
+            primary, channel_substring="_channel_",
+            _source_filepath=str(paths[0]),
+            _output_folder=str(out), _output_suffix="_merged",
+        )
+
+        with tifffile.TiffFile(written) as tf:
+            page = tf.pages[0]
+            assert page.samplesperpixel == 1, (
+                f"Z={n_z} was written as {page.samplesperpixel} colour "
+                "samples per pixel"
+            )
+            assert page.photometric == tifffile.PHOTOMETRIC.MINISBLACK
