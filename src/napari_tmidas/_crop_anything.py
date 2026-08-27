@@ -1321,9 +1321,6 @@ class BatchCropAnything:
                 time.sleep(2)
                 for layer in list(self.viewer.layers):
                     if "Propagation Progress" in layer.name:
-                        # Clean up callbacks before removing the layer to prevent cleanup issues
-                        if hasattr(layer, "mouse_drag_callbacks"):
-                            layer.mouse_drag_callbacks.clear()
                         with contextlib.suppress(ValueError):
                             self.viewer.layers.remove(layer)
 
@@ -1418,9 +1415,6 @@ class BatchCropAnything:
         # Remove existing label layer if it exists
         for layer in list(self.viewer.layers):
             if isinstance(layer, Labels) and "Segmentation" in layer.name:
-                # Clean up callbacks before removing the layer to prevent cleanup issues
-                if hasattr(layer, "mouse_drag_callbacks"):
-                    layer.mouse_drag_callbacks.clear()
                 with contextlib.suppress(ValueError):
                     self.viewer.layers.remove(layer)
 
@@ -1432,10 +1426,12 @@ class BatchCropAnything:
         )
 
         # Connect click handler to the label layer for selection and deletion
-        if hasattr(self.label_layer, "mouse_drag_callbacks"):
-            # Clear existing callbacks to avoid duplicates
-            self.label_layer.mouse_drag_callbacks.clear()
-            # Add our click handler
+        # Append only our own handler. Clearing the list to avoid
+        # duplicates also drops the callbacks napari's overlays installed,
+        # and closing the layer then fails.
+        if hasattr(self.label_layer, "mouse_drag_callbacks") and (
+            self._on_label_clicked not in self.label_layer.mouse_drag_callbacks
+        ):
             self.label_layer.mouse_drag_callbacks.append(
                 self._on_label_clicked
             )
@@ -1477,8 +1473,10 @@ class BatchCropAnything:
             )
 
             # Connect points layer mouse click event
-            if hasattr(points_layer, "mouse_drag_callbacks"):
-                points_layer.mouse_drag_callbacks.clear()
+            if hasattr(points_layer, "mouse_drag_callbacks") and (
+                self._on_points_clicked
+                not in points_layer.mouse_drag_callbacks
+            ):
                 points_layer.mouse_drag_callbacks.append(
                     self._on_points_clicked
                 )
@@ -1556,8 +1554,6 @@ class BatchCropAnything:
         """Remove points layer when not in point mode."""
         for layer in list(self.viewer.layers):
             if "Points" in layer.name and "Object" not in layer.name:
-                if hasattr(layer, "mouse_drag_callbacks"):
-                    layer.mouse_drag_callbacks.clear()
                 with contextlib.suppress(ValueError):
                     self.viewer.layers.remove(layer)
 
@@ -2153,9 +2149,6 @@ class BatchCropAnything:
                         time.sleep(2)
                         for layer in list(self.viewer.layers):
                             if "Propagation Progress" in layer.name:
-                                # Clean up callbacks before removing the layer to prevent cleanup issues
-                                if hasattr(layer, "mouse_drag_callbacks"):
-                                    layer.mouse_drag_callbacks.clear()
                                 with contextlib.suppress(ValueError):
                                     self.viewer.layers.remove(layer)
 
@@ -2556,9 +2549,6 @@ class BatchCropAnything:
         # Remove previous point markers
         for layer in list(self.viewer.layers):
             if "Point Prompt" in layer.name:
-                # Clean up callbacks before removing the layer to prevent cleanup issues
-                if hasattr(layer, "mouse_drag_callbacks"):
-                    layer.mouse_drag_callbacks.clear()
                 with contextlib.suppress(ValueError):
                     self.viewer.layers.remove(layer)
 
@@ -2793,9 +2783,6 @@ class BatchCropAnything:
         # Remove any object-specific point layers
         for layer in list(self.viewer.layers):
             if "Points for Object" in layer.name:
-                # Clean up callbacks before removing the layer to prevent cleanup issues
-                if hasattr(layer, "mouse_drag_callbacks"):
-                    layer.mouse_drag_callbacks.clear()
                 with contextlib.suppress(ValueError):
                     self.viewer.layers.remove(layer)
 
@@ -2845,9 +2832,6 @@ class BatchCropAnything:
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
                 if f"Points for Object {label_id}" in layer.name:
-                    # Clean up callbacks before removing the layer to prevent cleanup issues
-                    if hasattr(layer, "mouse_drag_callbacks"):
-                        layer.mouse_drag_callbacks.clear()
                     with contextlib.suppress(ValueError):
                         self.viewer.layers.remove(layer)
 
@@ -2887,9 +2871,6 @@ class BatchCropAnything:
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
                 if f"Points for Object {label_id}" in layer.name:
-                    # Clean up callbacks before removing the layer to prevent cleanup issues
-                    if hasattr(layer, "mouse_drag_callbacks"):
-                        layer.mouse_drag_callbacks.clear()
                     with contextlib.suppress(ValueError):
                         self.viewer.layers.remove(layer)
 
@@ -2956,9 +2937,6 @@ class BatchCropAnything:
                 # Remove previous preview if exists
                 for layer in list(self.viewer.layers):
                     if "Preview" in layer.name:
-                        # Clean up callbacks before removing the layer to prevent cleanup issues
-                        if hasattr(layer, "mouse_drag_callbacks"):
-                            layer.mouse_drag_callbacks.clear()
                         with contextlib.suppress(ValueError):
                             self.viewer.layers.remove(layer)
 
@@ -2984,9 +2962,6 @@ class BatchCropAnything:
             # Remove previous preview if exists
             for layer in list(self.viewer.layers):
                 if "Preview" in layer.name:
-                    # Clean up callbacks before removing the layer to prevent cleanup issues
-                    if hasattr(layer, "mouse_drag_callbacks"):
-                        layer.mouse_drag_callbacks.clear()
                     with contextlib.suppress(ValueError):
                         self.viewer.layers.remove(layer)
 
@@ -3274,9 +3249,6 @@ def create_crop_widget(processor):
 
         # Remove object-specific point layers (these are created dynamically)
         for layer in object_points_layers:
-            # Clean up callbacks before removing the layer to prevent cleanup issues
-            if hasattr(layer, "mouse_drag_callbacks"):
-                layer.mouse_drag_callbacks.clear()
             with contextlib.suppress(ValueError):
                 processor.viewer.layers.remove(layer)
 
