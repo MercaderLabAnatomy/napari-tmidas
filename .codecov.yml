@@ -23,3 +23,83 @@ ignore:
   # to exercise them in CI, and counting them makes the headline number
   # describe subprocess plumbing rather than the analysis code.
   - "src/napari_tmidas/processing_functions/*_env_manager.py"
+
+# ---------------------------------------------------------------------------
+# Components split the headline number by what the code actually does, so a
+# single percentage does not average tensor math against Qt signal plumbing.
+# Components are computed by Codecov from the paths below -- no CI change and
+# no upload flags are needed.
+# ---------------------------------------------------------------------------
+component_management:
+  default_rules:
+    # Components report in the PR comment but do not gate merges. The
+    # "analysis" component below opts out of this and blocks on regression.
+    statuses:
+      - type: project
+        informational: true
+
+  individual_components:
+    # The data path: array math, measurement, and file IO. A silent wrong
+    # answer here is a wrong scientific result, and these are mostly pure
+    # array-in/array-out functions, so tests are cheap. This is the number
+    # worth defending.
+    - component_id: analysis
+      name: analysis
+      paths:
+        - "src/napari_tmidas/processing_functions/**"
+        # Model wrappers sit in the same directory but belong to the
+        # "backends" component below.
+        - "!src/napari_tmidas/processing_functions/careamics_denoising.py"
+        - "!src/napari_tmidas/processing_functions/cellpose_segmentation.py"
+        - "!src/napari_tmidas/processing_functions/convpaint_prediction.py"
+        - "!src/napari_tmidas/processing_functions/sam2_mp4.py"
+        - "!src/napari_tmidas/processing_functions/spotiflow_detection.py"
+        - "!src/napari_tmidas/processing_functions/trackastra_tracking.py"
+        - "!src/napari_tmidas/processing_functions/ultrack_tracking.py"
+        - "!src/napari_tmidas/processing_functions/viscy_virtual_staining.py"
+        # napari's IO hooks are part of the same data path.
+        - "src/napari_tmidas/_reader.py"
+        - "src/napari_tmidas/_writer.py"
+      statuses:
+        # target: auto means this component may never regress, without
+        # guessing a baseline the CI matrix has not published yet. Once the
+        # first run establishes one, swap in an absolute target and raise it
+        # as the thin modules get tests (timepoint_merger, colocalization,
+        # patch_resized_zarrs and torch_labels_to_contours are all under 10%).
+        - type: project
+          target: auto
+          threshold: 1%
+
+    # Wrappers around optional GPU/model backends. Past the import boundary
+    # there is nothing to assert against but a mock, so this is tracked for
+    # visibility rather than held to a target.
+    - component_id: backends
+      name: backends (GPU / model wrappers)
+      paths:
+        - "src/napari_tmidas/processing_functions/careamics_denoising.py"
+        - "src/napari_tmidas/processing_functions/cellpose_segmentation.py"
+        - "src/napari_tmidas/processing_functions/convpaint_prediction.py"
+        - "src/napari_tmidas/processing_functions/sam2_mp4.py"
+        - "src/napari_tmidas/processing_functions/spotiflow_detection.py"
+        - "src/napari_tmidas/processing_functions/trackastra_tracking.py"
+        - "src/napari_tmidas/processing_functions/ultrack_tracking.py"
+        - "src/napari_tmidas/processing_functions/viscy_virtual_staining.py"
+        - "src/napari_tmidas/_sam2_server.py"
+        - "src/napari_tmidas/_sam2_worker.py"
+
+    # Qt widgets: signal/slot wiring, layout, and dialog handling. Covering
+    # this costs far more than it catches -- the better move is to lift logic
+    # out of the widget and test it directly (as test_crop_anything_core.py
+    # does) rather than to drive signals and slots. Tracked, not targeted.
+    - component_id: gui
+      name: gui (Qt widgets)
+      paths:
+        - "src/napari_tmidas/_crop_anything.py"
+        - "src/napari_tmidas/_file_conversion.py"
+        - "src/napari_tmidas/_file_selector.py"
+        - "src/napari_tmidas/_frame_removal.py"
+        - "src/napari_tmidas/_label_based_cropping_widget.py"
+        - "src/napari_tmidas/_label_inspection.py"
+        - "src/napari_tmidas/_roi_colocalization.py"
+        - "src/napari_tmidas/_ui_utils.py"
+        - "src/napari_tmidas/_widget.py"
