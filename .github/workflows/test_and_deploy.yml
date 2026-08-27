@@ -120,6 +120,11 @@ jobs:
           fi
 
       - name: Coverage
+        # Steps default to skipping once a prior step failed, so a red test
+        # run used to skip the upload entirely and Codecov never received a
+        # report at all -- which is what left the badge reading "unknown".
+        # pytest-cov still writes coverage.xml when tests fail.
+        if: always()
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
