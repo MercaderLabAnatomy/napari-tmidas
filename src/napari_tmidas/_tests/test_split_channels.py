@@ -669,13 +669,20 @@ class TestLazyTiffLoading:
                 output_suffix="_split",
                 output_format="tiff",
             )
+            import gc
             import tracemalloc
 
             tracemalloc.start()
             try:
+                # get_traced_memory reports absolute totals, so whatever
+                # earlier tests still hold would otherwise be charged to
+                # this one.  Measure the growth over the call instead.
+                gc.collect()
                 tracemalloc.reset_peak()
+                baseline, _ = tracemalloc.get_traced_memory()
                 result = worker.process_file(str(src))
                 _, peak = tracemalloc.get_traced_memory()
+                peak -= baseline
             finally:
                 tracemalloc.stop()
         finally:
@@ -688,9 +695,12 @@ class TestLazyTiffLoading:
             np.testing.assert_array_equal(
                 tifffile.imread(path), data[:, channel]
             )
-        # The dense read alone was 1.9x the stack before this path existed.
+        # The dense read alone was 1.9x the stack before this path
+        # existed; the streaming path lands near 0.5x.  Budget 0.6x so a
+        # regression to dense loading (3x this) still fails loudly
+        # without the assertion sitting on the measured value itself.
         assert (
-            peak < dense_bytes / 2
+            peak < dense_bytes * 0.6
         ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
 
 
