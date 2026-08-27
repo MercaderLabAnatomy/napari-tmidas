@@ -1,4 +1,5 @@
 # src/napari_tmidas/_tests/test_skimage_filters.py
+import os
 import tracemalloc
 
 import numpy as np
@@ -17,6 +18,7 @@ from napari_tmidas.processing_functions.skimage_filters import (
     percentile_threshold,
     remove_small_objects,
     resize_image_fixed_yx,
+    resize_zarr_native,
     rolling_ball_background,
     simple_thresholding,
 )
@@ -786,3 +788,183 @@ class TestConvertToUint8:
             f"peak {peak/1e6:.1f} MB exceeds {budget/1e6:.1f} MB on a "
             f"{image.nbytes/1e6:.1f} MB input"
         )
+
+
+def _write_ome_zarr(path, data, scale):
+    """
+    Build a small multiscale OME-Zarr fixture with known physical pixel size.
+
+    Written with the project's own pinned stack (zarr>=3, ome-zarr), so the
+    on-disk layout is whatever a user of this plugin would actually produce.
+    """
+    zarr = pytest.importorskip("zarr")
+    ome_writer = pytest.importorskip("ome_zarr.writer")
+    ome_io = pytest.importorskip("ome_zarr.io")
+
+    store = ome_io.parse_url(str(path), mode="w").store
+    root = zarr.group(store=store)
+    axes = [
+        {"name": "t", "type": "time"},
+        {"name": "c", "type": "channel"},
+        {"name": "z", "type": "space"},
+        {"name": "y", "type": "space"},
+        {"name": "x", "type": "space"},
+    ]
+    ome_writer.write_image(
+        image=data, group=root, axes=axes, scale=scale,
+        storage_options={"chunks": (1, 1, 1, data.shape[-2], data.shape[-1])},
+    )
+    return str(path)
+
+
+class TestResizeZarrNative:
+    """
+    "Resize Zarr by YX Scale (OME-Zarr native)" promises a lazy, chunked
+    resize that never loads the whole array: open the source with dask, build
+    a resize graph, and stream it out via ome_zarr's writer. Every failure in
+    that path is swallowed by a bare ``except Exception`` that falls back to
+    loading the entire array through skimage, so a broken native path looks
+    like a slow one rather than an error.
+    """
+
+    @pytest.mark.parametrize(
+        "shape_yx,scale,expected",
+        [
+            ((32, 32), 0.5, (16, 16)),
+            ((32, 32), 2.0, (64, 64)),
+            ((33, 33), 0.5, (16, 16)),
+            ((100, 50), 0.25, (25, 12)),
+        ],
+    )
+    def test_resolve_resize_target(self, shape_yx, scale, expected):
+        """Target YX geometry is pure arithmetic and must not surprise."""
+        from napari_tmidas.processing_functions.skimage_filters import (
+            _resolve_resize_target,
+        )
+
+        assert _resolve_resize_target(shape_yx, scale) == expected
+
+    def test_non_zarr_source_uses_skimage_path(self):
+        """
+        A TIFF (or anything that is not a .zarr) is documented to fall through
+        to the in-memory skimage resize and return an array, which the normal
+        saving pipeline then writes.
+        """
+        image = np.zeros((1, 2, 4, 32, 32), dtype=np.uint16)
+
+        result = resize_zarr_native(
+            image, scale_factor=0.5, _source_filepath="/nowhere/input.tif"
+        )
+
+        assert isinstance(result, np.ndarray)
+        assert result.shape[-2:] == (16, 16)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "zarr.storage.FSStore was removed in zarr 3, which is what "
+            "pyproject.toml pins (zarr>=3). The import raises, the bare "
+            "except swallows it, and the 'native' resize silently degrades "
+            "to loading the entire array in memory via skimage."
+        ),
+    )
+    def test_zarr_source_writes_ome_zarr_and_returns_path(self, tmp_path):
+        rng = np.random.default_rng(0)
+        data = (rng.random((1, 2, 4, 32, 32)) * 1000).astype(np.uint16)
+        src = _write_ome_zarr(
+            tmp_path / "src.zarr",
+            data,
+            {"t": 1.0, "c": 1.0, "z": 2.0, "y": 0.325, "x": 0.325},
+        )
+
+        result = resize_zarr_native(
+            data,
+            scale_factor=0.5,
+            _source_filepath=src,
+            _output_folder=str(tmp_path),
+            _output_suffix="_rz",
+        )
+
+        # Returning a path is the contract _file_selector relies on to skip
+        # its own write step; returning an array means it was not honoured.
+        assert isinstance(result, str), (
+            f"expected an output path, got {type(result).__name__} "
+            "(the native path fell back)"
+        )
+        assert os.path.isdir(result)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "The source level is chosen with list(zroot.array_keys())[0], but "
+            "array_keys() is unordered -- it returns e.g. ['s1','s4','s2', "
+            "'s3','s0'] -- so a random pyramid level is resized instead of "
+            "full resolution. The correct ms['datasets'][0] branch is only "
+            "reached when the group holds no arrays, which never happens for "
+            "a real multiscale image."
+        ),
+    )
+    def test_zarr_source_reads_full_resolution_level(self, tmp_path, capsys):
+        """
+        Resizing a downsampled pyramid level by the requested factor throws
+        away most of the data while reporting success.
+        """
+        rng = np.random.default_rng(1)
+        data = (rng.random((1, 2, 4, 32, 32)) * 1000).astype(np.uint16)
+        src = _write_ome_zarr(
+            tmp_path / "src.zarr",
+            data,
+            {"t": 1.0, "c": 1.0, "z": 2.0, "y": 0.325, "x": 0.325},
+        )
+
+        resize_zarr_native(
+            data,
+            scale_factor=0.5,
+            _source_filepath=src,
+            _output_folder=str(tmp_path),
+            _output_suffix="_rz",
+        )
+
+        # The function announces the shapes it is working on before it writes.
+        reported = capsys.readouterr().out
+        assert "(1, 2, 4, 32, 32) → (1, 2, 4, 16, 16)" in reported, (
+            "expected the full-resolution level (32x32) to be resized; got:\n"
+            + reported
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Blocked by the FSStore failure above; also reads pixel size from "
+            "a .zattrs file, which the zarr v3 layout written by the pinned "
+            "ome-zarr does not produce (metadata lives in zarr.json)."
+        ),
+    )
+    def test_zarr_source_preserves_physical_pixel_size(self, tmp_path):
+        """
+        Halving YX doubles the physical size of a pixel. Losing this makes
+        every downstream measurement in microns silently wrong.
+        """
+        zarr = pytest.importorskip("zarr")
+        rng = np.random.default_rng(2)
+        data = (rng.random((1, 2, 4, 32, 32)) * 1000).astype(np.uint16)
+        src = _write_ome_zarr(
+            tmp_path / "src.zarr",
+            data,
+            {"t": 1.0, "c": 1.0, "z": 2.0, "y": 0.325, "x": 0.325},
+        )
+
+        result = resize_zarr_native(
+            data,
+            scale_factor=0.5,
+            _source_filepath=src,
+            _output_folder=str(tmp_path),
+            _output_suffix="_rz",
+        )
+
+        out = zarr.open(str(result), mode="r")
+        datasets = out.attrs["multiscales"][0]["datasets"]
+        level0 = datasets[0]["coordinateTransformations"][0]["scale"]
+        assert level0[-2] == pytest.approx(0.65)
+        assert level0[-1] == pytest.approx(0.65)
+        assert level0[-3] == pytest.approx(2.0), "Z scale must be untouched"

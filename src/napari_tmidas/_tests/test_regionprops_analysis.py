@@ -14,6 +14,7 @@ from napari_tmidas.processing_functions.regionprops_analysis import (
     analyze_folder_regionprops,
     extract_regionprops_folder,
     extract_regionprops_recursive,
+    extract_regionprops_summary_folder,
     find_label_images,
     load_label_image,
     parse_dimensions_from_shape,
@@ -545,3 +546,257 @@ def test_summary_statistics_calculations():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestExtractRegionpropsSummaryFolder:
+    """
+    Real coverage for "Regionprops Summary Statistics".
+
+    The function takes no explicit filepath -- it recovers one by walking the
+    call stack for a local named ``filepath`` -- and its only output is a CSV
+    written next to the folder. So every test here drives it through a caller
+    that owns a ``filepath`` local, exactly as the batch worker does, and then
+    reads the CSV back.
+    """
+
+    @staticmethod
+    def _run(filepath, image, **kwargs):
+        """Invoke the function the way the batch worker does."""
+        return extract_regionprops_summary_folder(image, **kwargs)
+
+    @staticmethod
+    def _summary_csv(folder):
+        return folder.parent / f"{folder.name}_regionprops_summary.csv"
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        """The header-management cache is module global and leaks across tests."""
+        reset_regionprops_cache()
+        yield
+        reset_regionprops_cache()
+
+    @pytest.fixture
+    def labels_2d(self):
+        """Three labels of 100, 400 and 200 pixels."""
+        image = np.zeros((100, 100), dtype=np.uint16)
+        image[10:20, 10:20] = 1
+        image[30:50, 30:50] = 2
+        image[60:70, 60:80] = 3
+        return image
+
+    def test_writes_one_row_of_summary_statistics(self, tmp_path, labels_2d):
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        label_path = folder / "sample.tif"
+
+        self._run(str(label_path), labels_2d, mean_intensity=False,
+                  median_intensity=False, std_intensity=False)
+
+        csv_path = self._summary_csv(folder)
+        assert csv_path.exists(), "no summary CSV was written"
+        df = pd.read_csv(csv_path)
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["filename"] == "sample.tif"
+        assert row["label_count"] == 3
+        # 100 + 400 + 200 -- aggregated from the real regionprops pass, not
+        # recomputed in the test.
+        assert row["size_sum"] == 700
+        assert row["size_mean"] == pytest.approx(700 / 3)
+        assert row["size_median"] == 200
+
+    def test_second_file_appends_without_a_second_header(
+        self, tmp_path, labels_2d
+    ):
+        """
+        One CSV per folder, one row per file. A repeated header would appear
+        as a data row reading "filename" once parsed.
+        """
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        for name in ("a.tif", "b.tif"):
+            self._run(str(folder / name), labels_2d, mean_intensity=False,
+                      median_intensity=False, std_intensity=False)
+
+        df = pd.read_csv(self._summary_csv(folder))
+
+        assert list(df["filename"]) == ["a.tif", "b.tif"]
+        assert len(df) == 2
+
+    def test_label_suffix_skips_files_that_do_not_match(
+        self, tmp_path, labels_2d
+    ):
+        """
+        label_suffix selects which files are label images. A file without the
+        suffix must be ignored entirely rather than summarised.
+        """
+        folder = tmp_path / "labels"
+        folder.mkdir()
+
+        self._run(
+            str(folder / "raw.tif"), labels_2d, label_suffix="_labels.tif"
+        )
+
+        assert not self._summary_csv(folder).exists()
+
+    def test_group_by_dimensions_emits_one_row_per_timepoint(self, tmp_path):
+        """With grouping on, a TZYX stack summarises per T rather than once."""
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        image = np.zeros((3, 10, 60, 60), dtype=np.uint16)
+        for t in range(3):
+            image[t, 2:5, 10:20, 10:20] = 1
+            image[t, 5:8, 30:40, 30:40] = 2
+
+        self._run(
+            str(folder / "movie.tif"),
+            image,
+            max_spatial_dims=3,
+            dimension_order="TZYX",
+            group_by_dimensions=True,
+            mean_intensity=False,
+            median_intensity=False,
+            std_intensity=False,
+        )
+
+        df = pd.read_csv(self._summary_csv(folder))
+
+        assert len(df) == 3
+        assert set(df["label_count"]) == {2}
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "df.groupby(group_cols) is called with a list, and since pandas "
+            "2.0 a single-element list yields 1-tuple keys. The "
+            "len(group_cols) == 1 branch assigns that key unchanged, so the "
+            "T/C/Z column is written as the string '(0,)' instead of 0. The "
+            "multi-dimension path indexes group_key[i] and is unaffected."
+        ),
+    )
+    def test_grouped_dimension_column_holds_plain_integers(self, tmp_path):
+        """
+        A T column of '(0,)' strings cannot be sorted, filtered or plotted --
+        the CSV parses fine and every value in it is unusable.
+        """
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        image = np.zeros((3, 10, 60, 60), dtype=np.uint16)
+        for t in range(3):
+            image[t, 2:5, 10:20, 10:20] = 1
+
+        self._run(
+            str(folder / "movie.tif"),
+            image,
+            max_spatial_dims=3,
+            dimension_order="TZYX",
+            group_by_dimensions=True,
+            mean_intensity=False,
+            median_intensity=False,
+            std_intensity=False,
+        )
+
+        df = pd.read_csv(self._summary_csv(folder))
+
+        assert sorted(df["T"]) == [0, 1, 2]
+
+    def test_without_grouping_a_4d_stack_gets_a_single_row(self, tmp_path):
+        """The same stack, grouping off, collapses to one row for the file."""
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        image = np.zeros((3, 10, 60, 60), dtype=np.uint16)
+        for t in range(3):
+            image[t, 2:5, 10:20, 10:20] = 1
+            image[t, 5:8, 30:40, 30:40] = 2
+
+        self._run(
+            str(folder / "movie.tif"),
+            image,
+            max_spatial_dims=3,
+            dimension_order="TZYX",
+            group_by_dimensions=False,
+            mean_intensity=False,
+            median_intensity=False,
+            std_intensity=False,
+        )
+
+        df = pd.read_csv(self._summary_csv(folder))
+
+        assert len(df) == 1
+        assert df.iloc[0]["label_count"] == 6
+
+    def test_disabled_properties_are_absent_from_the_csv(
+        self, tmp_path, labels_2d
+    ):
+        """Unchecked boxes must not silently appear as columns."""
+        folder = tmp_path / "labels"
+        folder.mkdir()
+
+        self._run(
+            str(folder / "sample.tif"),
+            labels_2d,
+            size=False,
+            mean_intensity=False,
+            median_intensity=False,
+            std_intensity=False,
+        )
+
+        df = pd.read_csv(self._summary_csv(folder))
+
+        assert "size_sum" not in df.columns
+        assert "mean_int_sum" not in df.columns
+        assert "label_count" in df.columns
+
+    def test_empty_label_image_writes_nothing(self, tmp_path):
+        """No regions means no row, not a row of NaNs."""
+        folder = tmp_path / "labels"
+        folder.mkdir()
+
+        self._run(
+            str(folder / "empty.tif"), np.zeros((50, 50), dtype=np.uint16)
+        )
+
+        assert not self._summary_csv(folder).exists()
+
+    def test_returns_none_when_filepath_cannot_be_recovered(self, labels_2d):
+        """
+        Called outside a batch context there is no ``filepath`` local to find,
+        and the function must bail out rather than guess a path.
+        """
+        assert extract_regionprops_summary_folder(labels_2d) is None
+
+    def test_existing_csv_is_preserved_unless_overwrite_is_set(
+        self, tmp_path, labels_2d
+    ):
+        """
+        A stale CSV from a previous run is appended to by default, so earlier
+        results are not lost; overwrite_existing=True starts a fresh file.
+        """
+        folder = tmp_path / "labels"
+        folder.mkdir()
+        csv_path = self._summary_csv(folder)
+        stats_off = {
+            "mean_intensity": False,
+            "median_intensity": False,
+            "std_intensity": False,
+        }
+
+        # A previous session's run leaves a CSV behind.
+        self._run(str(folder / "old.tif"), labels_2d, **stats_off)
+        reset_regionprops_cache()
+
+        # Default: the new run appends, keeping the earlier results.
+        self._run(str(folder / "new.tif"), labels_2d, **stats_off)
+        df = pd.read_csv(csv_path)
+        assert list(df["filename"]) == ["old.tif", "new.tif"]
+
+        # overwrite_existing starts the file over.
+        reset_regionprops_cache()
+        self._run(
+            str(folder / "fresh.tif"),
+            labels_2d,
+            overwrite_existing=True,
+            **stats_off,
+        )
+        df = pd.read_csv(csv_path)
+        assert list(df["filename"]) == ["fresh.tif"]
