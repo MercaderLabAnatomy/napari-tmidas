@@ -11,10 +11,21 @@ user as a plugin that simply fails to open.
 The heavy lifting is tested in test_label_based_cropping.py against the
 processing functions; what is checked here is the wiring.
 """
+import os
+import sys
+
 import numpy as np
 import pytest
 
 napari = pytest.importorskip("napari")
+
+# Creating a real napari viewer builds an OpenGL canvas; on the headless macOS
+# runner that segfaults inside vispy's glGetParameter and takes the whole
+# session down. Same guard as test_file_conversion.py / test_roi_colocalization.py.
+requires_gui = pytest.mark.skipif(
+    sys.platform == "darwin" and os.environ.get("CI") == "true",
+    reason="Qt widget tests cause segfaults on macOS CI (headless)",
+)
 
 from napari_tmidas._label_based_cropping_widget import (  # noqa: E402
     LabelBasedCroppingWidget,
@@ -37,6 +48,7 @@ def viewer_with_layers(make_napari_viewer):
     return viewer
 
 
+@requires_gui
 class TestWidgetConstruction:
     def test_constructs_without_layers(self, make_napari_viewer):
         """An empty viewer is the state the widget first opens in."""
@@ -98,6 +110,7 @@ class TestWidgetConstruction:
         assert widget._expand_time_checkbox.isChecked() is False
 
 
+@requires_gui
 class TestCropAction:
     """
     The crop runs on a QThread and every guard path opens a modal QMessageBox,
@@ -223,6 +236,7 @@ class TestCroppingWorker:
         assert "does not match" in msg
 
 
+@requires_gui
 class TestInfoText:
     def test_messages_accumulate(self, viewer_with_layers):
         widget = LabelBasedCroppingWidget(viewer_with_layers)
