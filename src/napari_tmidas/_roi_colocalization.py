@@ -75,9 +75,37 @@ def longest_common_substring(s1, s2):
     """Finds the longest common substring between two strings."""
     matcher = SequenceMatcher(None, s1, s2)
     match = matcher.find_longest_match(0, len(s1), 0, len(s2))
-    substring = s1[match.a : match.a + match.size]
-    print(f"Longest common substring between '{s1}' and '{s2}': '{substring}'")
-    return substring
+    return s1[match.a : match.a + match.size]
+
+
+def _shared_affixes(names):
+    """The prefix and suffix that every name in *names* shares."""
+    names = list(names)
+    if len(names) < 2:
+        return "", ""
+    prefix = os.path.commonprefix(names)
+    suffix = os.path.commonprefix([name[::-1] for name in names])[::-1]
+    return prefix, suffix
+
+
+def _strip_affixes(name, prefix, suffix):
+    """*name* with a shared *prefix* and *suffix* removed.
+
+    Channel folders are conventionally filled with ``<sample>_c1_labels.tif``
+    / ``<sample>_c2_labels.tif``.  Matching on the raw filename latches onto
+    whichever convention the files share rather than onto the sample: with
+    the widget's own default pattern the shared ``_labels.tif`` is longer
+    than most sample identifiers, so every file scores the same match
+    against every other, ties resolve to whichever came first, and the group
+    key collides so all but one pair is silently dropped.  What identifies a
+    file is only the part that differs from its siblings.
+
+    Falls back to the full name when stripping would leave nothing (a
+    degenerate set of identical names).
+    """
+    end = len(name) - len(suffix)
+    part = name[len(prefix) : end] if end > len(prefix) else ""
+    return part or name
 
 
 def group_files_by_common_substring(file_lists, channels):
@@ -97,13 +125,33 @@ def group_files_by_common_substring(file_lists, channels):
         for channel in channels
     }
 
+    # Match on what actually distinguishes the files, not on the naming
+    # convention they all share.
+    affixes = {
+        channel: _shared_affixes(base_files[channel]) for channel in channels
+    }
+    key_of = {
+        channel: {
+            name: _strip_affixes(name, *affixes[channel])
+            for name in base_files[channel]
+        }
+        for channel in channels
+    }
+    # The group key is also the identifier shown in the results table, so
+    # keep the prefix there: "sample01" reads better than "01".
+    label_of = {
+        name: _strip_affixes(name, "", affixes[channels[0]][1])
+        for name in base_files[channels[0]]
+    }
+
     # Create a dictionary to store groups
     groups = defaultdict(lambda: {channel: None for channel in channels})
 
     # Iterate over all files in the first channel
     for file1 in base_files[channels[0]]:
         # Start with the first file as the "common substring"
-        common_substring = file1
+        common_substring = key_of[channels[0]][file1]
+        group_key = label_of[file1]
 
         # Iterate over the other channels to find matching files
         matched_files = {channels[0]: file1}
@@ -114,7 +162,7 @@ def group_files_by_common_substring(file_lists, channels):
             # Compare the current common substring with files in the current channel
             for file2 in base_files[channel]:
                 current_common = longest_common_substring(
-                    common_substring, file2
+                    common_substring, key_of[channel][file2]
                 )
                 if len(current_common) > len(best_common):
                     best_match = file2
@@ -130,9 +178,9 @@ def group_files_by_common_substring(file_lists, channels):
 
         # If matches were found for all channels, add them to the group
         if len(matched_files) == len(channels):
-            # Use the full common substring as the key (don't strip it yet)
-            # This prevents different file pairs from overwriting each other
-            groups[common_substring] = {
+            # Key on channel 1's own identity: two different samples must
+            # never land in the same group, however much their names share.
+            groups[group_key] = {
                 channel: file_lists[channel][
                     base_files[channel].index(matched_files[channel])
                 ]
