@@ -1041,7 +1041,12 @@ class TIFFSlideLoader(FormatLoader):
             try:
                 with tifffile.TiffFile(filepath) as tif:
                     return len(tif.series)
-            except (OSError, ValueError, ImportError):
+            except (
+                OSError,
+                ValueError,
+                ImportError,
+                tifffile.TiffFileError,
+            ):
                 return 0
 
     @staticmethod
@@ -1071,7 +1076,13 @@ class TIFFSlideLoader(FormatLoader):
                             f"Series index {series_index} out of range"
                         )
                     return tif.series[series_index].asarray()
-            except (OSError, IndexError, ValueError, ImportError) as e:
+            except (
+                OSError,
+                IndexError,
+                ValueError,
+                ImportError,
+                tifffile.TiffFileError,
+            ) as e:
                 raise FileFormatError(
                     f"Failed to load TIFF slide series {series_index}: {str(e)}"
                 ) from e
@@ -2064,7 +2075,11 @@ class ConversionWorker(QThread):
                 ) as writer:
                     for i in range(dask_array.shape[0]):
                         slice_data = dask_array[i].compute()
-                        writer.write(slice_data, compression="zlib")
+                        writer.write(
+                            slice_data,
+                            compression="zlib",
+                            photometric="minisblack",
+                        )
             else:
                 # For 3D or smaller, compute and save normally
                 computed_data = dask_array.compute()
@@ -2182,14 +2197,14 @@ class ConversionWorker(QThread):
                     axes=axes or "zyx",
                     coordinate_transformations=base_coordinate_transform,
                     scaler=Scaler(max_layer=0),
-                    storage_options={"compression": "zstd"},
+                    storage_options={"compressors": [zarr.codecs.ZstdCodec()]},
                 )
 
             print(
                 f"Successfully saved ZARR with metadata: axes={axes}, scale={scale_transform}"
             )
             # Fix non-standard ome_zarr pyramid naming (s0,s1,s2 → 0,1,2)
-            self._fix_ome_zarr_pyramid_naming(store)
+            self._fix_ome_zarr_pyramid_naming(output_path)
 
             return True
 
