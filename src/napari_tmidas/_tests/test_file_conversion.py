@@ -574,17 +574,21 @@ class TestSaveTif:
         assert worker._save_tif(da.from_array(data, chunks=2), out, {}) is True
         np.testing.assert_array_equal(tifffile.imread(out), data)
 
-    def test_4d_dask_input_is_written_per_slice(self, worker, tmp_path):
-        # Each leading-axis slice is written as its own TIFF series.
+    def test_4d_dask_input_is_written_as_one_series(self, worker, tmp_path):
+        # Every leading-axis block streams into a single series via one
+        # tifffile.imwrite(data=<generator>) call, so a plain imread
+        # recovers the whole array. A prior version called
+        # writer.write() once per leading-axis index, which starts a new
+        # *series* each time -- every pixel still reached disk, but
+        # tifffile.imread() only ever returned the first slice.
         data = np.arange(3 * 2 * 8 * 8, dtype=np.uint8).reshape(3, 2, 8, 8)
         out = str(tmp_path / "out.tif")
 
         assert worker._save_tif(da.from_array(data, chunks=1), out, {}) is True
 
         with tifffile.TiffFile(out) as tif:
-            assert len(tif.series) == 3
-            written = np.stack([s.asarray() for s in tif.series])
-        np.testing.assert_array_equal(written, data)
+            assert len(tif.series) == 1
+        np.testing.assert_array_equal(tifffile.imread(out), data)
 
     def test_three_channel_slices_are_not_written_as_rgb(
         self, worker, tmp_path
@@ -599,8 +603,7 @@ class TestSaveTif:
 
         with tifffile.TiffFile(out) as tif:
             assert tif.pages[0].photometric == tifffile.PHOTOMETRIC.MINISBLACK
-            written = np.stack([s.asarray() for s in tif.series])
-        np.testing.assert_array_equal(written, data)
+        np.testing.assert_array_equal(tifffile.imread(out), data)
 
 
 class TestSaveZarr:

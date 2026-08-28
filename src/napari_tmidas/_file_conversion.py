@@ -926,7 +926,7 @@ class ND2Loader(FormatLoader):
                 _debug_print(f"Dask method failed: {e}, falling back to numpy...")
 
         # METHOD 3: Load as numpy array (for small files or as fallback)
-            _debug_print("Loading multi-position file as numpy array...")
+        _debug_print("Loading multi-position file as numpy array...")
         with nd2.ND2File(filepath) as nd2_file:
             # Use direct indexing on the ND2File object
             if hasattr(nd2_file, "__getitem__"):
@@ -1098,13 +1098,22 @@ class TIFFSlideLoader(FormatLoader):
                     if series_index >= len(slide.level_dimensions):
                         return {}
 
+                    mpp_x = float(
+                        slide.properties.get("tiffslide.mpp-x", 1.0) or 1.0
+                    )
+                    mpp_y = float(
+                        slide.properties.get("tiffslide.mpp-y", 1.0) or 1.0
+                    )
                     return {
                         "axes": slide.properties.get(
                             "tiffslide.series-axes", "YX"
                         ),
+                        # tiffslide reports micrometres-per-pixel; invert to
+                        # pixels-per-micrometre, the convention every loader
+                        # feeds into _build_scale_transform.
                         "resolution": (
-                            float(slide.properties.get("tiffslide.mpp-x", 1.0)),
-                            float(slide.properties.get("tiffslide.mpp-y", 1.0)),
+                            1.0 / mpp_x if mpp_x > 0 else 1.0,
+                            1.0 / mpp_y if mpp_y > 0 else 1.0,
                         ),
                         "unit": "um",
                     }
@@ -1402,10 +1411,11 @@ class CZILoader(FormatLoader):
                             raw_metadata, "Z"
                         )
 
-                        # Keep `resolution` as pixels per micrometer to match
-                        # the conversion logic in _build_scale_transform.
+                        # _extract_scale_from_xml returns micrometres
+                        # per pixel; invert to keep `resolution` in pixels
+                        # per micrometer, matching the conversion logic in
+                        # _build_scale_transform.
                         if scale_x and scale_y and scale_x > 0 and scale_y > 0:
-                            metadata["resolution"] = (scale_x, scale_y)
                             metadata["resolution"] = (
                                 1.0 / scale_x,
                                 1.0 / scale_y,
@@ -1703,8 +1713,17 @@ class AcquiferLoader(FormatLoader):
                         if file.lower().endswith((".tif", ".tiff")):
                             match = re.search(r"--PX(\d+)", file)
                             if match:
+                                # --PX0250 -> 0.025 micrometres-per-pixel;
+                                # invert to pixels-per-micrometre to match
+                                # the convention _build_scale_transform
+                                # expects (every other loader already
+                                # stores the reciprocal).
                                 pixel_size = float(match.group(1)) * 1e-4
-                                resolution = (pixel_size, pixel_size)
+                                if pixel_size > 0:
+                                    resolution = (
+                                        1.0 / pixel_size,
+                                        1.0 / pixel_size,
+                                    )
                                 break
                     if resolution != (1.0, 1.0):
                         break
@@ -2070,16 +2089,29 @@ class ConversionWorker(QThread):
 
             # Write timepoints/slices individually for multi-dimensional data
             if len(dask_array.shape) >= 4:
-                with tifffile.TiffWriter(
-                    output_path, bigtiff=use_bigtiff
-                ) as writer:
+                # One tifffile.imwrite(data=<iterable>) call streams every
+                # plane into a SINGLE series while still only holding one
+                # leading-axis block in memory at a time.  A loop of
+                # writer.write() calls (the previous approach) starts a
+                # new series on every call, so tifffile.imread() only ever
+                # saw the first block back -- every other timepoint/slice
+                # was written to disk but silently unreadable as part of
+                # the array.
+                def _plane_iter():
                     for i in range(dask_array.shape[0]):
-                        slice_data = dask_array[i].compute()
-                        writer.write(
-                            slice_data,
-                            compression="zlib",
-                            photometric="minisblack",
-                        )
+                        block = np.asarray(dask_array[i].compute())
+                        yield from block.reshape(-1, *block.shape[-2:])
+
+                tifffile.imwrite(
+                    output_path,
+                    data=_plane_iter(),
+                    shape=tuple(int(s) for s in dask_array.shape),
+                    dtype=dask_array.dtype,
+                    bigtiff=use_bigtiff,
+                    compression="zlib",
+                    photometric="minisblack",
+                    maxworkers=1,
+                )
             else:
                 # For 3D or smaller, compute and save normally
                 computed_data = dask_array.compute()
@@ -2098,8 +2130,6 @@ class ConversionWorker(QThread):
             ) from e
         finally:
             # Clean up temporary data
-            if "slice_data" in locals():
-                del slice_data
             if "computed_data" in locals():
                 del computed_data
 
@@ -2126,6 +2156,13 @@ class ConversionWorker(QThread):
             if not hasattr(image_data, "dask"):
                 image_data = da.from_array(image_data, chunks="auto")
 
+            # Read the incoming axes order now (a pure string read, no
+            # array side effects) so the rechunk below can target T/Z by
+            # their real position. The transpose to the tczyx/czyx target
+            # order happens further down, so at this point ``axes``
+            # still describes ``image_data``'s current dimension order.
+            incoming_axes = metadata.get("axes", "").lower()
+
             # Check if chunks exceed compression codec limit (2GB)
             max_chunk_bytes = 1_500_000_000  # 1.5GB safe limit
             chunk_bytes = (
@@ -2138,9 +2175,25 @@ class ConversionWorker(QThread):
                 )
                 # Keep spatial dims (Y, X) and channel intact, rechunk T and Z
                 new_chunks = list(image_data.chunksize)
-                # Reduce T and Z proportionally to get under limit
-                scale = (max_chunk_bytes / chunk_bytes) ** 0.5
-                for i in range(min(2, len(new_chunks))):
+                factor = max_chunk_bytes / chunk_bytes
+                axis_positions = [
+                    incoming_axes.index(ax)
+                    for ax in "tz"
+                    if ax in incoming_axes
+                    and incoming_axes.index(ax) < len(new_chunks)
+                ]
+                if not axis_positions:
+                    # No axes metadata to target T/Z by name: fall back to
+                    # shrinking every axis but the trailing two, which are
+                    # almost always Y, X.
+                    axis_positions = list(range(max(0, len(new_chunks) - 2)))
+                # Split the required reduction evenly (in log-space) across
+                # however many axes are actually being shrunk, so e.g. a
+                # single Z axis takes the full factor instead of just its
+                # square root -- the square root is only correct when
+                # exactly two axes share the reduction.
+                scale = factor ** (1 / len(axis_positions))
+                for i in axis_positions:
                     new_chunks[i] = max(1, int(new_chunks[i] * scale))
                 image_data = image_data.rechunk(tuple(new_chunks))
                 print(
@@ -2148,7 +2201,7 @@ class ConversionWorker(QThread):
                 )
 
             # Handle axes reordering for proper OME-ZARR structure
-            axes = metadata.get("axes", "").lower()
+            axes = incoming_axes
             if axes:
                 ndim = len(image_data.shape)
                 has_time = "t" in axes
