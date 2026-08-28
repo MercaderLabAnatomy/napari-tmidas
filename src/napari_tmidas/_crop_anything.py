@@ -2676,7 +2676,11 @@ class BatchCropAnything:
                 # Connect checkbox to label selection
                 def make_checkbox_callback(lid):
                     def callback(state):
-                        if state == Qt.Checked:
+                        # stateChanged delivers a plain int.  Under PyQt6
+                        # Qt.Checked is a real Python enum, so comparing
+                        # the two is always False and the tick would be
+                        # read as "unchecked".  Normalise first.
+                        if Qt.CheckState(state) == Qt.CheckState.Checked:
                             self.selected_labels.add(lid)
                         else:
                             self.selected_labels.discard(lid)

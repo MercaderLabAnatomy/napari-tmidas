@@ -2385,8 +2385,11 @@ class ParameterWidget(QWidget):
                 # Connect use_cpu parameter to signal
                 if param_name == "use_cpu":
                     widget.stateChanged.connect(
+                        # stateChanged delivers a plain int; under PyQt6
+                        # Qt.Checked is a Python enum that never equals
+                        # one, so normalise before comparing.
                         lambda state: self.use_cpu_changed.emit(
-                            state == Qt.Checked
+                            Qt.CheckState(state) == Qt.CheckState.Checked
                         )
                     )
             else:

@@ -379,7 +379,9 @@ class FrameRemovalWidget(QWidget):
 
         num_frames = self.original_data.shape[0]
 
-        if state == Qt.Checked:
+        # stateChanged delivers a plain int, but under PyQt6 Qt.Checked is
+        # a Python enum that never compares equal to one.  Normalise first.
+        if Qt.CheckState(state) == Qt.CheckState.Checked:
             if self.current_frame not in self.frames_to_remove:
                 self.frames_to_remove.append(self.current_frame)
         else:
