@@ -136,7 +136,14 @@ def _gaussian_filter_torch(input: "torch.Tensor", sigma: float) -> "torch.Tensor
     """
     if sigma <= 0:
         return input
-    
+
+    if input.ndim not in (2, 3):
+        # Matches _find_boundaries_torch's own ndim guard: this function
+        # only implements the 2D and 3D convolution paths below, so any
+        # other rank must be rejected rather than silently passed through
+        # unfiltered.
+        raise ValueError("input must be 2D or 3D")
+
     # Determine kernel size (typically 4*sigma + 1, but at least 3)
     kernel_size = int(4 * sigma + 1)
     if kernel_size % 2 == 0:

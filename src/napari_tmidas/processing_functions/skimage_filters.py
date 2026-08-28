@@ -1189,6 +1189,15 @@ def resize_image_fixed_yx(
     """
     from skimage.transform import resize
 
+    if image.ndim < 2:
+        # Checked before _resolve_resize_target below: image.shape[-2:] on
+        # a 1D array silently returns a 1-tuple rather than raising, so
+        # that call would fail with a raw, confusing IndexError instead of
+        # this descriptive message.
+        raise ValueError(
+            f"Resizing requires at least 2 dimensions, got {image.ndim}"
+        )
+
     target_y, target_x = _resolve_resize_target(image.shape[-2:], scale_factor)
 
     # Only the trailing YX plane is resized; any leading axes (T, C, Z, …) are
@@ -1204,10 +1213,6 @@ def resize_image_fixed_yx(
             raise ValueError(
                 f"dim_order '{dim_order}' is incompatible with image.ndim={image.ndim}"
             )
-    elif image.ndim < 2:
-        raise ValueError(
-            f"Resizing requires at least 2 dimensions, got {image.ndim}"
-        )
 
     def _resize_2d(slice_2d: np.ndarray) -> np.ndarray:
         anti_aliasing = (
