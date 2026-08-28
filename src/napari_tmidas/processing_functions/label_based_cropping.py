@@ -32,7 +32,10 @@ except ImportError:
     _HAS_TIFFFILE = False
 
 
-def _get_label_image_filename(intensity_filename: str) -> str:
+def _get_label_image_filename(
+    intensity_filename: str,
+    label_suffix_priority: Optional[List[str]] = None,
+) -> str:
     """
     Derive the label image filename from the intensity image filename.
 
@@ -43,6 +46,9 @@ def _get_label_image_filename(intensity_filename: str) -> str:
     ----------
     intensity_filename : str
         Path to the intensity image file
+    label_suffix_priority : list of str, optional
+        Suffixes to try, checked in order. Defaults to the built-in list
+        below when omitted.
 
     Returns
     -------
@@ -53,7 +59,7 @@ def _get_label_image_filename(intensity_filename: str) -> str:
     parent_dir = intensity_path.parent
 
     # Common label suffixes
-    label_suffixes = [
+    label_suffixes = label_suffix_priority or [
         "_labels.tif",
         "_labels.tiff",
         "_labels_filtered.tif",
@@ -459,7 +465,13 @@ def batch_label_based_cropping(
         """Process a single image file."""
         try:
             # Find corresponding label file
-            label_path = _get_label_image_filename(str(image_path))
+            label_path = (
+                _get_label_image_filename(
+                    str(image_path), label_suffix_priority
+                )
+                if auto_detect_labels
+                else None
+            )
 
             if label_path is None:
                 if verbose:
