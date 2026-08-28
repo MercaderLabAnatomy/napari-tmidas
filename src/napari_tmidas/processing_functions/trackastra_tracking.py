@@ -1120,6 +1120,7 @@ def trackastra_tracking(
 
     if img_path is None:
         print("Could not determine input file path. Returning unchanged.")
+        return image
 
     temp_dir = Path(os.path.dirname(img_path))
 
