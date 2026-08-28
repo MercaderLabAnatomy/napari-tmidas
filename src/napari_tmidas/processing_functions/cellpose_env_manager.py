@@ -140,9 +140,16 @@ def cancel_all_processes():
                         # Force kill if it doesn't terminate gracefully
                         process.kill()
                         process.wait()
-                _running_processes.remove(process)
             except (OSError, subprocess.SubprocessError) as e:
                 print(f"Error terminating process: {e}")
+            finally:
+                # Drop it whether or not termination succeeded -- a
+                # process that is already gone (the common case for the
+                # exception above) must not stay tracked forever, or every
+                # later cancel keeps retrying and reprinting the same
+                # error.
+                if process in _running_processes:
+                    _running_processes.remove(process)
 
 
 def _add_process(process):

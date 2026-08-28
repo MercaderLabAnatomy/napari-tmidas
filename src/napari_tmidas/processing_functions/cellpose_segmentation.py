@@ -388,19 +388,19 @@ def cellpose_segmentation(
     # The normalize=True parameter (default) will convert to float and normalize
     # to 1st-99th percentile range internally
 
-    print(
-        "Cellpose runtime options: "
-        f"model_type={model_type}, "
-        f"distributed_requested={use_distributed_segmentation}, "
-        f"distributed_n_workers={int(distributed_n_workers)}, "
-        f"source_path={_source_filepath}"
-    )
-
     try:
         distributed_n_workers = int(distributed_n_workers)
     except (TypeError, ValueError):
         distributed_n_workers = 1
     distributed_n_workers = max(1, distributed_n_workers)
+
+    print(
+        "Cellpose runtime options: "
+        f"model_type={model_type}, "
+        f"distributed_requested={use_distributed_segmentation}, "
+        f"distributed_n_workers={distributed_n_workers}, "
+        f"source_path={_source_filepath}"
+    )
 
     if not isinstance(model_type, str):
         raise ValueError("model_type must be a string")
@@ -2197,7 +2197,15 @@ def cellpose_segmentation(
         if "T" in dim_order:
             t_axis = dim_order.index("T")
             if t_axis >= image.ndim:
-                t_axis = 0
+                # Matches the in-memory path's validation above: silently
+                # falling back to axis 0 would reinterpret whatever that
+                # axis actually is (Z, say) as time instead of surfacing
+                # the mismatched dim_order.
+                raise ValueError(
+                    "dim_order contains 'T' but image does not have a "
+                    f"matching T axis (dim_order={dim_order}, "
+                    f"shape={image.shape})."
+                )
 
             total_timepoints = int(image.shape[t_axis])
             selected_timepoints = _resolve_timepoint_indices(total_timepoints)
