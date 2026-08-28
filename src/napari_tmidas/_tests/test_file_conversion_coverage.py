@@ -1945,9 +1945,17 @@ class TestSaveZarrBranches:
         (dataset,) = multiscale["datasets"]
         assert dataset["path"] == "0"
         # t and c stay unscaled; z is the spacing; y/x are 1/resolution.
-        assert dataset["coordinateTransformations"] == [
-            {"type": "scale", "scale": [1.0, 1.0, 1.5, 0.5, 0.25]}
+        # ome-zarr may additionally emit an identity translation transform
+        # alongside the scale; that's harmless, so only the scale is pinned.
+        (scale_transform,) = [
+            ct
+            for ct in dataset["coordinateTransformations"]
+            if ct["type"] == "scale"
         ]
+        assert scale_transform == {
+            "type": "scale",
+            "scale": [1.0, 1.0, 1.5, 0.5, 0.25],
+        }
 
     def test_the_layer_name_carries_the_series_index(
         self, conv_worker, tmp_path
@@ -2025,9 +2033,14 @@ class TestSaveZarrBranches:
         assert [ax["name"] for ax in multiscale["axes"]] == ["z", "y", "x"]
         # Without axes metadata there is nothing to scale by, and the volume
         # must be stored verbatim.
-        assert multiscale["datasets"][0]["coordinateTransformations"] == [
-            {"type": "scale", "scale": [1.0, 1.0, 1.0]}
+        # ome-zarr may additionally emit an identity translation transform
+        # alongside the scale; that's harmless, so only the scale is pinned.
+        (scale_transform,) = [
+            ct
+            for ct in multiscale["datasets"][0]["coordinateTransformations"]
+            if ct["type"] == "scale"
         ]
+        assert scale_transform == {"type": "scale", "scale": [1.0, 1.0, 1.0]}
         np.testing.assert_array_equal(
             zarr.open_group(str(out), mode="r")["0"][:], data
         )
