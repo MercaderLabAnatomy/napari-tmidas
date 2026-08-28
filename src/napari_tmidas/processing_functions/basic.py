@@ -1382,7 +1382,11 @@ def merge_channels(
 
                 del src
         except Exception:
-            del out_mm
+            # Drop the memmap before unlinking (Windows refuses to remove a
+            # mapped file).  Rebinding rather than ``del`` keeps the name
+            # defined, so the ``finally`` below cannot raise
+            # UnboundLocalError and mask the error we are re-raising here.
+            out_mm = None
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
@@ -1390,7 +1394,7 @@ def merge_channels(
                     pass
             raise
         finally:
-            del out_mm  # flush OS pages to disk
+            out_mm = None  # flush OS pages to disk
 
         print(f"✨ Saved {axes_str} merged image → {output_path}")
         return output_path
