@@ -369,6 +369,20 @@ def write_labels_with_source_metadata(
             },
         )
 
+        # Copy the omero block (channel/rendering info) BEFORE the raw
+        # JSON rewrite below.  root.attrs is a stale in-memory cache of
+        # the attrs written by write_image() above, so setting a key on
+        # it re-serialises that whole (now-outdated) document to disk --
+        # done after the coordinate-transformations rewrite, it silently
+        # clobbers the fix that block just persisted. Done first, the
+        # rewrite below reads this omero key back off disk along with
+        # everything else and keeps it.
+        if "omero" in attrs:
+            try:
+                root.attrs["omero"] = attrs["omero"]
+            except Exception:
+                pass
+
         # Align output per-level coordinate transforms to source metadata.
         # Source and output axes can differ (e.g. a channel axis dropped
         # during processing), so transforms are rebuilt per-axis by name
@@ -460,11 +474,6 @@ def write_labels_with_source_metadata(
             except Exception:
                 pass
 
-        if "omero" in attrs:
-            try:
-                root.attrs["omero"] = attrs["omero"]
-            except Exception:
-                pass
         return output_path
 
     # OME-TIFF path
