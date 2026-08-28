@@ -359,7 +359,7 @@ class ColocalizationWorker(QThread):
                                     f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_std",
                                     f"{self.channel_names[2]}_in_{self.channel_names[1]}_in_{self.channel_names[0]}_max",
                                     f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_mean",
-                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_in_{self.channel_names[0]}_median",
+                                    f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_median",
                                     f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_std",
                                     f"{self.channel_names[2]}_not_in_{self.channel_names[1]}_but_in_{self.channel_names[0]}_max",
                                 ]
@@ -617,14 +617,36 @@ class ColocalizationWorker(QThread):
                 row = row_or_rows
                 csv_rows.append(row)
 
-            # Extract results as dictionary (only for non-individual mode)
-            result_dict = {"label_id": label_id, "ch2_in_ch1_count": row[2]}
-
-            idx = 3
-            if self.get_sizes:
-                result_dict["ch1_size"] = row[idx]
-                result_dict["ch2_in_ch1_size"] = row[idx + 1]
-                idx += 2
+            # Extract results as dictionary (only for non-individual mode).
+            # The row layout up to this point depends on channel2_is_labels
+            # exactly as process_single_roi built it: a single count column
+            # when ch2 is labels, or four intensity-stat columns otherwise
+            # (and, when get_sizes, an extra ch2 size column only in the
+            # labels case) -- so the starting offset must branch the same
+            # way, or every column read from here on lands one or more
+            # slots away from the value its key claims to hold.
+            if self.channel2_is_labels:
+                result_dict = {
+                    "label_id": label_id,
+                    "ch2_in_ch1_count": row[2],
+                }
+                idx = 3
+                if self.get_sizes:
+                    result_dict["ch1_size"] = row[idx]
+                    result_dict["ch2_in_ch1_size"] = row[idx + 1]
+                    idx += 2
+            else:
+                result_dict = {
+                    "label_id": label_id,
+                    "ch2_in_ch1_mean": row[2],
+                    "ch2_in_ch1_median": row[3],
+                    "ch2_in_ch1_std": row[4],
+                    "ch2_in_ch1_max": row[5],
+                }
+                idx = 6
+                if self.get_sizes:
+                    result_dict["ch1_size"] = row[idx]
+                    idx += 1
 
             if image_c3 is not None:
                 # Map CSV row columns to result_dict depending on channel modes
