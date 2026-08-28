@@ -18,6 +18,12 @@ class TestProcessingWorker:
     def setup_method(self):
         """Setup test environment"""
         self.temp_dir = tempfile.mkdtemp()
+        # The registry is a process-wide singleton, so emptying it here
+        # leaks into every later test in the session unless it is put
+        # back in teardown_method.
+        self._saved_registry = dict(
+            BatchProcessingRegistry._processing_functions
+        )
         BatchProcessingRegistry._processing_functions.clear()
 
         # Register a test function
@@ -33,6 +39,10 @@ class TestProcessingWorker:
         """Cleanup"""
         import shutil
 
+        BatchProcessingRegistry._processing_functions.clear()
+        BatchProcessingRegistry._processing_functions.update(
+            self._saved_registry
+        )
         shutil.rmtree(self.temp_dir)
 
     def test_process_file(self):
