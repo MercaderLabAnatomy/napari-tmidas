@@ -3,6 +3,7 @@
 This module manages a dedicated virtual environment for napari-convpaint.
 """
 
+import contextlib
 import os
 import textwrap
 import subprocess
@@ -574,11 +575,14 @@ print("Segmentation complete")
         return output_image
 
     finally:
-        # Clean up temporary files
-        try:
+        # Clean up temporary files. Each unlink gets its own suppressed
+        # block: sharing one try meant a failure on the first file (e.g.
+        # the child process already removed it) skipped the rest and
+        # leaked them.
+        with contextlib.suppress(OSError, FileNotFoundError):
             os.unlink(input_path)
+        with contextlib.suppress(OSError, FileNotFoundError):
             if os.path.exists(output_path):
                 os.unlink(output_path)
+        with contextlib.suppress(OSError, FileNotFoundError):
             os.unlink(script_path)
-        except (OSError, FileNotFoundError):
-            pass

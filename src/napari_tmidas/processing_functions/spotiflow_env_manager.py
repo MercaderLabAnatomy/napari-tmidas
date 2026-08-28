@@ -560,32 +560,39 @@ except Exception as e:
         script_file.write(script)
         script_file.flush()
 
-        # Execute the script in the dedicated environment
-        env_python = get_env_python_path()
-        result = subprocess.run(
-            [env_python, script_file.name],
-            capture_output=True,
-            text=True,
-        )
-
-        # Check for errors
-        if result.returncode != 0:
-            print("Error in Spotiflow environment execution:")
-            print(f"STDOUT: {result.stdout}")
-            print(f"STDERR: {result.stderr}")
-            raise subprocess.CalledProcessError(
-                result.returncode, result.args, result.stdout, result.stderr
+        try:
+            # Execute the script in the dedicated environment
+            env_python = get_env_python_path()
+            result = subprocess.run(
+                [env_python, script_file.name],
+                capture_output=True,
+                text=True,
             )
 
-        print(result.stdout)
+            # Check for errors
+            if result.returncode != 0:
+                print("Error in Spotiflow environment execution:")
+                print(f"STDOUT: {result.stdout}")
+                print(f"STDERR: {result.stderr}")
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    result.args,
+                    result.stdout,
+                    result.stderr,
+                )
 
-        # Load and return results
-        output_data = np.load(output_file.name, allow_pickle=True).item()
+            print(result.stdout)
 
-        # Clean up temporary files
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(input_file.name)
-            os.unlink(output_file.name)
-            os.unlink(script_file.name)
-
-        return output_data
+            # Load and return results
+            return np.load(output_file.name, allow_pickle=True).item()
+        finally:
+            # Each unlink gets its own suppressed block: sharing one meant
+            # a non-zero exit skipped cleanup entirely (the raise above
+            # happened before this ever ran), and even on success a
+            # failure on the first file skipped the rest.
+            with contextlib.suppress(OSError, FileNotFoundError):
+                os.unlink(input_file.name)
+            with contextlib.suppress(OSError, FileNotFoundError):
+                os.unlink(output_file.name)
+            with contextlib.suppress(OSError, FileNotFoundError):
+                os.unlink(script_file.name)

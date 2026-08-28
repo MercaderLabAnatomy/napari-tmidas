@@ -250,15 +250,19 @@ def run_viscy_in_env(image: np.ndarray, z_batch_size: int = 15) -> np.ndarray:
             f"Model checkpoint not found at {model_path}. Please re-create the environment."
         )
 
+    if tifffile is None:
+        # Checked before the temp file below is created: raising from
+        # inside that `with` block would leave the file (NamedTemporaryFile
+        # with delete=False already created it on disk) behind, since the
+        # try/finally that cleans up temp files hasn't been entered yet.
+        raise ImportError("tifffile is required but not available")
+
     # Create a temporary file for input
     with tempfile.NamedTemporaryFile(
         suffix=".tif", delete=False
     ) as input_file:
         input_path = input_file.name
-        if tifffile is not None:
-            tifffile.imwrite(input_path, image)
-        else:
-            raise ImportError("tifffile is required but not available")
+        tifffile.imwrite(input_path, image)
 
     # Create a temporary file for output
     with tempfile.NamedTemporaryFile(
