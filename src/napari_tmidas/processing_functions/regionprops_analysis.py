@@ -1207,14 +1207,38 @@ def extract_regionprops_summary_folder(
         # Prepare summary statistics
         summary_rows = []
 
+        # Looked up by property name below instead of via locals(): the
+        # old locals().get(prop.replace("_intensity", "_intensity"))
+        # relied on a no-op .replace() and a string lookup into the local
+        # namespace, which happened to work only because every entry in
+        # the loop below is spelled identically to its parameter -- one
+        # rename of either would silently drop that property from the
+        # CSV with no error.
+        intensity_flags = {
+            "mean_intensity": mean_intensity,
+            "median_intensity": median_intensity,
+            "std_intensity": std_intensity,
+            "max_intensity": max_intensity,
+            "min_intensity": min_intensity,
+        }
+
         if group_cols:
             # Group by dimensions
             for group_key, group_df in df.groupby(group_cols):
                 summary_row = {"filename": label_path.name}
 
-                # Add dimension values
+                # Add dimension values.  With a single grouping column,
+                # pandas >= 2 still hands back a 1-tuple key (grouping by
+                # a list, even of length one, no longer unwraps it), so a
+                # bare ``group_key`` here would land in the CSV as the
+                # string "(0,)" instead of 0.  Older pandas returned the
+                # scalar directly; handle both.
                 if len(group_cols) == 1:
-                    summary_row[group_cols[0]] = group_key
+                    summary_row[group_cols[0]] = (
+                        group_key[0]
+                        if isinstance(group_key, tuple)
+                        else group_key
+                    )
                 else:
                     for i, col in enumerate(group_cols):
                         summary_row[col] = group_key[i]
@@ -1240,9 +1264,7 @@ def extract_regionprops_summary_folder(
                     "min_intensity",
                 ]:
                     # Check if user enabled this property and it exists in data
-                    prop_enabled = locals().get(
-                        prop.replace("_intensity", "_intensity")
-                    )
+                    prop_enabled = intensity_flags.get(prop)
                     if prop_enabled and prop in group_df.columns:
                         prop_name = prop.replace("_intensity", "_int")
                         summary_row[f"{prop_name}_sum"] = float(
@@ -1279,9 +1301,7 @@ def extract_regionprops_summary_folder(
                 "max_intensity",
                 "min_intensity",
             ]:
-                prop_enabled = locals().get(
-                    prop.replace("_intensity", "_intensity")
-                )
+                prop_enabled = intensity_flags.get(prop)
                 if prop_enabled and prop in df.columns:
                     prop_name = prop.replace("_intensity", "_int")
                     summary_row[f"{prop_name}_sum"] = float(df[prop].sum())

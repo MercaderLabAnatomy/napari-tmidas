@@ -664,16 +664,6 @@ class TestExtractRegionpropsSummaryFolder:
         assert len(df) == 3
         assert set(df["label_count"]) == {2}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "df.groupby(group_cols) is called with a list, and since pandas "
-            "2.0 a single-element list yields 1-tuple keys. The "
-            "len(group_cols) == 1 branch assigns that key unchanged, so the "
-            "T/C/Z column is written as the string '(0,)' instead of 0. The "
-            "multi-dimension path indexes group_key[i] and is unaffected."
-        ),
-    )
     def test_grouped_dimension_column_holds_plain_integers(self, tmp_path):
         """
         A T column of '(0,)' strings cannot be sorted, filtered or plotted --
