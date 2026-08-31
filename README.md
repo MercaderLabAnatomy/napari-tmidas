@@ -30,6 +30,7 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 
 ⚡ **Batch Processing**
 - Process entire folders with one click • 40+ processing functions • Progress tracking & quality control
+- One **Dimension Order** setting, shared by every function — set it once per batch, not per function
 
 � **Interactive Workflow**
 - Side-by-side table view of original and processed images • Click to instantly compare results • Quickly iterate parameter values • Real-time visual feedback
@@ -55,6 +56,8 @@ napari
 Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](https://www.youtube.com/@macromeer/videos)
 
 > **💡 Tip**: AI methods (SAM2, Cellpose, Spotiflow, etc.) auto-install into isolated environments on first use - no manual setup required!
+
+> **⚠️ Before a batch run**: set **Dimension Order** (top of the batch widget) to match your data — `TZYX` for a 3D time series, `ZYX` for a Z-stack, `TYX` for a 2D movie. Most microscopy TIFFs carry no usable axis metadata, so on `Auto` a function that builds 3D objects cannot tell Z from T: it will either stop with an error or label the same object once per Z slice. The widget reads each file's rank up front, shows it next to the dropdown, and warns before the run starts.
 
 ## 📖 Documentation
 
@@ -151,7 +154,7 @@ What is left:
 
 ### Other Known Issues
 
-- `Resize Zarr by YX Scale (OME-Zarr native)` imports `zarr.storage.FSStore`, which zarr v3 removed, so the native path raises `ImportError` on every run and silently falls back. Fixing it needs a call on the v3 replacement (`LocalStore`, or `FsspecStore` for remote) and on whether napari-ome-zarr still needs `key_separator="/"` stated.
+- `Resize Zarr by YX Scale (OME-Zarr native)` writes **zarr v3** stores: attributes live in `zarr.json` (multiscales nested under an `ome` key), not in a v2 `.zattrs`. Anything downstream that reads `.zattrs` directly will find no file there — use [`ome_output_utils._read_root_attrs()`](src/napari_tmidas/processing_functions/ome_output_utils.py), which handles both layouts.
 
 ## 🤝 Contributing
 
