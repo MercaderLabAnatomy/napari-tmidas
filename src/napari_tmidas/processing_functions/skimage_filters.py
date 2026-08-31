@@ -1159,12 +1159,10 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
             "max": 100.0,
             "description": "YX scale factor. For example, 0.5 resizes both Y and X to half size.",
         },
-        "dim_order": {
-            "type": str,
-            "default": "auto",
-            "options": ["auto", "YX", "ZYX", "TYX", "TZYX", "TCZYX"],
-            "description": "Input dimension order. 'auto' maps ndim 2->YX, 3->ZYX, 4->TZYX, 5->TCZYX.",
-        },
+        # NOTE: the dimension order is not declared here on purpose --
+        # it comes from the batch widget's "Dimension Order" dropdown,
+        # which applies to every function. Declaring it again made the
+        # user set the same thing twice, in two places that could disagree.
         "channel": {
             "type": str,
             "default": "all",

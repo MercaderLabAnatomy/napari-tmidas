@@ -1518,7 +1518,11 @@ class TestRegistration:
             for name in signature.parameters
             if name != "image" and not name.startswith("_")
         }
-        assert public == set(info["parameters"])
+        # "dimension_order" is deliberately unregistered: it is supplied by
+        # the batch widget's global "Dimension Order" dropdown, so declaring
+        # it here too would ask the user for the same thing twice.
+        assert public - {"dimension_order"} == set(info["parameters"])
+        assert "dimension_order" not in info["parameters"]
 
     def test_registered_option_lists_contain_their_defaults(self):
         info = BatchProcessingRegistry.get_function_info(
@@ -1530,7 +1534,6 @@ class TestRegistration:
             if "options" in spec
         }
         assert set(with_options) == {
-            "dimension_order",
             "device",
             "tile",
             "stage_inputs",

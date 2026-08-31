@@ -32,12 +32,13 @@ def test_viscy_function_info():
     
     # Check parameters
     params = info["parameters"]
-    assert "dim_order" in params
     assert "z_batch_size" in params
     assert "output_channel" in params
-    
+    # The dimension order comes from the batch widget's global dropdown,
+    # so the function must not ask for it a second time.
+    assert "dim_order" not in params
+
     # Check parameter defaults
-    assert params["dim_order"]["default"] == "ZYX"
     assert params["z_batch_size"]["default"] == 15
     assert params["output_channel"]["default"] == "both"
 

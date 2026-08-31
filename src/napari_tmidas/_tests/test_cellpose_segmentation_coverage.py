@@ -1918,13 +1918,11 @@ class TestRegistryWrapper:
             params["model_type"]["options"]
             == cellpose_mod.SUPPORTED_CELLPOSE_MODELS
         )
-        assert params["dim_order"]["options"] == [
-            "Auto",
-            "YX",
-            "ZYX",
-            "TYX",
-            "TZYX",
-        ]
+        # The dimension order comes from the batch widget's global
+        # "Dimension Order" dropdown (resolved by
+        # ``resolve_cellpose_dim_order``), so it is deliberately not a
+        # per-function parameter here.
+        assert "dim_order" not in params
 
     def test_function_is_marked_not_thread_safe(self):
         assert cellpose_mod.cellpose_segmentation.thread_safe is False

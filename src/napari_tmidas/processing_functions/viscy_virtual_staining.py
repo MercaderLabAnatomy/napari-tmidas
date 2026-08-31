@@ -98,11 +98,10 @@ def transpose_dimensions(img, dim_order):
             "widget_type": "channel_selector",
             "description": "Select which channel contains phase/DIC data (automatically detected from multichannel images)",
         },
-        "dim_order": {
-            "type": str,
-            "default": "ZYX",
-            "description": "Dimension order of the input (e.g., 'ZYX', 'TZYX', 'YXZ')",
-        },
+        # NOTE: the dimension order is not declared here on purpose --
+        # it comes from the batch widget's "Dimension Order" dropdown,
+        # which applies to every function. Declaring it again made the
+        # user set the same thing twice, in two places that could disagree.
         "z_batch_size": {
             "type": int,
             "default": 15,

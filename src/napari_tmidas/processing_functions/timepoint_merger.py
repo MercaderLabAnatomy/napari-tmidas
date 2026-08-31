@@ -355,12 +355,10 @@ def load_and_validate_images(
             "default": False,
             "description": "Overwrite existing merged file if it exists",
         },
-        "dimension_order": {
-            "type": str,
-            "default": "auto",
-            "choices": ["auto", "YX", "ZYX", "CYX", "CZYX", "TZYX"],
-            "description": "Dimension order of input files (auto-detect or specify manually)",
-        },
+        # NOTE: the dimension order is not declared here on purpose --
+        # it comes from the batch widget's "Dimension Order" dropdown,
+        # which applies to every function. Declaring it again made the
+        # user set the same thing twice, in two places that could disagree.
     },
 )
 def merge_timepoint_folder_advanced(

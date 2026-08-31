@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         QComboBox,
         QDoubleSpinBox,
         QFormLayout,
+        QFrame,
         QHBoxLayout,
         QHeaderView,
         QLabel,
@@ -97,6 +98,7 @@ try:
         QComboBox,
         QDoubleSpinBox,
         QFormLayout,
+        QFrame,
         QHBoxLayout,
         QHeaderView,
         QLabel,
@@ -116,7 +118,9 @@ try:
     _HAS_QTPY = True
 except ImportError:
     Qt = QThread = Signal = _Qt = None
-    QCheckBox = QComboBox = QDoubleSpinBox = QFormLayout = QHBoxLayout = None
+    QCheckBox = QComboBox = QDoubleSpinBox = QFormLayout = QFrame = (
+        QHBoxLayout
+    ) = None
     QHeaderView = QLabel = QLineEdit = QMessageBox = QProgressBar = (
         QPushButton
     ) = None
@@ -845,6 +849,114 @@ def detect_axes_for_file(
         return inferred.get(image_data.ndim)
 
     return None
+
+
+# Dimension-order strings offered by the widget's "Dimension Order" dropdown.
+# "Auto" leaves the choice to each processing function, which several of them
+# (e.g. instance segmentation) cannot make safely for >2D data.
+DIMENSION_ORDER_OPTIONS = [
+    "Auto",
+    "YX",
+    "CYX",
+    "TYX",
+    "ZYX",
+    "CZYX",
+    "TCYX",
+    "TZYX",
+    "ZCYX",
+    "TZCYX",
+    "TCZYX",
+]
+
+
+def probe_file_shape(filepath: str) -> Optional[Tuple[int, ...]]:
+    """
+    Read an image's array shape from its header, without loading pixel data.
+
+    Used to tell the user up front how many dimensions their files have, so
+    "Auto" can be flagged before a batch runs (and fails) rather than after.
+    Returns None whenever the shape can't be determined cheaply.
+    """
+    if not filepath:
+        return None
+
+    try:
+        if _HAS_TIFFFILE and filepath.lower().endswith((".tif", ".tiff")):
+            with tifffile.TiffFile(filepath) as tif:
+                if tif.series:
+                    return tuple(tif.series[0].shape)
+            return None
+
+        is_zarr = filepath.lower().endswith(".zarr") or (
+            os.path.isdir(filepath)
+            and (
+                os.path.exists(os.path.join(filepath, ".zattrs"))
+                or os.path.exists(os.path.join(filepath, "zarr.json"))
+            )
+        )
+        if _HAS_ZARR and is_zarr:
+            node = zarr.open(filepath, mode="r")
+            shape = getattr(node, "shape", None)
+            if shape is None:
+                # A multiscale group: the full-resolution array is the first
+                # dataset of the first multiscale (conventionally "0").
+                attrs = _read_zarr_root_attrs(filepath, root=node)
+                multiscales = _get_ome_multiscales(attrs)
+                keys = []
+                if multiscales:
+                    keys = [
+                        str(d.get("path"))
+                        for d in multiscales[0].get("datasets", [])
+                        if d.get("path") is not None
+                    ]
+                for key in keys or ["0"]:
+                    try:
+                        shape = getattr(node[key], "shape", None)
+                    except (KeyError, TypeError):
+                        shape = None
+                    if shape is not None:
+                        break
+            return tuple(shape) if shape is not None else None
+    except Exception:
+        return None
+
+    return None
+
+
+def suggest_dimension_order(filepath: str) -> Optional[str]:
+    """
+    Suggest a dimension order for a file from its metadata, or None.
+
+    Only returns a value it is confident about: axes metadata that both
+    matches one of the dropdown options and has the same rank as the data
+    (many TIFFs carry placeholder axes such as "QQYX", which say nothing),
+    or an unambiguous 2D image.
+    """
+    shape = probe_file_shape(filepath)
+
+    axes = detect_axes_for_file(filepath)
+    if axes:
+        # TIFF "S" (samples) is the channel axis under a different name.
+        axes = axes.upper().replace("S", "C")
+        # Uppercased, so this can never match the "Auto" entry itself.
+        if axes in DIMENSION_ORDER_OPTIONS and (
+            shape is None or len(axes) == len(shape)
+        ):
+            return axes
+
+    if shape is not None and len(shape) == 2:
+        return "YX"
+
+    return None
+
+
+def function_uses_dimension_order(func) -> bool:
+    """Whether a processing function's result depends on the dimension order."""
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return "dimension_order" in params or "dim_order" in params
 
 
 def resolve_cellpose_dim_order(
@@ -3759,42 +3871,63 @@ class FileResultsWidget(QWidget):
         # Create processing function selector (added into controls_layout below)
         processing_layout = QVBoxLayout()
 
-        # Add dimension order selector FIRST (before function selector)
+        # Dimension order comes FIRST and is visually separated from the rest
+        # of the controls: leaving it on "Auto" is the single most common way
+        # to get a failed or silently mislabeled batch, so it must not read as
+        # just another optional field in the list.
+        dim_order_frame = QFrame()
+        dim_order_frame.setFrameShape(QFrame.StyledPanel)
+        dim_order_frame.setStyleSheet(
+            "QFrame { border: 1px solid #808080; border-radius: 4px; }"
+            "QLabel { border: none; }"
+        )
+        dim_order_box = QVBoxLayout()
+        dim_order_box.setContentsMargins(6, 6, 6, 6)
+        dim_order_frame.setLayout(dim_order_box)
+
         dim_order_layout = QHBoxLayout()
-        dim_order_label = QLabel("Dimension Order (optional hint):")
-        dim_order_label.setToolTip(
-            "Help processing functions interpret multi-dimensional data.\n"
-            "• Auto: Let function decide (default)\n"
+        dim_order_label = QLabel("Dimension Order:")
+        dim_order_label.setStyleSheet("font-weight: bold;")
+        dim_order_tooltip = (
+            "Tells processing functions how to interpret each axis of your "
+            "images.\n"
+            "• Auto: let each function guess (only reliable for 2D data)\n"
             "• YX: 2D image\n"
             "• CYX: Channels first (e.g., RGB)\n"
             "• TYX: Time series\n"
             "• ZYX: Z-stack\n"
-            "• TCYX, TZYX, etc.: Combined dimensions\n"
-            "\nNote: Not all functions use this hint."
+            "• TCYX, TZYX, TCZYX, etc.: Combined dimensions\n"
+            "\nMany functions require this for 3D/4D data: a missing or wrong "
+            "order splits one 3D object into one label per Z slice, or merges "
+            "objects across timepoints."
         )
+        dim_order_label.setToolTip(dim_order_tooltip)
         dim_order_layout.addWidget(dim_order_label)
 
         self.dimension_order = QComboBox()
-        self.dimension_order.addItems(
-            [
-                "Auto",
-                "YX",
-                "CYX",
-                "TYX",
-                "ZYX",
-                "TCYX",
-                "TZYX",
-                "ZCYX",
-                "TZCYX",
-                "TCZYX",
-            ]
-        )
-        self.dimension_order.setToolTip(
-            "Dimension interpretation hint for processing functions"
-        )
+        self.dimension_order.addItems(DIMENSION_ORDER_OPTIONS)
+        self.dimension_order.setToolTip(dim_order_tooltip)
         dim_order_layout.addWidget(self.dimension_order)
         dim_order_layout.addStretch()
-        processing_layout.addLayout(dim_order_layout)
+        dim_order_box.addLayout(dim_order_layout)
+
+        # Reports the detected shape of the first file, and warns whenever the
+        # current selection cannot describe it.
+        self.dimension_order_status = QLabel("")
+        self.dimension_order_status.setWordWrap(True)
+        self.dimension_order_status.setToolTip(dim_order_tooltip)
+        dim_order_box.addWidget(self.dimension_order_status)
+
+        processing_layout.addWidget(dim_order_frame)
+
+        # `activated` fires only on user interaction, so a suggestion applied
+        # programmatically never counts as the user having chosen.
+        self._dimension_order_user_set = False
+        self._probed_shape_cache = {}
+        self.dimension_order.activated.connect(
+            self._on_dimension_order_selected
+        )
+        self.apply_dimension_order_suggestion()
 
         # Now add processing function selector
         processing_label = QLabel("Select Processing Function:")
@@ -3899,6 +4032,146 @@ class FileResultsWidget(QWidget):
 
         # Container for tracking processed files during batch operation
         self.processed_files_info = []
+
+    # ------------------------------------------------------------------
+    # Dimension order
+    # ------------------------------------------------------------------
+    def probed_shape(self) -> Optional[Tuple[int, ...]]:
+        """Shape of the first file in the batch, read from its header."""
+        for filepath in self.file_list or []:
+            if filepath in self._probed_shape_cache:
+                return self._probed_shape_cache[filepath]
+            shape = probe_file_shape(filepath)
+            self._probed_shape_cache[filepath] = shape
+            if shape is not None:
+                return shape
+        return None
+
+    def _selected_function_uses_dimension_order(self) -> bool:
+        selector = getattr(self, "processing_selector", None)
+        if selector is None:
+            # Called from __init__ before the function selector exists: assume
+            # it matters, so the warning is shown rather than silently skipped.
+            return True
+        info = BatchProcessingRegistry.get_function_info(selector.currentText())
+        if not info:
+            return True
+        return function_uses_dimension_order(info.get("func"))
+
+    def _on_dimension_order_selected(self, _index: int) -> None:
+        self._dimension_order_user_set = True
+        self.update_dimension_order_status()
+
+    def apply_dimension_order_suggestion(self) -> None:
+        """
+        Pre-select the dimension order when the files state it unambiguously.
+
+        Most microscopy TIFFs carry no usable axes metadata, so this usually
+        leaves "Auto" in place and only the warning below tells the user to
+        choose; when the metadata *is* trustworthy there is no reason to make
+        them repeat it.
+        """
+        if self._dimension_order_user_set:
+            self.update_dimension_order_status()
+            return
+
+        for filepath in self.file_list or []:
+            suggestion = suggest_dimension_order(filepath)
+            if suggestion:
+                index = self.dimension_order.findText(suggestion)
+                if index >= 0:
+                    self.dimension_order.setCurrentIndex(index)
+                break
+
+        self.update_dimension_order_status()
+
+    def update_dimension_order_status(self) -> None:
+        """Describe the data's rank and flag a selection that cannot fit it."""
+        status = getattr(self, "dimension_order_status", None)
+        if status is None:
+            return
+
+        shape = self.probed_shape()
+        selected = self.dimension_order.currentText()
+
+        if shape is None:
+            if selected == "Auto":
+                status.setText(
+                    "Set this to match your data (e.g. TZYX) — 'Auto' lets "
+                    "each function guess, which many cannot do for 3D/4D data."
+                )
+                status.setStyleSheet("color: #ff6b00;")
+            else:
+                status.setText(f"Axes: {selected}")
+                status.setStyleSheet("color: gray;")
+            return
+
+        ndim = len(shape)
+        shape_text = f"First file: {ndim}D {tuple(shape)}"
+
+        if selected == "Auto":
+            if ndim > 2 and self._selected_function_uses_dimension_order():
+                status.setText(
+                    f"⚠ {shape_text} — select the dimension order "
+                    f"({ndim} axes, e.g. "
+                    f"{'TZYX' if ndim == 4 else 'ZYX' if ndim == 3 else 'TCZYX'}"
+                    "). On 'Auto' this run may fail or label each Z slice "
+                    "separately."
+                )
+                status.setStyleSheet("color: #ff6b00; font-weight: bold;")
+            else:
+                status.setText(f"{shape_text} — 'Auto' is fine for 2D data.")
+                status.setStyleSheet("color: gray;")
+            return
+
+        if len(selected) != ndim:
+            status.setText(
+                f"⚠ {shape_text}, but '{selected}' describes "
+                f"{len(selected)} axes."
+            )
+            status.setStyleSheet("color: #ff6b00; font-weight: bold;")
+            return
+
+        status.setText(
+            f"{shape_text} — read as "
+            + " × ".join(f"{a}={n}" for a, n in zip(selected, shape))
+        )
+        status.setStyleSheet("color: gray;")
+
+    def confirm_dimension_order(self, function_info: dict) -> bool:
+        """
+        Ask before running >2D data through a dimension-order-aware function
+        that was left on "Auto".
+
+        Returning False cancels the batch. This is the last point at which the
+        mistake is cheap: afterwards every file fails (or, worse, quietly
+        produces one label per Z slice) one by one.
+        """
+        if self.dimension_order.currentText() != "Auto":
+            return True
+        if not function_uses_dimension_order(function_info.get("func")):
+            return True
+
+        shape = self.probed_shape()
+        if shape is None or len(shape) <= 2:
+            return True
+
+        if QMessageBox is None:
+            return True
+
+        answer = QMessageBox.warning(
+            self,
+            "Dimension order not set",
+            f"Dimension Order is set to 'Auto', but the first file is "
+            f"{len(shape)}D {tuple(shape)}.\n\n"
+            "Without an explicit order this function cannot tell Z from T "
+            "and may fail, or label the same 3D object once per Z slice.\n\n"
+            "Cancel to pick the matching order (e.g. TZYX), or Ignore to "
+            "run anyway.",
+            QMessageBox.Cancel | QMessageBox.Ignore,
+            QMessageBox.Cancel,
+        )
+        return answer != QMessageBox.Cancel
 
     def update_function_info(self, function_name: str):
         """
@@ -4044,6 +4317,10 @@ class FileResultsWidget(QWidget):
             )
             self._refresh_thread_count_visibility()
 
+        # Whether the dimension order matters depends on the selected
+        # function, so re-evaluate the warning on every switch.
+        self.update_dimension_order_status()
+
     def _maybe_apply_cached_cellpose_settings(self, function_name: str):
         """Populate Cellpose parameters from the most recent cached run settings."""
         if "cellpose" not in str(function_name).lower():
@@ -4156,6 +4433,14 @@ class FileResultsWidget(QWidget):
 
         if not function_info:
             self.viewer.status = "No processing function selected"
+            return
+
+        # Catch a forgotten dimension order before the batch starts, not once
+        # per file after it has already failed.
+        if not self.confirm_dimension_order(function_info):
+            self.viewer.status = (
+                "Processing cancelled: select a dimension order first"
+            )
             return
 
         processing_func = function_info["func"]

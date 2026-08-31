@@ -2097,3 +2097,261 @@ class TestLoadProcessedImage:
         stub = _table_stub(_FakeViewer())
         stub._load_processed_image(path)
         assert "Error processing" in stub.viewer.status
+
+
+# ---------------------------------------------------------------------------
+# dimension order: probing, suggesting and warning
+# ---------------------------------------------------------------------------
+class _ComboStub:
+    """The bit of QComboBox behaviour the dimension-order code relies on."""
+
+    def __init__(self, text="Auto", items=None):
+        self.items = list(items or fs.DIMENSION_ORDER_OPTIONS)
+        self.text = text
+
+    def currentText(self):
+        return self.text
+
+    def findText(self, value):
+        return self.items.index(value) if value in self.items else -1
+
+    def setCurrentIndex(self, index):
+        self.text = self.items[index]
+
+
+class _LabelStub:
+    def __init__(self):
+        self.text = ""
+        self.style = ""
+
+    def setText(self, value):
+        self.text = value
+
+    def setStyleSheet(self, value):
+        self.style = value
+
+
+def _dim_order_stub(file_list, selected="Auto", func=None):
+    """A stand-in carrying just the widget state the methods below touch."""
+    stub = SimpleNamespace(
+        file_list=list(file_list),
+        viewer=_FakeViewer(),
+        dimension_order=_ComboStub(selected),
+        dimension_order_status=_LabelStub(),
+        processing_selector=None,
+        _dimension_order_user_set=False,
+        _probed_shape_cache={},
+    )
+    if func is not None:
+        stub.processing_selector = SimpleNamespace(currentText=lambda: "F")
+    for name in (
+        "probed_shape",
+        "update_dimension_order_status",
+        "apply_dimension_order_suggestion",
+        "_selected_function_uses_dimension_order",
+        "_on_dimension_order_selected",
+    ):
+        setattr(
+            stub,
+            name,
+            (
+                lambda *a, _n=name: getattr(fs.FileResultsWidget, _n)(
+                    stub, *a
+                )
+            ),
+        )
+    stub.confirm_dimension_order = (
+        lambda info: fs.FileResultsWidget.confirm_dimension_order(stub, info)
+    )
+    return stub
+
+
+class TestProbeFileShape:
+    def test_reads_tiff_shape_without_loading(self, tmp_path):
+        path = _write_tif(
+            tmp_path / "s.tif", np.zeros((3, 4, 8, 8), np.uint8)
+        )
+        assert fs.probe_file_shape(path) == (3, 4, 8, 8)
+
+    def test_unreadable_file_returns_none(self, tmp_path):
+        path = tmp_path / "broken.tif"
+        path.write_bytes(b"not a tiff")
+        assert fs.probe_file_shape(str(path)) is None
+
+    def test_empty_path_returns_none(self):
+        assert fs.probe_file_shape("") is None
+
+    def test_reads_zarr_array_shape(self, tmp_path):
+        zarr = pytest.importorskip("zarr")
+        path = str(tmp_path / "a.zarr")
+        arr = zarr.open(path, mode="w", shape=(2, 5, 6), dtype="uint8")
+        arr[:] = 0
+        assert fs.probe_file_shape(path) == (2, 5, 6)
+
+
+class TestSuggestDimensionOrder:
+    def test_trustworthy_metadata_is_used(self, tmp_path):
+        path = _write_tif(
+            tmp_path / "t.tif", np.zeros((2, 3, 8, 8), np.uint8), axes="TZYX"
+        )
+        assert fs.suggest_dimension_order(path) == "TZYX"
+
+    def test_placeholder_axes_are_ignored(self, tmp_path):
+        # tifffile stamps unknown axes as "Q"; a 4D file like that carries no
+        # usable information, so the user must be asked rather than guessed at.
+        path = _write_tif(tmp_path / "q.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        assert fs.probe_file_shape(path) == (2, 3, 8, 8)
+        assert fs.suggest_dimension_order(path) is None
+
+    def test_two_dimensional_file_is_unambiguous(self, tmp_path):
+        path = _write_tif(tmp_path / "p.tif", np.zeros((8, 8), np.uint8))
+        assert fs.suggest_dimension_order(path) == "YX"
+
+    def test_axes_whose_rank_disagrees_with_shape_are_rejected(
+        self, tmp_path, monkeypatch
+    ):
+        path = _write_tif(tmp_path / "m.tif", np.zeros((2, 8, 8), np.uint8))
+        monkeypatch.setattr(fs, "detect_axes_for_file", lambda p, **k: "TZYX")
+        assert fs.suggest_dimension_order(path) is None
+
+
+class TestFunctionUsesDimensionOrder:
+    def test_detects_both_parameter_spellings(self):
+        assert fs.function_uses_dimension_order(
+            lambda image, dimension_order="Auto": image
+        )
+        assert fs.function_uses_dimension_order(
+            lambda image, dim_order="Auto": image
+        )
+
+    def test_plain_function_does_not_use_it(self):
+        assert not fs.function_uses_dimension_order(lambda image: image)
+
+    def test_uninspectable_object_is_not_assumed_to_use_it(self):
+        assert not fs.function_uses_dimension_order(None)
+
+
+class TestDimensionOrderStatus:
+    def test_multidimensional_auto_warns(self, tmp_path):
+        path = _write_tif(tmp_path / "a.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        stub.update_dimension_order_status()
+        assert "⚠" in stub.dimension_order_status.text
+        assert "4D (2, 3, 8, 8)" in stub.dimension_order_status.text
+        assert "TZYX" in stub.dimension_order_status.text
+        assert "#ff6b00" in stub.dimension_order_status.style
+
+    def test_two_dimensional_auto_is_fine(self, tmp_path):
+        path = _write_tif(tmp_path / "b.tif", np.zeros((8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        stub.update_dimension_order_status()
+        assert "⚠" not in stub.dimension_order_status.text
+        assert "'Auto' is fine" in stub.dimension_order_status.text
+
+    def test_explicit_order_is_spelled_out_per_axis(self, tmp_path):
+        path = _write_tif(tmp_path / "c.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path], selected="TZYX")
+        stub.update_dimension_order_status()
+        assert "T=2" in stub.dimension_order_status.text
+        assert "X=8" in stub.dimension_order_status.text
+        assert "⚠" not in stub.dimension_order_status.text
+
+    def test_order_with_wrong_rank_warns(self, tmp_path):
+        path = _write_tif(tmp_path / "d.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path], selected="ZYX")
+        stub.update_dimension_order_status()
+        assert "⚠" in stub.dimension_order_status.text
+        assert "3 axes" in stub.dimension_order_status.text
+
+    def test_unprobeable_files_still_nudge(self, tmp_path):
+        stub = _dim_order_stub([str(tmp_path / "missing.tif")])
+        stub.update_dimension_order_status()
+        assert "Auto" in stub.dimension_order_status.text
+
+    def test_suggestion_is_applied_but_never_overrides_the_user(
+        self, tmp_path
+    ):
+        path = _write_tif(
+            tmp_path / "e.tif", np.zeros((2, 3, 8, 8), np.uint8), axes="TZYX"
+        )
+        stub = _dim_order_stub([path])
+        stub.apply_dimension_order_suggestion()
+        assert stub.dimension_order.currentText() == "TZYX"
+
+        stub.dimension_order.text = "ZCYX"
+        stub._on_dimension_order_selected(0)
+        stub.apply_dimension_order_suggestion()
+        assert stub.dimension_order.currentText() == "ZCYX"
+
+    def test_probe_is_cached_per_file(self, tmp_path, monkeypatch):
+        path = _write_tif(tmp_path / "f.tif", np.zeros((8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        assert stub.probed_shape() == (8, 8)
+        monkeypatch.setattr(
+            fs,
+            "probe_file_shape",
+            lambda p: pytest.fail("shape was re-read from disk"),
+        )
+        assert stub.probed_shape() == (8, 8)
+
+
+class TestConfirmDimensionOrder:
+    """The pre-flight guard that catches a forgotten dimension order."""
+
+    @staticmethod
+    def _stub_message_box(monkeypatch, answer):
+        calls = []
+
+        class _MessageBox:
+            Cancel = 1
+            Ignore = 2
+
+            @staticmethod
+            def warning(*args, **kwargs):
+                calls.append(args)
+                return answer
+
+        monkeypatch.setattr(fs, "QMessageBox", _MessageBox)
+        return calls
+
+    def test_auto_on_4d_data_asks_and_cancel_stops_the_batch(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub_message_box(monkeypatch, 1)  # Cancel
+        path = _write_tif(tmp_path / "a.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        info = {"func": lambda image, dimension_order="Auto": image}
+        assert stub.confirm_dimension_order(info) is False
+        assert len(calls) == 1
+
+    def test_ignoring_the_warning_runs_anyway(self, tmp_path, monkeypatch):
+        self._stub_message_box(monkeypatch, 2)  # Ignore
+        path = _write_tif(tmp_path / "b.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        info = {"func": lambda image, dimension_order="Auto": image}
+        assert stub.confirm_dimension_order(info) is True
+
+    def test_explicit_order_never_prompts(self, tmp_path, monkeypatch):
+        calls = self._stub_message_box(monkeypatch, 1)
+        path = _write_tif(tmp_path / "c.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path], selected="TZYX")
+        info = {"func": lambda image, dimension_order="Auto": image}
+        assert stub.confirm_dimension_order(info) is True
+        assert calls == []
+
+    def test_function_that_ignores_the_order_never_prompts(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub_message_box(monkeypatch, 1)
+        path = _write_tif(tmp_path / "d.tif", np.zeros((2, 3, 8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        assert stub.confirm_dimension_order({"func": lambda image: image})
+        assert calls == []
+
+    def test_two_dimensional_data_never_prompts(self, tmp_path, monkeypatch):
+        calls = self._stub_message_box(monkeypatch, 1)
+        path = _write_tif(tmp_path / "e.tif", np.zeros((8, 8), np.uint8))
+        stub = _dim_order_stub([path])
+        info = {"func": lambda image, dimension_order="Auto": image}
+        assert stub.confirm_dimension_order(info) is True
+        assert calls == []

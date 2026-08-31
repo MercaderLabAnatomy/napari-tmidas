@@ -122,12 +122,10 @@ def transpose_dimensions(img, dim_order):
             "widget_type": "channel_selector",
             "description": "Select which channel to segment (automatically detected from multichannel images)",
         },
-        "dim_order": {
-            "type": str,
-            "default": "Auto",
-            "options": ["Auto", "YX", "ZYX", "TYX", "TZYX"],
-            "description": "Dimension order of the input. Use Auto to infer from file metadata/shape.",
-        },
+        # NOTE: the dimension order is not declared here on purpose --
+        # it comes from the batch widget's "Dimension Order" dropdown,
+        # which applies to every function. Declaring it again made the
+        # user set the same thing twice, in two places that could disagree.
         "timepoint_start": {
             "type": int,
             "default": 0,

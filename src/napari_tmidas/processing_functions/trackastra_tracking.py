@@ -961,12 +961,10 @@ else:
             "default": "",
             "description": "Optional raw-image channel index for multichannel input. Leave empty to use the default first channel.",
         },
-        "dimension_order": {
-            "type": str,
-            "default": "Auto",
-            "options": ["Auto", "TYX", "TZYX", "TCZYX", "TZCYX", "TCYX"],
-            "description": "Dimension order hint for raw images (e.g., TCZYX for time-Z-channel-Y-X). Helps with channel detection when loading label files.",
-        },
+        # NOTE: the dimension order is not declared here on purpose --
+        # it comes from the batch widget's "Dimension Order" dropdown,
+        # which applies to every function. Declaring it again made the
+        # user set the same thing twice, in two places that could disagree.
         "batch_size": {
             "type": str,
             "default": "Auto",
