@@ -1337,17 +1337,26 @@ if SKIMAGE_AVAILABLE:
                 from ome_zarr.dask_utils import resize as dask_resize
                 from ome_zarr.writer import write_image
                 from ome_zarr.scale import Scaler
-                import json
+                import re
+                import shutil
+
+                from napari_tmidas.processing_functions.ome_output_utils import (
+                    _get_multiscales,
+                    _read_root_attrs,
+                    save_root_attrs,
+                )
 
                 # ── Read source metadata ──────────────────────────────────
                 zroot = zarr_lib.open(source, mode="r")
-                attrs = {}
-                zattrs_path = os.path.join(source, ".zattrs")
-                if os.path.exists(zattrs_path):
-                    with open(zattrs_path) as f:
-                        attrs = json.load(f)
+                # Read through the shared helper: a zarr v3 store -- which is
+                # what this plugin now writes -- keeps its attributes in
+                # zarr.json under "attributes", nested below "ome", so
+                # reading .zattrs alone found nothing and every piece of
+                # metadata below (axes, pyramid depth, pixel size) silently
+                # fell back to a guess.
+                attrs = _read_root_attrs(source)
 
-                multiscales = attrs.get("multiscales", [])
+                multiscales = _get_multiscales(attrs)
                 ms = multiscales[0] if multiscales else {}
                 axes = ms.get("axes", None)
 
@@ -1357,15 +1366,32 @@ if SKIMAGE_AVAILABLE:
                     return list(defaults.get(n, "tczyx"[-n:]))
 
                 # ── Open full-resolution array ────────────────────────────
-                zarr_arrays = list(zroot.array_keys())
-                if not zarr_arrays:
-                    # Group with multiscale datasets
-                    datasets = ms.get("datasets", [{"path": "0"}])
-                    arr_path = datasets[0].get("path", "0")
-                else:
-                    arr_path = zarr_arrays[0]
+                # The multiscale metadata lists its datasets coarsest-last,
+                # so datasets[0] is full resolution.  Picking
+                # list(array_keys())[0] instead resized whichever level the
+                # store happened to yield first (they come back unordered,
+                # e.g. ['s3','s4','s2','s1','s0']), throwing away most of the
+                # data while reporting success.
+                def _level_sort_key(name):
+                    match = re.search(r"(\d+)$", str(name))
+                    return (
+                        (0, int(match.group(1)))
+                        if match
+                        else (1, str(name))
+                    )
 
-                src_arr = zroot[arr_path]
+                arr_path = None
+                for dataset in ms.get("datasets", []):
+                    if isinstance(dataset, dict) and dataset.get("path"):
+                        arr_path = dataset["path"]
+                        break
+                if arr_path is None:
+                    zarr_arrays = sorted(
+                        zroot.array_keys(), key=_level_sort_key
+                    )
+                    arr_path = zarr_arrays[0] if zarr_arrays else None
+
+                src_arr = zroot if arr_path is None else zroot[arr_path]
                 src_da = da.from_zarr(src_arr)
                 # Save original shape and source level-0 scale for
                 # computing correct coordinate transforms after resize.
@@ -1445,16 +1471,19 @@ if SKIMAGE_AVAILABLE:
                 print(f"Writing OME-Zarr → {out_path}")
 
                 # ── Write OME-Zarr ────────────────────────────────────────
-                # Use FSStore with '/' key separator so napari-ome-zarr can
-                # read chunk files using its default FSStore path convention.
-                from zarr.storage import FSStore as _FSStore
-                out_store = _FSStore(
-                    out_path,
-                    key_separator="/",
-                    mode="w",
-                    auto_mkdir=True,
-                )
-                out_group = zarr_lib.open_group(out_store, mode="w")
+                # zarr.storage.FSStore was removed in zarr 3, which is what
+                # pyproject.toml pins.  The import raised, the bare except
+                # below swallowed it, and this "native" path silently
+                # degraded to loading the whole array through skimage -- a
+                # broken native path looked merely slow.  parse_url() is the
+                # same store ome-zarr itself uses, and is what the label
+                # writer in ome_output_utils already writes through.
+                from ome_zarr.io import parse_url
+
+                if os.path.exists(out_path):
+                    shutil.rmtree(out_path, ignore_errors=True)
+                out_store = parse_url(out_path, mode="w").store
+                out_group = zarr_lib.group(store=out_store, zarr_format=3)
 
                 axes_for_writer = axes if axes else _axes_for_ndim(resized_da.ndim)
 
@@ -1473,11 +1502,18 @@ if SKIMAGE_AVAILABLE:
                     compute=True,
                 )
 
-                # ── Fix coordinate transforms in output .zattrs ──────────
+                # ── Fix coordinate transforms ────────────────────────────
+                # Read (and, at the end of this function, write) through the
+                # helpers that know both metadata layouts: a v3 store keeps
+                # its attributes in zarr.json, so the old direct .zattrs
+                # access raised FileNotFoundError and the physical pixel size
+                # was silently left at the writer's default of 1.0.
+                out_attrs_cur = _read_root_attrs(out_path)
+                _out_ms_list = _get_multiscales(out_attrs_cur)
+                out_datasets = []
+                omero_metadata = None
                 try:
-                    out_zattrs_path = os.path.join(out_path, ".zattrs")
-                    out_attrs_cur = json.load(open(out_zattrs_path))
-                    out_ms = out_attrs_cur.get("multiscales", [{}])[0]
+                    out_ms = _out_ms_list[0] if _out_ms_list else {}
                     out_datasets = out_ms.get("datasets", [])
 
                     if src_scale_l0 and out_datasets:
@@ -1542,11 +1578,6 @@ if SKIMAGE_AVAILABLE:
                                 {"type": "scale", "scale": level_scale}
                             ]
 
-                        json.dump(
-                            out_attrs_cur,
-                            open(out_zattrs_path, "w"),
-                            indent=2,
-                        )
                         print(
                             f"Updated coordinate transforms: "
                             f"level 0 Y/X scale = {new_y_scale:.4f}"
@@ -1559,8 +1590,12 @@ if SKIMAGE_AVAILABLE:
                     # Sample level-0 output to get channel contrast limits.
                     # Read a sparse set of (T, Z) planes so this stays fast.
                     import zarr as _zarr_mod
+
+                    lv0_path = "0"
+                    if out_datasets and isinstance(out_datasets[0], dict):
+                        lv0_path = out_datasets[0].get("path") or "0"
                     lv0_arr = _zarr_mod.open_array(
-                        os.path.join(out_path, "0"), mode="r"
+                        os.path.join(out_path, lv0_path), mode="r"
                     )
                     out_ndim = lv0_arr.ndim  # 4 or 5
                     n_channels = (
@@ -1669,7 +1704,11 @@ if SKIMAGE_AVAILABLE:
                     omero_out = dict(src_omero)
                     omero_out["channels"] = omero_channels
                     omero_out.setdefault("version", "0.3")
-                    out_group.attrs["omero"] = omero_out
+                    # Attached below rather than through out_group.attrs:
+                    # assigning there re-serialises a stale in-memory copy of
+                    # the attributes, silently clobbering the coordinate
+                    # transforms fixed above.
+                    omero_metadata = omero_out
                     print(
                         f"Wrote omero window metadata for "
                         f"{n_out_channels} channel(s)"
@@ -1678,6 +1717,20 @@ if SKIMAGE_AVAILABLE:
                     print(
                         f"Warning: omero metadata generation failed: {_oe}"
                     )
+
+                # ── Persist metadata ─────────────────────────────────────
+                # One write covering both patches above, into whichever file
+                # this store actually keeps its attributes in.
+                try:
+                    if omero_metadata is not None:
+                        ome_block = out_attrs_cur.get("ome")
+                        if isinstance(ome_block, dict):
+                            ome_block["omero"] = omero_metadata
+                        else:
+                            out_attrs_cur["omero"] = omero_metadata
+                    save_root_attrs(out_path, out_attrs_cur)
+                except Exception as _me:
+                    print(f"Warning: metadata write failed: {_me}")
 
                 print(f"✅ OME-Zarr written: {out_path}")
                 # Return the path string — _file_selector.py treats this as

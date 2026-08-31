@@ -88,6 +88,39 @@ def _read_root_attrs(source_path: str) -> dict:
     return attrs
 
 
+def save_root_attrs(group_path: str, attrs: dict) -> bool:
+    """
+    Write a zarr group's attributes back, for either metadata layout.
+
+    The counterpart of :func:`_read_root_attrs`: zarr v2 keeps them in
+    ``.zattrs``, v3 nests them under ``attributes`` in ``zarr.json``.  Code
+    that patches metadata after ``write_image`` must go through here -- a
+    plain ``.zattrs`` write is a silent no-op on a v3 store, and assigning to
+    ``group.attrs`` re-serialises a stale in-memory document that clobbers
+    what ``write_image`` just wrote.
+
+    Returns whether anything was written.
+    """
+    zattrs_path = os.path.join(group_path, ".zattrs")
+    if os.path.exists(zattrs_path):
+        with open(zattrs_path, "w", encoding="utf-8") as f:
+            json.dump(attrs, f, indent=2)
+        return True
+
+    zarr_json_path = os.path.join(group_path, "zarr.json")
+    if os.path.exists(zarr_json_path):
+        with open(zarr_json_path, encoding="utf-8") as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            return False
+        doc["attributes"] = attrs
+        with open(zarr_json_path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+        return True
+
+    return False
+
+
 def _get_multiscales(attrs: dict) -> list:
     multiscales = attrs.get("multiscales", [])
     if isinstance(multiscales, list) and multiscales:

@@ -790,6 +790,11 @@ class TestConvertToUint8:
         )
 
 
+# ome-zarr's default scale_factors (2, 4, 8, 16) plus the full-resolution
+# level: one coordinate transform has to be supplied per level.
+_DEFAULT_PYRAMID_LEVELS = (1, 2, 4, 8, 16)
+
+
 def _write_ome_zarr(path, data, scale):
     """
     Build a small multiscale OME-Zarr fixture with known physical pixel size.
@@ -801,8 +806,13 @@ def _write_ome_zarr(path, data, scale):
     ome_writer = pytest.importorskip("ome_zarr.writer")
     ome_io = pytest.importorskip("ome_zarr.io")
 
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        physical_scale_kwargs,
+    )
+
     store = ome_io.parse_url(str(path), mode="w").store
     root = zarr.group(store=store)
+    names = "tczyx"
     axes = [
         {"name": "t", "type": "time"},
         {"name": "c", "type": "channel"},
@@ -810,9 +820,37 @@ def _write_ome_zarr(path, data, scale):
         {"name": "y", "type": "space"},
         {"name": "x", "type": "space"},
     ]
+    base_scale = [float(scale[n]) for n in names]
+
+    # write_image() takes **metadata, so a bare ``scale=`` kwarg on a release
+    # that has no such parameter is accepted and quietly dropped -- the
+    # fixture then claims a pixel size it never wrote. Go through the
+    # project's own helper, which picks whichever form the installed
+    # ome-zarr honours, and spell the levels out for the legacy form.
+    kwargs = physical_scale_kwargs(
+        {"type": "scale", "scale": base_scale}, names
+    )
+    if "scale" not in kwargs:
+        # One transform per pyramid level; only Y and X are downsampled.
+        kwargs = {
+            "coordinate_transformations": [
+                [
+                    {
+                        "type": "scale",
+                        "scale": [
+                            value * (2**level if name in "yx" else 1)
+                            for name, value in zip(names, base_scale)
+                        ],
+                    }
+                ]
+                for level in range(len(_DEFAULT_PYRAMID_LEVELS))
+            ]
+        }
+
     ome_writer.write_image(
-        image=data, group=root, axes=axes, scale=scale,
+        image=data, group=root, axes=axes,
         storage_options={"chunks": (1, 1, 1, data.shape[-2], data.shape[-1])},
+        **kwargs,
     )
     return str(path)
 
@@ -859,15 +897,6 @@ class TestResizeZarrNative:
         assert isinstance(result, np.ndarray)
         assert result.shape[-2:] == (16, 16)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "zarr.storage.FSStore was removed in zarr 3, which is what "
-            "pyproject.toml pins (zarr>=3). The import raises, the bare "
-            "except swallows it, and the 'native' resize silently degrades "
-            "to loading the entire array in memory via skimage."
-        ),
-    )
     def test_zarr_source_writes_ome_zarr_and_returns_path(self, tmp_path):
         rng = np.random.default_rng(0)
         data = (rng.random((1, 2, 4, 32, 32)) * 1000).astype(np.uint16)
@@ -893,17 +922,6 @@ class TestResizeZarrNative:
         )
         assert os.path.isdir(result)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "The source level is chosen with list(zroot.array_keys())[0], but "
-            "array_keys() is unordered -- it returns e.g. ['s1','s4','s2', "
-            "'s3','s0'] -- so a random pyramid level is resized instead of "
-            "full resolution. The correct ms['datasets'][0] branch is only "
-            "reached when the group holds no arrays, which never happens for "
-            "a real multiscale image."
-        ),
-    )
     def test_zarr_source_reads_full_resolution_level(self, tmp_path, capsys):
         """
         Resizing a downsampled pyramid level by the requested factor throws
@@ -932,14 +950,6 @@ class TestResizeZarrNative:
             + reported
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Blocked by the FSStore failure above; also reads pixel size from "
-            "a .zattrs file, which the zarr v3 layout written by the pinned "
-            "ome-zarr does not produce (metadata lives in zarr.json)."
-        ),
-    )
     def test_zarr_source_preserves_physical_pixel_size(self, tmp_path):
         """
         Halving YX doubles the physical size of a pixel. Losing this makes
@@ -962,8 +972,15 @@ class TestResizeZarrNative:
             _output_suffix="_rz",
         )
 
+        # Read through the project's own accessor: a zarr v3 store nests
+        # its multiscales under "ome", which a flat attrs["multiscales"]
+        # lookup misses entirely.
+        from napari_tmidas.processing_functions.ome_output_utils import (
+            _get_multiscales,
+        )
+
         out = zarr.open(str(result), mode="r")
-        datasets = out.attrs["multiscales"][0]["datasets"]
+        datasets = _get_multiscales(dict(out.attrs))[0]["datasets"]
         level0 = datasets[0]["coordinateTransformations"][0]["scale"]
         assert level0[-2] == pytest.approx(0.65)
         assert level0[-1] == pytest.approx(0.65)

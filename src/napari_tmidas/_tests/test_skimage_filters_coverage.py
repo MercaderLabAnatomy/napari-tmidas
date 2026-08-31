@@ -1168,12 +1168,18 @@ class TestResizeZarrNativeMetadataReading:
         assert "Resize (OME-Zarr native)" in capsys.readouterr().out
 
     def test_write_failure_falls_back_to_the_in_memory_resize(
-        self, tmp_path, capsys
+        self, tmp_path, capsys, monkeypatch
     ):
         """
         Every failure in the native path is swallowed; the contract is that
         the caller still gets a correctly resized array.
+
+        The failure is injected rather than waited for: this branch used to
+        be reached by accident on the pinned stack (``FSStore`` no longer
+        exists in zarr 3), so once that was fixed the test would otherwise
+        just stop exercising the fallback.
         """
+        ome_writer = pytest.importorskip("ome_zarr.writer")
         data = _blob_image((1, 2, 16, 16), seed=34)
         source = _write_v2_source(
             tmp_path / "src.zarr",
@@ -1182,6 +1188,11 @@ class TestResizeZarrNativeMetadataReading:
             scale=(1.0, 2.0, 0.325, 0.325),
         )
 
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("write_image exploded")
+
+        monkeypatch.setattr(ome_writer, "write_image", _boom)
+
         result = sf.resize_zarr_native(
             data,
             scale_factor=0.5,
@@ -1189,61 +1200,46 @@ class TestResizeZarrNativeMetadataReading:
             _output_folder=str(tmp_path),
         )
 
-        if isinstance(result, str):
-            pytest.skip("native OME-Zarr write succeeded on this stack")
         assert isinstance(result, np.ndarray)
         assert result.shape == (1, 2, 8, 8)
         assert "falling back to skimage path" in capsys.readouterr().out
 
 
-@pytest.fixture()
-def zarr_v2_shims(monkeypatch):
+def _written_attrs(path):
     """
-    Put back the two zarr-v2 entry points ``resize_zarr_native`` was written
-    against but zarr 3 no longer provides in the same shape, so the write
-    half of the function can be exercised at all:
+    Read a written group's attributes whichever layout it uses.
 
-    * ``zarr.storage.FSStore`` -- removed in zarr 3, mapped to ``LocalStore``;
-    * ``zarr.open_group`` -- defaulted back to ``zarr_format=2`` so the
-      output carries a ``.zattrs``, which the function edits afterwards;
-    * ``zarr.open_array`` -- ome-zarr names its levels ``s0``/``s1`` while
-      the function re-opens level ``0``, so the lookup is redirected.
-
-    Only library entry points are replaced; every line under test is the
-    module's own.  On the installed stack the unshimmed call bails out at
-    the FSStore import -- that is what the xfails in ``test_skimage_filters``
-    record.
+    The function writes zarr v3 (attributes in ``zarr.json``, multiscales
+    nested under ``ome``); a v2 source still writes ``.zattrs``.  Going
+    through the module's own reader keeps these assertions independent of
+    which one the installed stack produces.
     """
-    zarr = pytest.importorskip("zarr")
-
-    monkeypatch.setattr(
-        zarr.storage,
-        "FSStore",
-        lambda path, **kwargs: zarr.storage.LocalStore(path),
-        raising=False,
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        _read_root_attrs,
     )
 
-    original_open_group = zarr.open_group
+    return _read_root_attrs(path)
 
-    def open_group(store=None, **kwargs):
-        kwargs.setdefault("zarr_format", 2)
-        return original_open_group(store, **kwargs)
 
-    monkeypatch.setattr(zarr, "open_group", open_group)
+def _written_omero(path):
+    attrs = _written_attrs(path)
+    ome = attrs.get("ome")
+    if isinstance(ome, dict) and "omero" in ome:
+        return ome["omero"]
+    return attrs["omero"]
 
-    original_open_array = zarr.open_array
 
-    def open_array(store=None, **kwargs):
-        if isinstance(store, str) and not os.path.exists(store):
-            alternative = os.path.join(
-                os.path.dirname(store), "s" + os.path.basename(store)
-            )
-            if os.path.exists(alternative):
-                store = alternative
-        return original_open_array(store, **kwargs)
+def _written_datasets(path):
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        _get_multiscales,
+    )
 
-    monkeypatch.setattr(zarr, "open_array", open_array)
-    return zarr
+    return _get_multiscales(_written_attrs(path))[0]["datasets"]
+
+
+def _level0_path(path):
+    """On-disk path of the written full-resolution level (``s0``, ``0``, …)."""
+    return os.path.join(path, _written_datasets(path)[0]["path"])
 
 
 class TestResizeZarrNativeWriting:
@@ -1251,10 +1247,10 @@ class TestResizeZarrNativeWriting:
     The write half of "Resize Zarr by YX Scale (OME-Zarr native)": it writes
     an OME-Zarr, rewrites the level scales so a halved image reports twice
     the physical pixel size, and builds omero display windows by sampling
-    the output.  See ``zarr_v2_shims`` for why the shims are needed.
+    the output.
     """
 
-    def test_returns_the_written_path(self, tmp_path, zarr_v2_shims, capsys):
+    def test_returns_the_written_path(self, tmp_path, capsys):
         data = _blob_image((1, 2, 2, 16, 16), seed=40)
         source = _write_v2_source(
             tmp_path / "src.zarr",
@@ -1279,7 +1275,7 @@ class TestResizeZarrNativeWriting:
         assert os.path.isdir(result)
 
     def test_pixel_size_is_doubled_when_yx_is_halved(
-        self, tmp_path, zarr_v2_shims, capsys
+        self, tmp_path, capsys
     ):
         """0.325 um pixels at half resolution are 0.65 um pixels."""
         data = _blob_image((1, 2, 2, 16, 16), seed=41)
@@ -1299,7 +1295,7 @@ class TestResizeZarrNativeWriting:
         )
 
     def test_omero_windows_are_built_from_the_written_data(
-        self, tmp_path, zarr_v2_shims, capsys
+        self, tmp_path, capsys
     ):
         data = _blob_image((1, 2, 2, 16, 16), seed=42)
         source = _write_v2_source(
@@ -1322,8 +1318,7 @@ class TestResizeZarrNativeWriting:
             capsys.readouterr().out
         )
 
-        written = zarr_v2_shims.open_group(result, mode="r")
-        omero = dict(written.attrs)["omero"]
+        omero = _written_omero(result)
         channels = omero["channels"]
         assert len(channels) == 2
         # Colour and label are inherited from the source, per channel.
@@ -1333,10 +1328,9 @@ class TestResizeZarrNativeWriting:
         assert omero["version"] == "0.3"
 
         # The window must describe the data that was actually written.
+        zarr = pytest.importorskip("zarr")
         level0 = np.asarray(
-            zarr_v2_shims.open_array(
-                os.path.join(result, "s0"), mode="r"
-            )[:]
+            zarr.open_array(_level0_path(result), mode="r")[:]
         )
         for index, channel in enumerate(channels):
             plane = level0[:, index]
@@ -1349,7 +1343,7 @@ class TestResizeZarrNativeWriting:
             )
 
     def test_single_channel_extraction_drops_the_channel_axis(
-        self, tmp_path, zarr_v2_shims, capsys
+        self, tmp_path, capsys
     ):
         """
         Extracting one channel removes C from the data, from the axes list
@@ -1379,19 +1373,17 @@ class TestResizeZarrNativeWriting:
         assert "Extracting channel 1 (axis 1)" in printed
         assert "Wrote omero window metadata for 1 channel(s)" in printed
 
-        written = zarr_v2_shims.open_group(result, mode="r")
-        channels = dict(written.attrs)["omero"]["channels"]
+        channels = _written_omero(result)["channels"]
         assert len(channels) == 1
         assert channels[0]["color"] == "FF0000"
         assert channels[0]["label"] == "red"
 
-        level0 = zarr_v2_shims.open_array(
-            os.path.join(result, "s0"), mode="r"
-        )
+        zarr = pytest.importorskip("zarr")
+        level0 = zarr.open_array(_level0_path(result), mode="r")
         assert level0.shape == (1, 2, 8, 8)
 
     def test_default_colours_are_supplied_when_the_source_has_none(
-        self, tmp_path, zarr_v2_shims
+        self, tmp_path
     ):
         data = _blob_image((1, 2, 2, 16, 16), seed=44)
         source = _write_v2_source(tmp_path / "src.zarr", data)
@@ -1404,13 +1396,12 @@ class TestResizeZarrNativeWriting:
             _output_suffix="_rz",
         )
 
-        written = zarr_v2_shims.open_group(result, mode="r")
-        channels = dict(written.attrs)["omero"]["channels"]
+        channels = _written_omero(result)["channels"]
         assert [c["color"] for c in channels] == ["FFFFFF", "00FF00"]
         assert [c["label"] for c in channels] == ["Channel 0", "Channel 1"]
 
     def test_source_pyramid_depth_is_preserved(
-        self, tmp_path, zarr_v2_shims
+        self, tmp_path
     ):
         data = _blob_image((1, 2, 2, 16, 16), seed=45)
         source = _write_v2_source(tmp_path / "src.zarr", data, n_levels=3)
@@ -1423,18 +1414,16 @@ class TestResizeZarrNativeWriting:
             _output_suffix="_rz",
         )
 
-        written = zarr_v2_shims.open_group(result, mode="r")
-        datasets = dict(written.attrs)["multiscales"][0]["datasets"]
-        assert len(datasets) == 3
+        assert len(_written_datasets(result)) == 3
 
     def test_missing_ome_metadata_falls_back_to_axes_by_rank(
-        self, tmp_path, zarr_v2_shims, capsys
+        self, tmp_path, capsys
     ):
         """
         A plain zarr with no multiscales still has to be written with a
         sensible axis list, inferred from the rank.
         """
-        zarr = zarr_v2_shims
+        zarr = pytest.importorskip("zarr")
         data = _blob_image((1, 2, 16, 16), seed=46)
         source = str(tmp_path / "bare.zarr")
         group = zarr.open_group(source, mode="w", zarr_format=2)
@@ -1454,6 +1443,9 @@ class TestResizeZarrNativeWriting:
         )
 
         assert "falling back to skimage path" not in capsys.readouterr().out
-        written = zarr.open_group(result, mode="r")
-        axes = dict(written.attrs)["multiscales"][0]["axes"]
+        from napari_tmidas.processing_functions.ome_output_utils import (
+            _get_multiscales,
+        )
+
+        axes = _get_multiscales(_written_attrs(result))[0]["axes"]
         assert [a["name"] for a in axes] == ["t", "z", "y", "x"]
