@@ -347,17 +347,12 @@ class TestMergeFolderHappyPath:
         assert data.shape == (4, 2, 3, 5)
         np.testing.assert_array_equal(data[:, 0, 0, 0], [1, 1, 2, 2])
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Loading goes through skimage.io.imread, which reads a leading "
-            "axis of length 3 as RGB samples and moves it last. A 3-slice "
-            "Z-stack therefore merges into (T, Y, X, Z) while the OME "
-            "metadata still says TZYX -- transposed, mislabelled and "
-            "silent. Z of 4 has the same problem; Z of 5 does not."
-        ),
-    )
     def test_three_slice_zstacks_keep_z_second(self, tmp_path):
+        """
+        A leading axis of length 3 or 4 is exactly what skimage.io.imread
+        mistakes for RGB(A) samples and moves last, which silently merged a
+        3-slice Z-stack as (T, Y, X, Z) under TZYX metadata.
+        """
         folder = tmp_path / "series"
         _series(folder, (3, 6, 7), 2)
         out = tmp_path / "out"

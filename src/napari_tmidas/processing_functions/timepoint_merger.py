@@ -16,12 +16,28 @@ from typing import List, Tuple
 
 import numpy as np
 import tifffile
-from skimage.io import imread
+from skimage.io import imread as _skimage_imread
 
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions.ome_output_utils import (
     _extract_source_physical_scale,
 )
+
+
+def imread(path):
+    """
+    Read one timepoint, keeping its axis order intact.
+
+    ``skimage.io.imread`` interprets a leading axis of length 3 or 4 as RGB(A)
+    samples and moves it last, so a 3-slice Z-stack came back as (Y, X, Z)
+    while the merged stack was still labelled TZYX -- transposed, mislabelled
+    and silent.  tifffile reads a TIFF's own shape metadata instead, so the
+    axes survive; anything else still goes through skimage.
+    """
+    if str(path).lower().endswith((".tif", ".tiff")):
+        return tifffile.imread(path)
+    return _skimage_imread(path)
+
 
 # Global set to track which folders have been processed in the current session
 # This prevents redundant processing when the function is called for each file
@@ -169,10 +185,15 @@ def load_and_validate_images(
             output_order = "TYX"
         elif detected_order in ["ZYX", "CYX"]:
             output_order = "T" + detected_order  # TZYX or TCYX
-        elif detected_order in ["CZYX", "TZYX"]:
-            output_order = (
-                "T" + detected_order
-            )  # TCZYX or TTZYX (will concatenate along T)
+        elif detected_order == "TZYX":
+            # Files are joined along the T axis they already have, so the
+            # result is still 4D TZYX.  Prefixing another "T" labelled a
+            # 4-axis array as 5-axis ("TTZYX"), which every consumer of this
+            # order string then mis-parsed.
+            output_order = "TZYX"
+            is_4d_input = True
+        elif detected_order == "CZYX":
+            output_order = "TCZYX"  # one timepoint per file, channels kept
             is_4d_input = True
         else:
             raise ValueError(f"Unsupported dimension order: {detected_order}")

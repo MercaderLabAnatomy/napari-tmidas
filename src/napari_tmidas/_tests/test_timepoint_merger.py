@@ -258,16 +258,12 @@ class TestLoadAndValidateImages:
 
         assert order == "TCYX"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "An explicit TZYX hint builds output_order as 'T' + 'TZYX' = "
-            "'TTZYX', a 5-axis label for the 4-axis array it actually "
-            "returns. Auto-detection of the same data correctly reports "
-            "'TZYX'; only the explicit path is wrong."
-        ),
-    )
     def test_explicit_tzyx_reports_four_axes(self, tmp_path):
+        """
+        Files that are already time series are concatenated along their own
+        T axis, so the result stays 4D.  The explicit path used to label it
+        "TTZYX" while auto-detection of the same data said "TZYX".
+        """
         files = _write_series(tmp_path, (2, 5, 6, 7), 3)
 
         stack, order = load_and_validate_images(files, dimension_order="TZYX")
