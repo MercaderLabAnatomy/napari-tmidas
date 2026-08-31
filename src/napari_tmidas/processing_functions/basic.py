@@ -1343,6 +1343,13 @@ def merge_channels(
                 shape=merged_shape,
                 dtype=image_dtype,
                 metadata={"axes": axes_str},
+                # Without this, a trailing-but-one axis of length 3 or 4 (a
+                # 3- or 4-slice Z stack) is written as RGB(A) samples:
+                # PHOTOMETRIC.RGB with samplesperpixel=Z.  tifffile reads it
+                # back correctly from its own shaped metadata, so a
+                # round-trip looks fine, but ImageJ, bio-formats and PIL all
+                # see a colour image.
+                photometric="minisblack",
             )
         except Exception:
             if os.path.exists(output_path):

@@ -796,18 +796,14 @@ class TestMergeChannelsStreamingPath:
             )
 
     @pytest.mark.parametrize("n_z", [3, 4])
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "The merged CZYX stack is handed to TiffWriter without "
-            "photometric='minisblack', so a Z axis of length 3 or 4 is "
-            "interpreted as RGB(A) samples: the page is tagged PHOTOMETRIC.RGB "
-            "with samplesperpixel=Z. tifffile reads it back correctly from its "
-            "own shaped metadata, which is why a round-trip test misses this, "
-            "but ImageJ, bio-formats and PIL all see a colour image."
-        ),
-    )
     def test_merged_tiff_is_not_tagged_as_rgb(self, tmp_path, n_z):
+        """
+        Written without photometric="minisblack", a Z axis of length 3 or 4
+        was tagged PHOTOMETRIC.RGB with samplesperpixel=Z.  tifffile reads
+        that back correctly from its own shaped metadata -- which is why a
+        round-trip test misses it -- but ImageJ, bio-formats and PIL all see
+        a colour image.
+        """
         tifffile = pytest.importorskip("tifffile")
         src = tmp_path / "in"
         src.mkdir()
