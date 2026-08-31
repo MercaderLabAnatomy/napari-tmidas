@@ -384,17 +384,12 @@ class TestCreateGridOverlay:
         # No `filepath` local anywhere in this call stack.
         np.testing.assert_array_equal(result, image)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "_create_overlay normalises with (x - min) / (max - min), which "
-            "is 0/0 for a uniform image. The resulting NaNs cast to 0, so a "
-            "saturated or otherwise flat field renders as a solid black tile "
-            "-- indistinguishable from an empty one in a grid whose whole "
-            "purpose is visual QC."
-        ),
-    )
     def test_uniform_intensity_does_not_render_black(self):
+        """
+        The contrast stretch is 0/0 on a uniform image; the NaNs it used to
+        produce cast to 0, so a saturated field rendered as a solid black
+        tile -- indistinguishable from an empty one in a QC grid.
+        """
         flat = np.full((32, 32), 200, dtype=np.uint8)
         labels = np.zeros((32, 32), dtype=np.uint16)
 

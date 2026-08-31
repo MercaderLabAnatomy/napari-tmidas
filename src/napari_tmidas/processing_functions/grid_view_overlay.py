@@ -172,10 +172,22 @@ def _create_overlay(
     else:
         intensity_norm = intensity_image.copy()
 
-    if intensity_norm.max() > 0:
-        intensity_norm = (intensity_norm - intensity_norm.min()) / (
-            intensity_norm.max() - intensity_norm.min()
-        )
+    # A uniform tile has max == min, so the contrast stretch below is 0/0.
+    # The NaNs it produced cast to 0, rendering a saturated or otherwise flat
+    # field as solid black -- indistinguishable from an empty one in a grid
+    # whose whole purpose is visual QC.  With no contrast to stretch, show the
+    # one value it does have, relative to the dtype's range.
+    imin = float(intensity_norm.min())
+    imax = float(intensity_norm.max())
+    span = imax - imin
+    if span > 0:
+        intensity_norm = (intensity_norm - imin) / span
+    elif imax > 0:
+        if np.issubdtype(intensity_image.dtype, np.integer):
+            level = imax / float(np.iinfo(intensity_image.dtype).max)
+        else:
+            level = min(imax, 1.0)
+        intensity_norm = np.full_like(intensity_norm, level)
 
     # Create RGB image with intensity in grayscale (all channels)
     h, w = intensity_norm.shape
