@@ -1,3 +1,5 @@
+.gitignore
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -57,6 +59,6 @@ ultrack_data/
 
 # Claude Code
 .claude
-
+CLAUDE.md
 # graphify knowledge graph output
 graphify-out/
