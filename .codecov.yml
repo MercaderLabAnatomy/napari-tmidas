@@ -63,9 +63,8 @@ component_management:
       statuses:
         # target: auto means this component may never regress, without
         # guessing a baseline the CI matrix has not published yet. Once the
-        # first run establishes one, swap in an absolute target and raise it
-        # as the thin modules get tests (timepoint_merger, colocalization,
-        # patch_resized_zarrs and torch_labels_to_contours are all under 10%).
+        # first run establishes one, swap in an absolute target (every module
+        # in this component measured >= 96% locally in 2026-09).
         - type: project
           target: auto
           threshold: 1%
