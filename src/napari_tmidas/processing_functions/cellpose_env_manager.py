@@ -17,7 +17,7 @@ import numpy as np
 import tifffile
 import zarr
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 # Global variable to track running processes for cancellation
 _running_processes = []
@@ -183,10 +183,8 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         print("Installing stable PyTorch with CUDA 12.8...")
         try:
             subprocess.check_call(
-                [
+                pip_command(
                     env_python,
-                    "-m",
-                    "pip",
                     "install",
                     "--upgrade",
                     "torch",
@@ -194,7 +192,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
                     "torchaudio",
                     "--index-url",
                     "https://download.pytorch.org/whl/cu128",
-                ]
+                )
             )
             print("✓ Stable PyTorch CUDA 12.8 installed successfully")
         except subprocess.CalledProcessError as e:
@@ -211,10 +209,8 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             )
             try:
                 subprocess.check_call(
-                    [
+                    pip_command(
                         env_python,
-                        "-m",
-                        "pip",
                         "install",
                         "--upgrade",
                         "--pre",
@@ -223,7 +219,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
                         "torchaudio",
                         "--index-url",
                         "https://download.pytorch.org/whl/nightly/cu128",
-                    ]
+                    )
                 )
                 print("✓ Nightly PyTorch CUDA 12.8 installed successfully")
             except subprocess.CalledProcessError as e:
@@ -249,7 +245,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             print(f"Installing {package}...")
             try:
                 subprocess.check_call(
-                    [env_python, "-m", "pip", "install", package]
+                    pip_command(env_python, "install", package)
                 )
                 print(f"✓ {package} installed successfully")
             except subprocess.CalledProcessError as e:
@@ -263,7 +259,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         print(f"Installing optional dependency for cpdino models: {dinov3_dep}...")
         try:
             subprocess.check_call(
-                [env_python, "-m", "pip", "install", dinov3_dep]
+                pip_command(env_python, "install", dinov3_dep)
             )
             print("✓ dinov3 installed successfully")
         except subprocess.CalledProcessError as e:
@@ -426,7 +422,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
         # Fallback: if importing cellpose fails, use pip metadata.
         try:
             show_result = subprocess.run(
-                [env_python, "-m", "pip", "show", "cellpose"],
+                pip_command(env_python, "show", "cellpose"),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -469,7 +465,7 @@ class CellposeEnvironmentManager(BaseEnvironmentManager):
             debug_lines = []
             try:
                 dbg = subprocess.run(
-                    [env_python, "-m", "pip", "show", "cellpose"],
+                    pip_command(env_python, "show", "cellpose"),
                     capture_output=True,
                     text=True,
                     check=False,

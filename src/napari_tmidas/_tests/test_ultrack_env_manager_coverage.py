@@ -2,8 +2,8 @@
 Branch-coverage tests for
 ``napari_tmidas.processing_functions.ultrack_env_manager``.
 
-The module shells out to conda/mamba for every operation.  Neither the
-``ultrack`` conda environment nor the ``ultrack`` package exists in the
+The module shells out to the dedicated environment's Python for every
+operation.  Neither the ``ultrack`` environment nor the ``ultrack`` package exists in the
 test environment, so every test here replaces the module's *collaborators*
 (``shutil.which``, ``subprocess.run``, ``subprocess.Popen`` and the sibling
 helpers looked up as module globals) and then exercises the real control
@@ -77,11 +77,28 @@ class Logger:
         return "\n".join(self.messages)
 
 
-@pytest.fixture()
-def conda(monkeypatch):
-    """Pin ``get_conda_cmd`` so no real conda lookup happens."""
-    monkeypatch.setattr(uem, "get_conda_cmd", lambda: "conda")
-    return "conda"
+@pytest.fixture(autouse=True)
+def fake_home(monkeypatch, tmp_path):
+    """Root every environment path in a throwaway HOME.
+
+    Env paths are resolved from HOME on each call, so nothing a test does
+    can reach the real ~/.napari-tmidas.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def _py(env_name="ultrack"):
+    """The environment Python the module targets for ``env_name``."""
+    return uem.get_env_python(env_name)
+
+
+def _no_env_python(monkeypatch, message="no env"):
+    """Make resolving the environment's Python raise ``message``."""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(uem, "get_env_python", boom)
 
 
 def _write_module(root, parts, content):
@@ -129,83 +146,27 @@ SOLVER_UNPATCHED = """    def add_edges(self, sources, targets, weights):
 
 
 # ---------------------------------------------------------------------------
-# get_conda_cmd
-# ---------------------------------------------------------------------------
-
-
-class TestGetCondaCmd:
-    """Pin the mamba-before-conda preference and the not-found error."""
-
-    def test_prefers_mamba(self, monkeypatch):
-        seen = []
-
-        def which(cmd):
-            seen.append(cmd)
-            return "/usr/bin/mamba" if cmd == "mamba" else None
-
-        monkeypatch.setattr(uem.shutil, "which", which)
-        assert uem.get_conda_cmd() == "mamba"
-        # conda is never probed once mamba is found.
-        assert seen == ["mamba"]
-
-    def test_falls_back_to_conda(self, monkeypatch):
-        monkeypatch.setattr(
-            uem.shutil,
-            "which",
-            lambda cmd: "/usr/bin/conda" if cmd == "conda" else None,
-        )
-        assert uem.get_conda_cmd() == "conda"
-
-    def test_raises_when_neither_present(self, monkeypatch):
-        monkeypatch.setattr(uem.shutil, "which", lambda cmd: None)
-        with pytest.raises(RuntimeError, match="Neither conda nor mamba"):
-            uem.get_conda_cmd()
-
-
-# ---------------------------------------------------------------------------
 # is_env_created
 # ---------------------------------------------------------------------------
 
 
 class TestIsEnvCreated:
-    """Environment listing is parsed line-wise; failures degrade to False."""
+    """An env exists when its Python does, under ~/.napari-tmidas/envs."""
 
-    def test_true_when_name_in_env_list(self, monkeypatch, conda):
-        router = RunRouter(
-            default=FakeCompleted(
-                0, "# conda environments:\nbase   *  /opt/c\nultrack  /opt/u\n"
-            )
-        )
-        monkeypatch.setattr(uem.subprocess, "run", router)
-
-        assert uem.is_env_created("ultrack") is True
-        assert router.matching("conda env list")
-
-    def test_false_when_name_absent(self, monkeypatch, conda):
-        monkeypatch.setattr(
-            uem.subprocess,
-            "run",
-            RunRouter(default=FakeCompleted(0, "base  *  /opt/c\n")),
-        )
+    def test_false_when_env_missing(self):
         assert uem.is_env_created("ultrack") is False
 
-    def test_custom_env_name_is_used(self, monkeypatch, conda):
-        monkeypatch.setattr(
-            uem.subprocess,
-            "run",
-            RunRouter(default=FakeCompleted(0, "myenv  /opt/myenv\n")),
-        )
+    def test_true_when_python_exists(self, monkeypatch):
+        env_python = _py("myenv")
+        (uem.Path(env_python).parent).mkdir(parents=True)
+        uem.Path(env_python).touch()
         assert uem.is_env_created("myenv") is True
         assert uem.is_env_created("ultrack") is False
 
-    def test_exception_is_swallowed(self, monkeypatch, capsys):
-        def boom():
-            raise RuntimeError("no conda")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
-        assert uem.is_env_created() is False
-        assert (
-            "Error checking environment: no conda" in capsys.readouterr().out
+    def test_env_lives_under_napari_tmidas_envs(self, tmp_path):
+        env_python = uem.Path(_py("ultrack"))
+        assert (tmp_path / "home" / ".napari-tmidas" / "envs" / "ultrack") in (
+            env_python.parents
         )
 
 
@@ -269,7 +230,7 @@ class TestGetCudaVersion:
 class TestEnsureScikitImageFix:
     """Version gate around the read-only-array (const buffer) fix."""
 
-    def test_returns_false_when_version_probe_fails(self, monkeypatch, conda):
+    def test_returns_false_when_version_probe_fails(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess, "run", RunRouter(default=FakeCompleted(1, ""))
         )
@@ -277,7 +238,7 @@ class TestEnsureScikitImageFix:
         assert uem._ensure_scikit_image_fix("ultrack", log) is False
         assert "Could not check scikit-image version" in log.text()
 
-    def test_recent_release_reports_fix_present(self, monkeypatch, conda):
+    def test_recent_release_reports_fix_present(self, monkeypatch):
         router = RunRouter(default=FakeCompleted(0, "0.26.1\n"))
         monkeypatch.setattr(uem.subprocess, "run", router)
         log = Logger()
@@ -287,11 +248,9 @@ class TestEnsureScikitImageFix:
         assert "Current scikit-image version: 0.26.1" in log.text()
         # The version must be read from the target env, not from the
         # interpreter running the tests.
-        assert router.matching("conda run -n myenv python -c import skimage")
+        assert router.matching(f"{_py('myenv')} -c import skimage")
 
-    def test_older_release_falls_back_to_runtime_shim(
-        self, monkeypatch, conda
-    ):
+    def test_older_release_falls_back_to_runtime_shim(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -302,7 +261,7 @@ class TestEnsureScikitImageFix:
         assert "lacks the const-buffer fix" in log.text()
         assert "map_array shim" in log.text()
 
-    def test_unparseable_version_still_reports_true(self, monkeypatch, conda):
+    def test_unparseable_version_still_reports_true(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -310,7 +269,7 @@ class TestEnsureScikitImageFix:
         )
         assert uem._ensure_scikit_image_fix("ultrack", None) is True
 
-    def test_no_log_func_is_tolerated(self, monkeypatch, conda):
+    def test_no_log_func_is_tolerated(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -318,9 +277,7 @@ class TestEnsureScikitImageFix:
         )
         assert uem._ensure_scikit_image_fix("ultrack") is True
 
-    def test_dev_branch_upgrades_when_stable_available(
-        self, monkeypatch, conda
-    ):
+    def test_dev_branch_upgrades_when_stable_available(self, monkeypatch):
         # NOTE: the 'dev' branch is only reachable with a version string that
         # does not start with a PEP440 release triple >= 0.26.1 -- see the
         # module's own re.match early-return.  A leading-text version is used
@@ -343,7 +300,7 @@ class TestEnsureScikitImageFix:
         # not contain this substring, so this matches only the upgrade).
         assert router.matching("pip install --upgrade scikit-image>=0.26.1")
 
-    def test_dev_branch_keeps_dev_when_upgrade_fails(self, monkeypatch, conda):
+    def test_dev_branch_keeps_dev_when_upgrade_fails(self, monkeypatch):
         router = RunRouter(
             rules=[
                 ("--dry-run", FakeCompleted(0, "Would install 0.26.1")),
@@ -356,7 +313,7 @@ class TestEnsureScikitImageFix:
         assert uem._ensure_scikit_image_fix("ultrack", log) is True
         assert "Keeping dev version" in log.text()
 
-    def test_dev_branch_skips_upgrade_when_no_stable(self, monkeypatch, conda):
+    def test_dev_branch_skips_upgrade_when_no_stable(self, monkeypatch):
         router = RunRouter(
             rules=[("--dry-run", FakeCompleted(1, "", "nope"))],
             default=FakeCompleted(0, "dev build 0.26.1\n"),
@@ -368,13 +325,10 @@ class TestEnsureScikitImageFix:
         assert not router.matching("pip install --upgrade")
 
     def test_exception_returns_false(self, monkeypatch):
-        def boom():
-            raise RuntimeError("no conda")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch)
         log = Logger()
         assert uem._ensure_scikit_image_fix("ultrack", log) is False
-        assert "Error managing scikit-image: no conda" in log.text()
+        assert "Error managing scikit-image: no env" in log.text()
 
 
 # ---------------------------------------------------------------------------
@@ -391,9 +345,7 @@ class TestPatchUltrackXp:
         monkeypatch.setattr(uem.subprocess, "run", router)
         return router
 
-    def test_returns_false_when_site_packages_probe_fails(
-        self, monkeypatch, conda
-    ):
+    def test_returns_false_when_site_packages_probe_fails(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -403,17 +355,13 @@ class TestPatchUltrackXp:
         assert uem._patch_ultrack_xp("ultrack", log) is False
         assert "Could not get site-packages path" in log.text()
 
-    def test_returns_false_when_cuda_py_missing(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_returns_false_when_cuda_py_missing(self, monkeypatch, tmp_path):
         self._site(monkeypatch, tmp_path)
         log = Logger()
         assert uem._patch_ultrack_xp("ultrack", log) is False
         assert "cuda.py not found" in log.text()
 
-    def test_applies_patch_and_rewrites_file(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_applies_patch_and_rewrites_file(self, monkeypatch, tmp_path):
         path = _write_module(
             tmp_path, ("ultrack", "utils", "cuda.py"), CUDA_UNPATCHED
         )
@@ -428,9 +376,9 @@ class TestPatchUltrackXp:
         assert "Patched ultrack/utils/cuda.py" in log.text()
         # site-packages is resolved inside the target env; probing the
         # wrong env would patch the wrong installation.
-        assert router.matching("conda run -n myenv python -c import site;")
+        assert router.matching(f"{_py('myenv')} -c import site;")
 
-    def test_already_patched_is_a_noop(self, monkeypatch, tmp_path, conda):
+    def test_already_patched_is_a_noop(self, monkeypatch, tmp_path):
         path = _write_module(
             tmp_path, ("ultrack", "utils", "cuda.py"), CUDA_PATCHED
         )
@@ -443,7 +391,7 @@ class TestPatchUltrackXp:
         assert "ultrack already patched" in log.text()
 
     def test_unknown_structure_is_reported_but_not_a_failure(
-        self, monkeypatch, tmp_path, conda
+        self, monkeypatch, tmp_path
     ):
         path = _write_module(
             tmp_path,
@@ -457,9 +405,7 @@ class TestPatchUltrackXp:
         assert path.read_text() == "import numpy as np\ncp = None\n"
         assert "code structure different than expected" in log.text()
 
-    def test_partial_marker_still_applies_patch(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_partial_marker_still_applies_patch(self, monkeypatch, tmp_path):
         # 'xp = np' and the log message both appear, but not in the exact
         # patched block, so the patch is applied anyway.
         content = "xp = np  # elsewhere\n" + CUDA_UNPATCHED
@@ -472,10 +418,7 @@ class TestPatchUltrackXp:
         assert path.read_text().count("xp = np") == 2
 
     def test_exception_returns_false(self, monkeypatch):
-        def boom():
-            raise RuntimeError("kaput")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch, "kaput")
         log = Logger()
         assert uem._patch_ultrack_xp("ultrack", log) is False
         assert "Error patching ultrack: kaput" in log.text()
@@ -498,9 +441,7 @@ class TestPatchUltrackReadonlyArrays:
         monkeypatch.setattr(uem.subprocess, "run", router)
         return router
 
-    def test_returns_false_when_site_packages_probe_fails(
-        self, monkeypatch, conda
-    ):
+    def test_returns_false_when_site_packages_probe_fails(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -510,23 +451,19 @@ class TestPatchUltrackReadonlyArrays:
         assert uem._patch_ultrack_readonly_arrays("ultrack", log) is False
         assert "Could not get site-packages path" in log.text()
 
-    def test_returns_false_when_solver_missing(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_returns_false_when_solver_missing(self, monkeypatch, tmp_path):
         self._site(monkeypatch, tmp_path)
         log = Logger()
         assert uem._patch_ultrack_readonly_arrays("ultrack", log) is False
         assert "ultrack solver not found" in log.text()
 
-    def test_applies_patch_and_rewrites_file(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_applies_patch_and_rewrites_file(self, monkeypatch, tmp_path):
         path = _write_module(tmp_path, SOLVER_PARTS, SOLVER_UNPATCHED)
         router = self._site(monkeypatch, tmp_path)
         log = Logger()
 
         assert uem._patch_ultrack_readonly_arrays("myenv", log) is True
-        assert router.matching("conda run -n myenv python -c import site;")
+        assert router.matching(f"{_py('myenv')} -c import site;")
 
         new = path.read_text()
         assert "# PATCH: Ensure arrays are writable" in new
@@ -535,7 +472,7 @@ class TestPatchUltrackReadonlyArrays:
         assert "np.asarray(sources, dtype=int)" not in new
         assert "Patched ultrack solver" in log.text()
 
-    def test_already_patched_is_a_noop(self, monkeypatch, tmp_path, conda):
+    def test_already_patched_is_a_noop(self, monkeypatch, tmp_path):
         content = "# PATCH: Ensure arrays are writable\n" + SOLVER_UNPATCHED
         path = _write_module(tmp_path, SOLVER_PARTS, content)
         self._site(monkeypatch, tmp_path)
@@ -546,7 +483,7 @@ class TestPatchUltrackReadonlyArrays:
         assert "already patched for read-only arrays" in log.text()
 
     def test_unknown_structure_is_reported_but_not_a_failure(
-        self, monkeypatch, tmp_path, conda
+        self, monkeypatch, tmp_path
     ):
         path = _write_module(
             tmp_path, SOLVER_PARTS, "class MIPSolver:\n    pass\n"
@@ -559,10 +496,7 @@ class TestPatchUltrackReadonlyArrays:
         assert "code structure different than expected" in log.text()
 
     def test_exception_returns_false(self, monkeypatch):
-        def boom():
-            raise RuntimeError("kaput")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch, "kaput")
         log = Logger()
         assert uem._patch_ultrack_readonly_arrays("ultrack", log) is False
         assert "Error patching ultrack solver: kaput" in log.text()
@@ -576,22 +510,22 @@ class TestPatchUltrackReadonlyArrays:
 class TestIsPackageInstalled:
     """Import probe run inside the target environment."""
 
-    def test_true_on_zero_returncode(self, monkeypatch, conda):
+    def test_true_on_zero_returncode(self, monkeypatch):
         router = RunRouter(default=FakeCompleted(0))
         monkeypatch.setattr(uem.subprocess, "run", router)
 
         assert uem.is_package_installed("zarr", "ultrack") is True
-        assert router.matching("conda run -n ultrack python -c import zarr")
+        assert router.matching(f"{_py()} -c import zarr")
 
-    def test_false_on_nonzero_returncode(self, monkeypatch, conda):
+    def test_false_on_nonzero_returncode(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess, "run", RunRouter(default=FakeCompleted(1))
         )
         assert uem.is_package_installed("nope") is False
 
-    def test_false_on_exception(self, monkeypatch, conda):
+    def test_false_on_exception(self, monkeypatch):
         def raiser(*args, **kwargs):
-            raise subprocess.TimeoutExpired("conda", 10)
+            raise subprocess.TimeoutExpired("python", 10)
 
         monkeypatch.setattr(uem.subprocess, "run", raiser)
         assert uem.is_package_installed("zarr") is False
@@ -605,7 +539,7 @@ class TestIsPackageInstalled:
 class TestCheckGpuAvailable:
     """The probe script's stdout contract: SUCCESS:... vs ERROR:..."""
 
-    def test_success_output_is_parsed(self, monkeypatch, conda):
+    def test_success_output_is_parsed(self, monkeypatch):
         router = RunRouter(
             default=FakeCompleted(0, "SUCCESS:NVIDIA RTX A6000:8.6:47.5\n")
         )
@@ -621,10 +555,10 @@ class TestCheckGpuAvailable:
         assert isinstance(info["memory_gb"], float)
         # The cupy probe runs inside the target env and really is the
         # cupy availability script.
-        assert router.matching("conda run -n myenv python -c")
+        assert router.matching(f"{_py('myenv')} -c")
         assert "cp.cuda.is_available()" in router.calls[0]
 
-    def test_error_prefix_is_stripped(self, monkeypatch, conda):
+    def test_error_prefix_is_stripped(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -633,7 +567,7 @@ class TestCheckGpuAvailable:
         info = uem.check_gpu_available()
         assert info == {"available": False, "error": "CUDA not available"}
 
-    def test_unrecognised_output_is_passed_through(self, monkeypatch, conda):
+    def test_unrecognised_output_is_passed_through(self, monkeypatch):
         monkeypatch.setattr(
             uem.subprocess,
             "run",
@@ -645,13 +579,10 @@ class TestCheckGpuAvailable:
         }
 
     def test_exception_becomes_error_dict(self, monkeypatch):
-        def boom():
-            raise RuntimeError("Neither conda nor mamba found in PATH")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch, "no python here")
         info = uem.check_gpu_available()
         assert info["available"] is False
-        assert "Neither conda nor mamba" in info["error"]
+        assert "no python here" in info["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -660,18 +591,37 @@ class TestCheckGpuAvailable:
 
 
 class TestSetupGurobiLicense:
-    """Optional gurobi install followed by grbgetkey activation."""
+    """Optional gurobipy install followed by grbgetkey activation."""
 
-    def test_skips_install_when_already_present(self, monkeypatch, conda):
+    @pytest.fixture(autouse=True)
+    def _grbgetkey_on_path(self, monkeypatch):
+        monkeypatch.setattr(
+            uem.shutil,
+            "which",
+            lambda cmd: "grbgetkey" if cmd == "grbgetkey" else None,
+        )
+
+    def test_missing_grbgetkey_returns_false(self, monkeypatch, capsys):
+        """The gurobipy wheel has no grbgetkey; say how to proceed instead."""
+        monkeypatch.setattr(uem.shutil, "which", lambda cmd: None)
+        monkeypatch.setattr(uem, "is_package_installed", lambda pkg, env: True)
+        router = RunRouter(default=FakeCompleted(0))
+        monkeypatch.setattr(uem.subprocess, "run", router)
+
+        assert uem.setup_gurobi_license("KEY-123") is False
+        assert "gurobi_license" in capsys.readouterr().out
+        assert not router.matching("grbgetkey")
+
+    def test_skips_install_when_already_present(self, monkeypatch):
         monkeypatch.setattr(uem, "is_package_installed", lambda pkg, env: True)
         router = RunRouter(default=FakeCompleted(0))
         monkeypatch.setattr(uem.subprocess, "run", router)
 
         assert uem.setup_gurobi_license("KEY-123", "ultrack") is True
-        assert not router.matching("install -n ultrack -c gurobi")
+        assert not router.matching("install gurobipy")
         assert router.matching("grbgetkey KEY-123")
 
-    def test_installs_then_activates(self, monkeypatch, conda):
+    def test_installs_then_activates(self, monkeypatch):
         monkeypatch.setattr(
             uem, "is_package_installed", lambda pkg, env: False
         )
@@ -679,15 +629,17 @@ class TestSetupGurobiLicense:
         monkeypatch.setattr(uem.subprocess, "run", router)
 
         assert uem.setup_gurobi_license("KEY-123") is True
-        assert router.matching("conda install -n ultrack -c gurobi gurobi -y")
+        assert router.matching(f"{_py()} -m pip install gurobipy")
         assert router.matching("grbgetkey KEY-123")
 
-    def test_install_failure_returns_false(self, monkeypatch, conda, capsys):
+    def test_install_failure_returns_false(self, monkeypatch, capsys):
         monkeypatch.setattr(
             uem, "is_package_installed", lambda pkg, env: False
         )
         router = RunRouter(
-            rules=[("-c gurobi", FakeCompleted(1, "", "solver conflict"))],
+            rules=[
+                ("install gurobipy", FakeCompleted(1, "", "solver conflict"))
+            ],
             default=FakeCompleted(0),
         )
         monkeypatch.setattr(uem.subprocess, "run", router)
@@ -697,9 +649,7 @@ class TestSetupGurobiLicense:
         # grbgetkey is never reached.
         assert not router.matching("grbgetkey")
 
-    def test_activation_failure_returns_false(
-        self, monkeypatch, conda, capsys
-    ):
+    def test_activation_failure_returns_false(self, monkeypatch, capsys):
         monkeypatch.setattr(uem, "is_package_installed", lambda pkg, env: True)
         monkeypatch.setattr(
             uem.subprocess,
@@ -713,12 +663,9 @@ class TestSetupGurobiLicense:
         assert "Failed to activate license" in capsys.readouterr().out
 
     def test_exception_returns_false(self, monkeypatch, capsys):
-        def boom():
-            raise RuntimeError("no conda")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch)
         assert uem.setup_gurobi_license("KEY") is False
-        assert "Error setting up Gurobi: no conda" in capsys.readouterr().out
+        assert "Error setting up Gurobi: no env" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +694,7 @@ class FakePopen:
     def wait(self, timeout=None):
         self.wait_timeout = timeout
         if self.raise_timeout:
-            raise subprocess.TimeoutExpired("conda", timeout)
+            raise subprocess.TimeoutExpired("python", timeout)
         return self.returncode
 
     def kill(self):
@@ -777,9 +724,7 @@ class TestRunUltrackInEnv:
         # Keep the module's NamedTemporaryFile inside tmp_path.
         monkeypatch.setattr(uem.tempfile, "tempdir", str(tmp_path))
 
-    def test_success_streams_output_to_callback(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_success_streams_output_to_callback(self, monkeypatch, tmp_path):
         instances = _popen_factory(monkeypatch, ["hello\n", "world\n"], rc=0)
         log = Logger()
 
@@ -801,9 +746,9 @@ class TestRunUltrackInEnv:
         assert "✓ Tracking completed successfully" in log.messages
 
         proc = instances[0]
-        assert proc.cmd[:4] == ["conda", "run", "-n", "ultrack"]
-        assert proc.cmd[4] == "python"
-        assert proc.cmd[5].endswith(".py")
+        assert proc.cmd[0] == _py("ultrack")
+        assert len(proc.cmd) == 2
+        assert proc.cmd[1].endswith(".py")
         assert proc.kwargs["env"] is None
         assert proc.wait_timeout == 7200
         # stderr is folded into the single streamed pipe -- with a
@@ -813,9 +758,7 @@ class TestRunUltrackInEnv:
         assert proc.kwargs["text"] is True
         assert proc.kwargs["bufsize"] == 1
 
-    def test_script_is_written_then_deleted(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_script_is_written_then_deleted(self, monkeypatch, tmp_path):
         seen = {}
         instances = _popen_factory(monkeypatch, [], rc=0)
         orig = uem.subprocess.Popen
@@ -837,9 +780,7 @@ class TestRunUltrackInEnv:
         assert not uem.Path(seen["path"]).exists()
         assert instances  # the underlying FakePopen really ran
 
-    def test_failure_returns_last_lines_as_error(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_failure_returns_last_lines_as_error(self, monkeypatch, tmp_path):
         lines = [f"line{i}\n" for i in range(60)]
         _popen_factory(monkeypatch, lines, rc=3)
         log = Logger()
@@ -852,7 +793,7 @@ class TestRunUltrackInEnv:
         assert result["error"].startswith("line10\n")
         assert "✗ Tracking failed with return code 3" in log.messages
 
-    def test_timeout_kills_process(self, monkeypatch, tmp_path, conda):
+    def test_timeout_kills_process(self, monkeypatch, tmp_path):
         instances = _popen_factory(
             monkeypatch, ["partial\n"], rc=0, raise_timeout=True
         )
@@ -866,9 +807,7 @@ class TestRunUltrackInEnv:
         assert instances[0].killed is True
         assert "✗ Tracking timed out after 2 hours" in log.messages
 
-    def test_extra_env_is_layered_on_os_environ(
-        self, monkeypatch, tmp_path, conda
-    ):
+    def test_extra_env_is_layered_on_os_environ(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TMIDAS_SENTINEL", "keep-me")
         instances = _popen_factory(monkeypatch, [], rc=0)
 
@@ -883,7 +822,7 @@ class TestRunUltrackInEnv:
         assert env["TMIDAS_SENTINEL"] == "keep-me"
 
     def test_without_callback_output_is_printed(
-        self, monkeypatch, tmp_path, conda, capsys
+        self, monkeypatch, tmp_path, capsys
     ):
         _popen_factory(monkeypatch, ["streamed\n"], rc=0)
 
@@ -895,18 +834,15 @@ class TestRunUltrackInEnv:
         assert result["success"] is True
 
     def test_exception_before_popen_is_reported(self, monkeypatch, capsys):
-        def boom():
-            raise RuntimeError("no conda")
-
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        _no_env_python(monkeypatch)
 
         result = uem.run_ultrack_in_env("x")
         assert result == {
             "success": False,
             "output": "",
-            "error": "no conda",
+            "error": "no env",
         }
-        assert "✗ Error running ultrack: no conda" in capsys.readouterr().out
+        assert "✗ Error running ultrack: no env" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +852,13 @@ class TestRunUltrackInEnv:
 
 def _happy_env(monkeypatch):
     """Neutralise everything create_ultrack_env delegates to."""
-    monkeypatch.setattr(uem, "get_conda_cmd", lambda: "conda")
+    created = []
+    monkeypatch.setattr(
+        uem, "create_venv", lambda env_dir, python: created.append(python)
+    )
+    # cucim wheels are Linux-only; pin the platform so the GPU path is the
+    # same on every test runner.
+    monkeypatch.setattr(uem.platform, "system", lambda: "Linux")
     monkeypatch.setattr(uem, "is_package_installed", lambda pkg, env: True)
     monkeypatch.setattr(uem, "_patch_ultrack_xp", lambda env, log: True)
     monkeypatch.setattr(
@@ -936,31 +878,48 @@ def _happy_env(monkeypatch):
 
 
 class TestCreateUltrackEnvFailures:
-    """Early exits: no conda, env creation failure, pip failure."""
+    """Early exits: env creation failure, pip failure."""
 
-    def test_conda_missing_returns_false(self, monkeypatch):
-        def boom():
-            raise RuntimeError("Neither conda nor mamba found in PATH")
+    def test_env_is_created_on_python_311(self, monkeypatch):
+        _happy_env(monkeypatch)
+        seen = []
+        monkeypatch.setattr(
+            uem,
+            "create_venv",
+            lambda env_dir, python: seen.append((env_dir, python)),
+        )
+        monkeypatch.setattr(uem, "_get_cuda_version", lambda: None)
+        monkeypatch.setattr(
+            uem.subprocess, "run", RunRouter(default=FakeCompleted(0))
+        )
 
-        monkeypatch.setattr(uem, "get_conda_cmd", boom)
+        assert uem.create_ultrack_env("ultrack", Logger()) is True
+        assert seen == [(uem.env_dir_for("ultrack"), "3.11")]
+
+    def test_unexpected_error_returns_false(self, monkeypatch):
+        _happy_env(monkeypatch)
+        _no_env_python(monkeypatch, "no python here")
+        monkeypatch.setattr(uem, "_get_cuda_version", lambda: None)
         log = Logger()
         assert uem.create_ultrack_env("ultrack", log) is False
-        assert "Error creating environment" in log.text()
+        assert "Error creating environment: no python here" in log.text()
 
     def test_env_creation_failure_returns_false(self, monkeypatch):
         _happy_env(monkeypatch)
+
+        def fail(env_dir, python):
+            raise subprocess.CalledProcessError(1, ["uv", "venv"])
+
+        monkeypatch.setattr(uem, "create_venv", fail)
         monkeypatch.setattr(uem, "_get_cuda_version", lambda: None)
-        router = RunRouter(
-            rules=[("create -n", FakeCompleted(1, "", "disk full"))],
-            default=FakeCompleted(0),
-        )
+        router = RunRouter(default=FakeCompleted(0))
         monkeypatch.setattr(uem.subprocess, "run", router)
         log = Logger()
 
         assert uem.create_ultrack_env("ultrack", log) is False
-        assert "Failed to create environment: disk full" in log.text()
+        assert "Failed to create environment" in log.text()
         # Nothing after step 1 runs.
-        assert not router.matching("scipy=1.14")
+        assert router.calls == []
 
     def test_pip_install_failure_returns_false(self, monkeypatch):
         _happy_env(monkeypatch)
@@ -997,19 +956,19 @@ class TestCreateUltrackEnvFailures:
         assert uem.create_ultrack_env("ultrack", log) is False
         assert "Critical packages missing: ultrack" in log.text()
 
-    def test_conda_package_failure_only_warns(self, monkeypatch):
+    def test_core_package_failure_only_warns(self, monkeypatch):
         _happy_env(monkeypatch)
         monkeypatch.setattr(uem, "_get_cuda_version", lambda: None)
         router = RunRouter(
-            rules=[("scipy=1.14", FakeCompleted(1, "", "conflict"))],
+            rules=[("scipy==1.14", FakeCompleted(1, "", "conflict"))],
             default=FakeCompleted(0),
         )
         monkeypatch.setattr(uem.subprocess, "run", router)
         log = Logger()
 
         assert uem.create_ultrack_env("ultrack", log) is True
-        assert "Some conda packages failed to install" in log.text()
-        assert "Will try to continue with pip" in log.text()
+        assert "Some core packages failed to install" in log.text()
+        assert "Will try to continue with the remaining packages" in log.text()
         # Execution continues into the pip step.
         assert router.matching("ultrack zarr tifffile")
 
@@ -1065,7 +1024,9 @@ class TestCreateUltrackEnvCpuPath:
         )
 
         assert uem.create_ultrack_env("ultrack") is True
-        assert "Using conda to create environment" in capsys.readouterr().out
+        assert "Creating environment 'ultrack' with Python 3.11" in (
+            capsys.readouterr().out
+        )
 
     def test_patch_failures_are_warnings_not_errors(self, monkeypatch):
         _happy_env(monkeypatch)
@@ -1114,11 +1075,11 @@ class TestCreateUltrackEnvGpuPath:
         assert router.matching("whl/cu121")
         assert not router.matching("whl/cu118")
         assert router.matching("pip install --upgrade cupy-cuda12x")
-        assert router.matching("cucim -y")
+        assert router.matching("install cucim-cu12")
         assert "NVIDIA GPU detected (CUDA 12.4)" in log.text()
         assert "✓ GPU works: RTX 4090" in log.text()
         assert "Compute capability: sm_89" in log.text()
-        assert "✓ Installed cucim" in log.text()
+        assert "✓ Installed cucim-cu12" in log.text()
         assert "GPU ready for future use: RTX" in log.text()
 
     def test_cuda11_uses_cu118_and_cupy_cuda11x(self, monkeypatch):
@@ -1191,8 +1152,13 @@ class TestCreateUltrackEnvGpuPath:
         self._router(
             monkeypatch,
             [
-                ("cupy-cuda", FakeCompleted(1, "", "no wheel")),
-                ("cucim", FakeCompleted(1, "", "no package")),
+                (
+                    "install --upgrade cupy-cuda",
+                    FakeCompleted(1, "", "no wheel"),
+                ),
+                # The needles must not match tmp_path, which embeds this
+                # test's name.
+                ("install cucim-cu", FakeCompleted(1, "", "no package")),
             ],
         )
         log = Logger()
@@ -1200,7 +1166,7 @@ class TestCreateUltrackEnvGpuPath:
         assert uem.create_ultrack_env("ultrack", log) is True
         assert "⚠ Failed to install cupy-cuda12x: no wheel" in log.text()
         assert "GPU acceleration will not be available" in log.text()
-        assert "⚠ Failed to install cucim: no package" in log.text()
+        assert "⚠ Failed to install cucim-cu12: no package" in log.text()
 
     def test_blackwell_gpu_check_reports_cpu_mode(self, monkeypatch):
         _happy_env(monkeypatch)
@@ -1257,10 +1223,6 @@ class TestUltrackEnvironmentManagerWrapper:
 
     def test_custom_env_name(self):
         assert uem.UltrackEnvironmentManager("other").env_name == "other"
-
-    def test_get_conda_cmd_delegates(self, monkeypatch):
-        monkeypatch.setattr(uem, "get_conda_cmd", lambda: "mamba")
-        assert uem.UltrackEnvironmentManager()._get_conda_cmd() == "mamba"
 
     def test_is_env_created_forwards_env_name(self, monkeypatch):
         seen = []

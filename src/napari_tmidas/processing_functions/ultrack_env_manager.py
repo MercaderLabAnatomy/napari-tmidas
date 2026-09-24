@@ -2,8 +2,11 @@
 """
 Environment Manager for Ultrack
 
-This module manages a dedicated conda environment for ultrack and its dependencies,
-isolated from the main napari-tmidas environment.
+This module manages a dedicated virtual environment for ultrack and its
+dependencies, isolated from the main napari-tmidas environment. Every package
+comes from PyPI, so the environment is built with uv (or venv + pip) like the
+other methods' -- no conda required. ``env_name`` is the environment's
+directory name under ~/.napari-tmidas/envs.
 """
 
 import os
@@ -16,46 +19,38 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Dict
 
+from napari_tmidas._env_manager import (
+    create_venv,
+    env_dir_for,
+    env_is_usable,
+    env_python_path,
+    pip_command,
+)
 
-def get_conda_cmd() -> str:
-    """Detect conda/mamba command available in the system."""
-    # Try mamba first (faster), fallback to conda
-    for cmd in ["mamba", "conda"]:
-        if shutil.which(cmd):
-            return cmd
-    raise RuntimeError("Neither conda nor mamba found in PATH")
+# ultrack supports 3.11+; 3.11 matches the conda env this replaced.
+ULTRACK_PYTHON = "3.11"
+
+
+def get_env_python(env_name: str = "ultrack") -> str:
+    """Path to the Python executable of the named ultrack environment."""
+    return env_python_path(env_dir_for(env_name))
 
 
 def is_env_created(env_name: str = "ultrack") -> bool:
     """
-    Check if the ultrack conda environment exists.
-    
+    Check if the ultrack environment exists (on the expected Python).
+
     Parameters:
     -----------
     env_name : str
-        Name of the conda environment (default: "ultrack")
-    
+        Name of the environment (default: "ultrack")
+
     Returns:
     --------
     bool
         True if environment exists, False otherwise
     """
-    try:
-        conda_cmd = get_conda_cmd()
-        result = subprocess.run(
-            [conda_cmd, "env", "list"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        # Look for environment name in the output
-        for line in result.stdout.split("\n"):
-            if env_name in line:
-                return True
-        return False
-    except Exception as e:
-        print(f"Error checking environment: {e}")
-        return False
+    return env_is_usable(env_dir_for(env_name), ULTRACK_PYTHON)
 
 
 def _get_cuda_version() -> Optional[str]:
@@ -101,7 +96,7 @@ def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
     Parameters:
     -----------
     env_name : str
-        Name of the conda environment
+        Name of the environment
     log_func : callable
         Optional logging function
     
@@ -115,11 +110,10 @@ def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
             log_func(msg)
     
     try:
-        conda_cmd = get_conda_cmd()
         
         # Check current scikit-image version
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "python", "-c",
+            [get_env_python(env_name), "-c",
              "import skimage; print(skimage.__version__)"],
             capture_output=True,
             text=True,
@@ -153,8 +147,8 @@ def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
             # Try to upgrade to stable if available
             log("  Checking for stable release...")
             check_result = subprocess.run(
-                [conda_cmd, "run", "-n", env_name, "pip", "install", 
-                 "--dry-run", "--upgrade", "scikit-image>=0.26.1"],
+                pip_command(get_env_python(env_name), "install", 
+                 "--dry-run", "--upgrade", "scikit-image>=0.26.1"),
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -164,8 +158,8 @@ def _ensure_scikit_image_fix(env_name: str = "ultrack", log_func=None) -> bool:
             if check_result.returncode == 0 and '0.26.1' in check_result.stdout and 'dev' not in check_result.stdout:
                 log("  ✓ Stable release available, upgrading...")
                 upgrade_result = subprocess.run(
-                    [conda_cmd, "run", "-n", env_name, "pip", "install",
-                     "--upgrade", "scikit-image>=0.26.1"],
+                    pip_command(get_env_python(env_name), "install",
+                     "--upgrade", "scikit-image>=0.26.1"),
                     capture_output=True,
                     text=True,
                     timeout=120
@@ -204,7 +198,7 @@ def _patch_ultrack_xp(env_name: str = "ultrack", log_func=None) -> bool:
     Parameters:
     -----------
     env_name : str
-        Name of the conda environment
+        Name of the environment
     log_func : callable
         Optional logging function
     
@@ -218,11 +212,10 @@ def _patch_ultrack_xp(env_name: str = "ultrack", log_func=None) -> bool:
             log_func(msg)
     
     try:
-        conda_cmd = get_conda_cmd()
         
         # Get Python site-packages path in the environment
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "python", "-c", 
+            [get_env_python(env_name), "-c", 
              "import site; print(site.getsitepackages()[0])"],
             capture_output=True,
             text=True,
@@ -299,7 +292,7 @@ def _patch_ultrack_readonly_arrays(env_name: str, log_func=None) -> bool:
     Parameters:
     -----------
     env_name : str
-        Name of the conda environment
+        Name of the environment
     log_func : callable
         Optional logging function
     
@@ -313,11 +306,10 @@ def _patch_ultrack_readonly_arrays(env_name: str, log_func=None) -> bool:
             log_func(msg)
     
     try:
-        conda_cmd = get_conda_cmd()
         
         # Get Python site-packages path in the environment
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "python", "-c", 
+            [get_env_python(env_name), "-c", 
              "import site; print(site.getsitepackages()[0])"],
             capture_output=True,
             text=True,
@@ -377,18 +369,18 @@ def _patch_ultrack_readonly_arrays(env_name: str, log_func=None) -> bool:
 
 def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> bool:
     """
-    Create a dedicated conda environment for ultrack with all dependencies.
+    Create a dedicated virtual environment for ultrack with all dependencies.
     
     This function:
-    1. Creates a new conda environment with Python 3.11
-    2. Installs ultrack and dependencies from conda-forge
+    1. Creates a new virtual environment with Python 3.11
+    2. Installs ultrack and its scientific stack from PyPI
     3. Attempts to install CuPy for GPU acceleration (optional)
     4. Pins scipy to version 1.14 to avoid binary compatibility issues
     
     Parameters:
     -----------
     env_name : str
-        Name for the conda environment (default: "ultrack")
+        Name for the environment (default: "ultrack")
     progress_callback : callable, optional
         Function to call with progress messages
     
@@ -405,42 +397,37 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
             print(msg)
     
     try:
-        conda_cmd = get_conda_cmd()
-        log(f"Using {conda_cmd} to create environment '{env_name}'...")
-        
+        env_dir = env_dir_for(env_name)
+
         # Step 1: Create environment with Python 3.11
-        log("Creating conda environment with Python 3.11...")
-        result = subprocess.run(
-            [conda_cmd, "create", "-n", env_name, "python=3.11", "-y"],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        if result.returncode != 0:
-            log(f"Failed to create environment: {result.stderr}")
+        log(f"Creating environment '{env_name}' with Python {ULTRACK_PYTHON}...")
+        try:
+            create_venv(env_dir, ULTRACK_PYTHON)
+        except (subprocess.CalledProcessError, OSError) as e:
+            log(f"Failed to create environment: {e}")
             return False
         log("✓ Environment created")
         
-        # Step 2: Install core scientific packages from conda-forge (faster, better compatibility)
-        log("Installing core scientific packages from conda-forge...")
-        conda_packages = [
+        # Step 2: Install the core scientific packages first
+        log("Installing core scientific packages...")
+        core_packages = [
             "numpy",
-            "scipy=1.14",  # Pin to avoid binary compatibility issues with 1.17
+            "scipy==1.14.*",  # Pin to avoid binary compatibility issues with 1.17
             "pandas",
             "scikit-image",
         ]
         
         result = subprocess.run(
-            [conda_cmd, "install", "-n", env_name, "-c", "conda-forge"] + conda_packages + ["-y"],
+            pip_command(get_env_python(env_name), "install", *core_packages),
             capture_output=True,
             text=True,
             timeout=600
         )
         if result.returncode != 0:
-            log(f"Warning: Some conda packages failed to install: {result.stderr}")
-            log("Will try to continue with pip...")
+            log(f"Warning: Some core packages failed to install: {result.stderr}")
+            log("Will try to continue with the remaining packages...")
         else:
-            log(f"✓ Installed {len(conda_packages)} packages from conda-forge")
+            log(f"✓ Installed {len(core_packages)} core packages")
         
         # Step 3: Install PyTorch (for GPU-accelerated labels_to_contours)
         cuda_version = _get_cuda_version()
@@ -455,23 +442,29 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
             log("  Installing PyTorch with CUDA support...")
             if cuda_major >= 12:
                 # CUDA 12.x: use latest PyTorch with cu121
-                torch_package = "torch torchvision --index-url https://download.pytorch.org/whl/cu121"
+                torch_index = "https://download.pytorch.org/whl/cu121"
             else:
                 # CUDA 11.x
-                torch_package = "torch torchvision --index-url https://download.pytorch.org/whl/cu118"
+                torch_index = "https://download.pytorch.org/whl/cu118"
             
             result = subprocess.run(
-                f"{conda_cmd} run -n {env_name} pip install {torch_package}",
+                pip_command(
+                    get_env_python(env_name),
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "--index-url",
+                    torch_index,
+                ),
                 capture_output=True,
                 text=True,
-                shell=True,
                 timeout=600
             )
             if result.returncode != 0:
                 log(f"  ⚠ Failed to install PyTorch with CUDA: {result.stderr}")
                 log("  Falling back to CPU-only PyTorch...")
                 result = subprocess.run(
-                    [conda_cmd, "run", "-n", env_name, "pip", "install", "torch", "torchvision"],
+                    pip_command(get_env_python(env_name), "install", "torch", "torchvision"),
                     capture_output=True,
                     text=True,
                     timeout=600
@@ -484,7 +477,7 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
                 # Test PyTorch GPU compatibility (especially for Blackwell sm_120)
                 log("  Testing PyTorch GPU compatibility...")
                 test_result = subprocess.run(
-                    [conda_cmd, "run", "-n", env_name, "python", "-c",
+                    [get_env_python(env_name), "-c",
                      "import torch; import warnings; warnings.filterwarnings('error'); "
                      "d = 'cuda' if torch.cuda.is_available() else 'cpu'; "
                      "t = torch.ones((10, 10), device=d); "
@@ -504,8 +497,9 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
                 elif "sm_120" in test_result.stderr or "Blackwell" in test_result.stderr:
                     log("    ⚠ Blackwell GPU detected but PyTorch stable doesn't support sm_120")
                     log("    SOLUTION: Upgrade to PyTorch nightly for Blackwell support:")
-                    log("      conda run -n ultrack pip uninstall -y torch torchvision")
-                    log("      conda run -n ultrack pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130")
+                    env_python = get_env_python(env_name)
+                    log(f"      {env_python} -m pip uninstall -y torch torchvision")
+                    log(f"      {env_python} -m pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130")
                     log("    OR use CPU mode (works reliably without GPU)")
                 else:
                     log(f"    ⚠ GPU test inconclusive, but installation successful")
@@ -513,7 +507,7 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
             # No GPU: install CPU-only PyTorch
             log("  No NVIDIA GPU detected, installing CPU-only PyTorch...")
             result = subprocess.run(
-                [conda_cmd, "run", "-n", env_name, "pip", "install", "torch", "torchvision"],
+                pip_command(get_env_python(env_name), "install", "torch", "torchvision"),
                 capture_output=True,
                 text=True,
                 timeout=600
@@ -532,7 +526,7 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
         ]
         
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "pip", "install"] + pip_packages,
+            pip_command(get_env_python(env_name), "install", *pip_packages),
             capture_output=True,
             text=True,
             timeout=600
@@ -561,7 +555,7 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
             # Try to install the latest version to maximize GPU architecture support
             log(f"  Installing latest {cupy_package} for Blackwell GPU support...")
             result = subprocess.run(
-                [conda_cmd, "run", "-n", env_name, "pip", "install", "--upgrade", cupy_package],
+                pip_command(get_env_python(env_name), "install", "--upgrade", cupy_package),
                 capture_output=True,
                 text=True,
                 timeout=300
@@ -572,18 +566,23 @@ def create_ultrack_env(env_name: str = "ultrack", progress_callback=None) -> boo
                 log(f"  ⚠ Failed to install {cupy_package}: {result.stderr}")
                 log("  GPU acceleration will not be available")
             
-            # Install cucim for GPU-accelerated image processing
-            log("  Installing cucim from conda-forge...")
-            result = subprocess.run(
-                [conda_cmd, "install", "-n", env_name, "-c", "conda-forge", "cucim", "-y"],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if result.returncode == 0:
-                log("  ✓ Installed cucim")
+            # Install cucim for GPU-accelerated image processing. PyPI
+            # only has Linux wheels, for CUDA 12 and 13.
+            if platform.system() != "Linux" or cuda_major < 12:
+                log("  ℹ Skipping cucim (PyPI wheels are Linux + CUDA 12/13 only)")
             else:
-                log(f"  ⚠ Failed to install cucim: {result.stderr}")
+                cucim_package = "cucim-cu13" if cuda_major >= 13 else "cucim-cu12"
+                log(f"  Installing {cucim_package}...")
+                result = subprocess.run(
+                    pip_command(get_env_python(env_name), "install", cucim_package),
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if result.returncode == 0:
+                    log(f"  ✓ Installed {cucim_package}")
+                else:
+                    log(f"  ⚠ Failed to install {cucim_package}: {result.stderr}")
         else:
             log("ℹ No NVIDIA GPU detected. Installing CPU-only version.")
         
@@ -658,7 +657,7 @@ def check_gpu_available(env_name: str = "ultrack") -> Dict[str, any]:
     Parameters:
     -----------
     env_name : str
-        Name of the conda environment
+        Name of the environment
     
     Returns:
     --------
@@ -671,7 +670,6 @@ def check_gpu_available(env_name: str = "ultrack") -> Dict[str, any]:
         - 'error': str - Error message if not available
     """
     try:
-        conda_cmd = get_conda_cmd()
         
         # Create a simple test script
         test_script = """
@@ -700,7 +698,7 @@ except Exception as e:
         
         # Run the test in the ultrack environment
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "python", "-c", test_script],
+            [get_env_python(env_name), "-c", test_script],
             capture_output=True,
             text=True,
             timeout=30
@@ -732,14 +730,14 @@ except Exception as e:
 
 def is_package_installed(package_name: str, env_name: str = "ultrack") -> bool:
     """
-    Check if a package is installed in the specified conda environment.
+    Check if a package is installed in the specified environment.
     
     Parameters:
     -----------
     package_name : str
         Name of the package to check
     env_name : str
-        Name of the conda environment
+        Name of the environment
     
     Returns:
     --------
@@ -747,9 +745,8 @@ def is_package_installed(package_name: str, env_name: str = "ultrack") -> bool:
         True if package is installed, False otherwise
     """
     try:
-        conda_cmd = get_conda_cmd()
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "python", "-c", f"import {package_name}"],
+            [get_env_python(env_name), "-c", f"import {package_name}"],
             capture_output=True,
             timeout=10
         )
@@ -767,7 +764,7 @@ def setup_gurobi_license(license_key: str, env_name: str = "ultrack") -> bool:
     license_key : str
         Gurobi license key
     env_name : str
-        Name of the conda environment
+        Name of the environment
     
     Returns:
     --------
@@ -775,13 +772,12 @@ def setup_gurobi_license(license_key: str, env_name: str = "ultrack") -> bool:
         True if successful, False otherwise
     """
     try:
-        conda_cmd = get_conda_cmd()
         
         # Install gurobi if not already installed
         if not is_package_installed("gurobipy", env_name):
             print("Installing Gurobi...")
             result = subprocess.run(
-                [conda_cmd, "install", "-n", env_name, "-c", "gurobi", "gurobi", "-y"],
+                pip_command(get_env_python(env_name), "install", "gurobipy"),
                 capture_output=True,
                 text=True,
                 timeout=300
@@ -790,10 +786,22 @@ def setup_gurobi_license(license_key: str, env_name: str = "ultrack") -> bool:
                 print(f"Failed to install Gurobi: {result.stderr}")
                 return False
         
+        # grbgetkey ships with a full Gurobi install, not the gurobipy
+        # wheel. Without it, point the tracker's gurobi_license parameter
+        # (GRB_LICENSE_FILE) at an existing .lic file instead.
+        grbgetkey = shutil.which("grbgetkey")
+        if grbgetkey is None:
+            print(
+                "grbgetkey not found (it is not part of the gurobipy wheel). "
+                "Activate the key with a full Gurobi install, then pass the "
+                "resulting gurobi.lic via the 'gurobi_license' parameter."
+            )
+            return False
+
         # Activate license
         print("Activating Gurobi license...")
         result = subprocess.run(
-            [conda_cmd, "run", "-n", env_name, "grbgetkey", license_key],
+            [grbgetkey, license_key],
             capture_output=True,
             text=True,
             timeout=60
@@ -820,14 +828,14 @@ def run_ultrack_in_env(
     extra_env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, any]:
     """
-    Run a Python script in the ultrack conda environment.
+    Run a Python script in the ultrack environment.
 
     Parameters:
     -----------
     script_content : str
         Python script to execute
     env_name : str
-        Name of the conda environment
+        Name of the environment
     progress_callback : callable, optional
         Function to call with progress messages
     input_file : str, optional
@@ -855,7 +863,6 @@ def run_ultrack_in_env(
             print(msg)
     
     try:
-        conda_cmd = get_conda_cmd()
 
         # Write script to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -879,7 +886,7 @@ def run_ultrack_in_env(
 
             # Stream output in real-time so you see ILP progress
             process = subprocess.Popen(
-                [conda_cmd, "run", "-n", env_name, "python", script_path],
+                [get_env_python(env_name), script_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 text=True,
@@ -944,10 +951,6 @@ class UltrackEnvironmentManager:
     def __init__(self, env_name: str = "ultrack"):
         """Initialize the environment manager."""
         self.env_name = env_name
-    
-    def _get_conda_cmd(self) -> str:
-        """Get conda command."""
-        return get_conda_cmd()
     
     def is_env_created(self) -> bool:
         """Check if environment exists."""

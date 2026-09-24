@@ -9,19 +9,18 @@ Automatic cell tracking for time-lapse microscopy using **TrackAstra**, a deep l
 - **Deep Learning-Based Tracking**: Uses pre-trained TrackAstra models
 - **2D and 3D Support**: Handles both TYX and TZYX time-lapse data
 - **Multiple Tracking Modes**: Greedy, ILP (Integer Linear Programming), and no-division modes
-- **Automatic Environment Management**: Creates a dedicated conda environment for TrackAstra
+- **Automatic Environment Management**: Creates a dedicated virtual environment for TrackAstra (no conda needed)
 - **Flexible Input**: Works with both raw images and pre-segmented label images
 
 ## Installation
 
-TrackAstra runs in a dedicated conda environment that is automatically created when first used. The environment includes:
-- TrackAstra
-- ILP solver (ilpy)
+TrackAstra runs in a dedicated virtual environment at `~/.napari-tmidas/envs/trackastra`, built with [uv](https://docs.astral.sh/uv/) on Python 3.11 when first used (uv downloads that Python if needed). Everything comes from PyPI:
+- TrackAstra (`trackastra[ilp]`)
+- ILP stack: `motile==0.4.0`, `ilpy`, `gurobipy` (SCIP via `pyscipopt` is the free fallback solver)
 - PyTorch
-- scikit-image
-- tifffile
+- zarr >= 3
 
-These will be automatically installed into a dedicated `trackastra-env` environment when first used.
+Earlier versions used a conda environment named `trackastra`. It is no longer used and can be removed with `conda env remove -n trackastra`.
 
 ## Parameters
 
@@ -241,7 +240,7 @@ TrackAstra assigns consistent IDs such that:
 
 ### Environment Isolation
 
-- Dedicated `trackastra` conda environment
+- Dedicated `trackastra` virtual environment
 - Isolated from main napari-tmidas environment
 - Uses subprocess calls for cross-environment execution
 - Prevents dependency conflicts

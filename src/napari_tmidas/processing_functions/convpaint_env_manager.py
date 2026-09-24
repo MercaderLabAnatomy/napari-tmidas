@@ -11,7 +11,7 @@ import tempfile
 
 import tifffile
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 
 def _get_convpaint_import_statement() -> str:
@@ -132,47 +132,43 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
             # Install PyTorch with CUDA support
             print(f"Installing PyTorch with CUDA {cuda_to_use} support...")
             subprocess.check_call(
-                [
+                pip_command(
                     env_python,
-                    "-m",
-                    "pip",
                     "install",
                     "torch",
                     "torchvision",
                     "--index-url",
                     f"https://download.pytorch.org/whl/{cuda_to_use}",
-                ]
+                )
             )
         else:
             # Install PyTorch without CUDA
             print("Installing PyTorch without CUDA support...")
             subprocess.check_call(
-                [env_python, "-m", "pip", "install", "torch", "torchvision"]
+                pip_command(env_python, "install", "torch", "torchvision")
             )
 
         # Install napari-convpaint and dependencies
         print("Installing napari-convpaint in the dedicated environment...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "napari-convpaint"]
+            pip_command(env_python, "install", "napari-convpaint")
         )
 
         # Install Qt bindings required by napari-convpaint
         print("Installing Qt bindings (PyQt5) for napari-convpaint...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "PyQt5"]
+            pip_command(env_python, "install", "PyQt5")
         )
 
         # Install tifffile and other dependencies for image handling
         subprocess.check_call(
-            [
+            pip_command(
                 env_python,
-                "-m",
-                "pip",
                 "install",
                 "tifffile",
                 "numpy",
                 "scikit-image",
-            ]
+            )
         )
 
         # Check if installation was successful
@@ -226,7 +222,7 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
     def _repair_environment(self, env_python: str) -> None:
         """Install runtime dependencies required for the convpaint environment."""
         print("Repairing napari-convpaint environment dependencies...")
-        subprocess.check_call([env_python, "-m", "pip", "install", "PyQt5"])
+        subprocess.check_call(pip_command(env_python, "install", "PyQt5"))
 
     def ensure_env_ready(self) -> str:
         """Ensure the dedicated convpaint environment exists and passes a smoke test."""

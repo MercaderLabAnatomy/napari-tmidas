@@ -55,7 +55,7 @@ napari
 
 Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](https://www.youtube.com/@macromeer/videos)
 
-> **💡 Tip**: AI methods (SAM2, Cellpose, Spotiflow, etc.) auto-install into isolated environments on first use - no manual setup required!
+> **💡 Tip**: AI methods (SAM2, Cellpose, Spotiflow, etc.) auto-install into isolated environments on first use - no manual setup required! They are built with [uv](https://docs.astral.sh/uv/), which also downloads a different Python where a method needs one. If you install packages through a mirror configured in `pip.conf` (uv does not read it), set `NAPARI_TMIDAS_NO_UV=1` to build them with pip instead.
 
 > **⚠️ Before a batch run**: set **Dimension Order** (top of the batch widget) to match your data — `TZYX` for a 3D time series, `ZYX` for a Z-stack, `TYX` for a 2D movie. Most microscopy TIFFs carry no usable axis metadata, so on `Auto` a function that builds 3D objects cannot tell Z from T: it will either stop with an error or label the same object once per Z slice. The widget reads each file's rank up front, shows it next to the dropdown, and warns before the run starts.
 

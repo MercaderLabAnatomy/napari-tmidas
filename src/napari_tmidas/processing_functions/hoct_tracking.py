@@ -4,13 +4,14 @@ HOCT Cell Tracking Module for napari-tmidas
 
 This module integrates HOCT (Higher-Order Cell Tracking Transformer,
 https://github.com/royerlab/hoct) deep learning-based cell tracking into the
-napari-tmidas batch processing framework. It uses a dedicated conda
+napari-tmidas batch processing framework. It uses a dedicated virtual
 environment to manage HOCT dependencies separately from the main environment,
 and drives the ``hoct`` CLI directly (rather than a generated Python script)
 since HOCT already ships a CTC (Cell Tracking Challenge) exporter.
 """
 
 import os
+import platform
 import queue
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ import numpy as np
 import tifffile
 from tifffile import imwrite
 
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 from napari_tmidas._registry import BatchProcessingRegistry
 
 _SUPPORTED_IMAGE_SUFFIXES = (".tif", ".tiff", ".zarr")
@@ -170,7 +172,7 @@ def _resolve_gurobi_license(gurobi_license: str = ""):
 
     HOCT's tracking step solves an ILP via tracksdata/gurobipy. The pip
     ``gurobipy`` package ships a bundled *size-limited* license inside the
-    conda env and prioritises it, so it shadows a full/academic license
+    environment and prioritises it, so it shadows a full/academic license
     placed in the home directory. Setting ``GRB_LICENSE_FILE`` explicitly
     overrides that, since it takes precedence over every default search
     location.
@@ -204,140 +206,80 @@ def _resolve_gurobi_license(gurobi_license: str = ""):
     return None
 
 
-class HoctEnvManager:
-    """Manages the dedicated conda environment for HOCT."""
+class HoctEnvManager(BaseEnvironmentManager):
+    """Manages the dedicated virtual environment for HOCT.
 
-    ENV_NAME = "hoct"
-    REQUIRED_PYTHON = "3.11"
+    HOCT is pip-only (gurobipy included), so the environment is an ordinary
+    venv built like the other methods' -- no conda required.
+    """
 
-    @staticmethod
-    def get_conda_cmd():
-        """Get the conda/mamba command available on the system."""
-        if shutil.which("mamba"):
-            return "mamba"
-        elif shutil.which("conda"):
-            return "conda"
-        else:
-            raise RuntimeError(
-                "Neither conda nor mamba found. Please install Anaconda/Miniconda/Miniforge."
-            )
+    # hoct supports 3.11 and 3.12; 3.11 matches the conda env this replaced.
+    python_version = "3.11"
+    PACKAGE = "hoct[bioio]"
 
-    @classmethod
-    def check_env_exists(cls):
-        conda_cmd = cls.get_conda_cmd()
+    def __init__(self):
+        super().__init__("hoct")
+
+    def get_hoct_path(self) -> str:
+        """Path to the ``hoct`` CLI entry point inside the environment."""
+        if platform.system() == "Windows":
+            return os.path.join(self.env_dir, "Scripts", "hoct.exe")
+        return os.path.join(self.env_dir, "bin", "hoct")
+
+    def _install_dependencies(self, env_python: str) -> None:
+        # HOCT's own dependency pins (e.g. gurobipy<13.0.0) are resolved
+        # by the installer; no extra packages are needed.
+        subprocess.check_call(pip_command(env_python, "install", self.PACKAGE))
+
+    def is_package_installed(self) -> bool:
+        return self._hoct_cli_ready()
+
+    def _hoct_cli_ready(self) -> bool:
+        """Check that the ``hoct`` CLI entry point runs."""
         try:
             result = subprocess.run(
-                [conda_cmd, "run", "-n", cls.ENV_NAME, "python", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
-            return False
-
-    @classmethod
-    def _hoct_cli_ready(cls):
-        """Check that the ``hoct`` CLI entry point is importable/runnable."""
-        conda_cmd = cls.get_conda_cmd()
-        try:
-            result = subprocess.run(
-                [conda_cmd, "run", "-n", cls.ENV_NAME, "hoct", "--version"],
+                [self.get_hoct_path(), "--version"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
             return result.returncode == 0
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+        except (subprocess.TimeoutExpired, OSError):
             return False
 
-    @classmethod
-    def create_env(cls):
-        """Create the HOCT conda environment if it doesn't exist."""
-        if cls.check_env_exists():
-            print("HOCT environment already exists.")
-        else:
-            print("Creating HOCT conda environment...")
-            conda_cmd = cls.get_conda_cmd()
-
-            env_create_cmd = [
-                conda_cmd,
-                "create",
-                "-n",
-                cls.ENV_NAME,
-                f"python={cls.REQUIRED_PYTHON}",
-                "-y",
-            ]
-            # `--no-default-packages` is a conda-only flag; mamba rejects it.
-            if os.path.basename(conda_cmd) == "conda":
-                env_create_cmd.insert(-1, "--no-default-packages")
-
-            try:
-                # Clear corrupted/stale cached packages before installing.
-                subprocess.run(
-                    [conda_cmd, "clean", "--packages", "--index-cache", "-y"],
-                    check=False,
-                )
-                subprocess.run(env_create_cmd, check=True)
-            except subprocess.CalledProcessError as e:
-                print(f"Error creating HOCT environment: {e}")
-                return False
-
-        conda_cmd = cls.get_conda_cmd()
+    def ensure_env_ready(self) -> bool:
+        """Ensure the environment exists and the ``hoct`` CLI is usable."""
         try:
-            # HOCT's own dependency pins (e.g. gurobipy<13.0.0) are resolved
-            # automatically by pip; no extra conda-forge packages are needed.
-            pip_cmd = [
-                conda_cmd,
-                "run",
-                "-n",
-                cls.ENV_NAME,
-                "pip",
-                "install",
-                "hoct[bioio]",
-            ]
-            subprocess.run(pip_cmd, check=True)
-            print("HOCT environment is ready.")
-            return True
-        except subprocess.CalledProcessError as e:
+            if not self.is_env_created():
+                print("HOCT environment not found. Creating it now...")
+                self.create_env()
+
+            if not self._hoct_cli_ready():
+                print(
+                    "HOCT CLI not available in environment; (re)installing..."
+                )
+                subprocess.check_call(
+                    pip_command(
+                        self.get_env_python_path(),
+                        "install",
+                        "--upgrade",
+                        self.PACKAGE,
+                    )
+                )
+                if not self._hoct_cli_ready():
+                    print(
+                        "HOCT environment is still not healthy after repair."
+                    )
+                    return False
+        except (subprocess.CalledProcessError, OSError) as e:
             print(f"Error installing HOCT: {e}")
             return False
 
-    @classmethod
-    def ensure_env_ready(cls):
-        """Ensure the environment exists and the ``hoct`` CLI is usable."""
-        if not cls.check_env_exists():
-            print("HOCT environment not found. Creating it now...")
-            if not cls.create_env():
-                return False
-
-        if not cls._hoct_cli_ready():
-            print("HOCT CLI not available in environment; (re)installing...")
-            conda_cmd = cls.get_conda_cmd()
-            try:
-                subprocess.run(
-                    [
-                        conda_cmd,
-                        "run",
-                        "-n",
-                        cls.ENV_NAME,
-                        "pip",
-                        "install",
-                        "--upgrade",
-                        "hoct[bioio]",
-                    ],
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"Error installing HOCT: {e}")
-                return False
-
-            if not cls._hoct_cli_ready():
-                print("HOCT environment is still not healthy after repair.")
-                return False
-
         print("HOCT environment is ready.")
         return True
+
+
+_hoct_env = HoctEnvManager()
 
 
 def _assemble_ctc_output(ctc_dir: Path, output_path: Path) -> tuple:
@@ -950,7 +892,7 @@ def hoct_tracking(
     raw image (same shape, or multichannel with an optional 'channel' index)
     and performs automatic cell tracking using HOCT
     (https://github.com/royerlab/hoct), a transformer-based tracker from
-    royerlab. Tracking is run via the ``hoct`` CLI in a dedicated conda
+    royerlab. Tracking is run via the ``hoct`` CLI in a dedicated virtual
     environment, exporting directly to CTC (Cell Tracking Challenge) format,
     which is then stitched into a single relabeled TIFF.
 
@@ -1054,7 +996,7 @@ def hoct_tracking(
         stage_inputs = "auto"
 
     # Ensure HOCT environment exists and the CLI is usable.
-    if not HoctEnvManager.ensure_env_ready():
+    if not _hoct_env.ensure_env_ready():
         print("Failed to prepare HOCT environment. Skipping.")
         return None
 
@@ -1152,13 +1094,8 @@ def hoct_tracking(
         _cleanup_paths(staged_paths)
         return None
 
-    conda_cmd = HoctEnvManager.get_conda_cmd()
     cmd = [
-        conda_cmd,
-        "run",
-        "-n",
-        HoctEnvManager.ENV_NAME,
-        "hoct",
+        _hoct_env.get_hoct_path(),
         "track",
         str(raw_path),
         str(mask_path),
