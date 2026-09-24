@@ -41,15 +41,18 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 ## 🚀 Quick Start
 
 
-Supports Python 3.11+; commands below use Python 3.12.
-```sh
-# Install napari and the plugin
-mamba create -y -n napari-tmidas -c conda-forge python=3.12
-mamba activate napari-tmidas
-pip install "napari[all]"
-pip install napari-tmidas
+Supports Python 3.11+; commands below use Python 3.12. We recommend installing with [uv](https://docs.astral.sh/uv/), which downloads Python for you — no conda needed.
 
-# Launch napari
+```sh
+# 1. Install uv (one-time; Windows: see Installation below)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Create an environment with napari and the plugin
+uv venv --python 3.12 ~/napari-tmidas-env
+source ~/napari-tmidas-env/bin/activate
+uv pip install "napari[all]" napari-tmidas
+
+# 3. Launch napari
 napari
 ```
 
@@ -91,31 +94,68 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 ## 💻 Installation
 
-### Step 1: Install napari
+### Recommended: uv
+
+**1. Install uv** (one-time). Close and reopen your terminal afterwards so `uv` is on your `PATH`.
+
+```sh
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**2. Create an environment and install napari with the plugin.** uv downloads Python 3.12 if you don't have it. On Windows (PowerShell), write `$HOME\napari-tmidas-env` wherever these commands say `~/napari-tmidas-env`.
+
+```sh
+uv venv --python 3.12 ~/napari-tmidas-env
+source ~/napari-tmidas-env/bin/activate      # Windows: $HOME\napari-tmidas-env\Scripts\activate
+uv pip install "napari[all]" napari-tmidas
+```
+
+| Your Needs | Command (in the activated environment) |
+|----------|---------|
+| **Standard installation** | `uv pip install napari-tmidas` |
+| **Want the latest dev features** | `uv pip install "napari-tmidas @ git+https://github.com/MercaderLabAnatomy/napari-tmidas.git"` |
+
+**3. Start napari** whenever you want to use it: activate the environment, then run `napari`.
+
+```sh
+source ~/napari-tmidas-env/bin/activate      # Windows: $HOME\napari-tmidas-env\Scripts\activate
+napari
+```
+
+### Updating napari-tmidas
+
+Activate the environment, then upgrade the package:
+
+```sh
+source ~/napari-tmidas-env/bin/activate      # Windows: $HOME\napari-tmidas-env\Scripts\activate
+
+# Installed from PyPI (standard installation)
+uv pip install --upgrade napari-tmidas
+
+# Installed from GitHub (dev version): fetches the newest commit
+uv pip install --upgrade "napari-tmidas @ git+https://github.com/MercaderLabAnatomy/napari-tmidas.git"
+
+# Check which version you have
+uv pip show napari-tmidas
+```
+
+`--upgrade` also brings napari-tmidas's dependencies (which can include napari) up to their newest compatible versions. To upgrade only napari-tmidas and leave everything else as it is, use `uv pip install --upgrade-package napari-tmidas napari-tmidas` instead. The AI methods' own environments in `~/.napari-tmidas/envs` are separate and are left as they are. If one misbehaves after an update, delete its folder (e.g. `~/.napari-tmidas/envs/cellpose`) and it is rebuilt the next time you use that method. To update uv itself, run `uv self update`.
+
+<details>
+<summary><b>Alternative: conda / mamba</b></summary>
 
 ```sh
 mamba create -y -n napari-tmidas -c conda-forge python=3.12
 mamba activate napari-tmidas
-python -m pip install "napari[all]"
+python -m pip install "napari[all]" napari-tmidas
 ```
 
-### Step 2: Install napari-tmidas
-
-| Your Needs | Command |
-|----------|---------|
-| **Standard installation** | `pip install napari-tmidas` |
-| **Want the latest dev features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
-
-### Alternative: install with uv
-
-[uv](https://docs.astral.sh/uv/) replaces both mamba and pip and fetches Python itself:
-
-```sh
-uv venv --python 3.12 napari-tmidas-env
-source napari-tmidas-env/bin/activate
-uv pip install "napari[all]" napari-tmidas
-napari
-```
+Update with `python -m pip install --upgrade napari-tmidas` inside the activated environment. conda is not needed by the AI methods: their environments are built with uv either way.
+</details>
 
 ## 🖼️ Screenshots
 
