@@ -3,7 +3,7 @@
 HOCT is not installed here, so every test drives the module the way the
 plugin does at runtime -- through mocked ``subprocess`` calls and real
 files on disk -- and pins the surrounding glue: GPU-pool distribution,
-conda environment management, name/path matching, Zarr introspection,
+virtual environment management, name/path matching, Zarr introspection,
 CTC output assembly and the registry-registered entry point itself.
 
 The fakes stop at ``subprocess.run``: everything above it (staging real
@@ -51,7 +51,7 @@ def _isolated_module_state(monkeypatch, tmp_path):
     The module shells out with a blocking ``subprocess.run`` (no ``Popen``,
     no reader thread), so every test that does not install its own fake gets
     a guard that turns an unnoticed real launch into a failure. ``Popen`` is
-    guarded too, so a future switch to it cannot silently run ``conda``.
+    guarded too, so a future switch to it cannot silently run an install.
     """
     monkeypatch.setattr(mod.subprocess, "run", _guard_run)
     monkeypatch.setattr(mod.subprocess, "Popen", _guard_run)
@@ -60,6 +60,9 @@ def _isolated_module_state(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # The module-level manager resolved its env dir from the real home at
+    # import; rebuild it under the fake one.
+    monkeypatch.setattr(mod, "_hoct_env", mod.HoctEnvManager())
     monkeypatch.setattr(mod, "_GPU_POOL", None)
     monkeypatch.setattr(mod, "_GPU_IDS", None)
     monkeypatch.setattr(mod, "_GPU_POOL_WORKERS_PER_GPU", None)
@@ -313,245 +316,129 @@ class TestResolveGurobiLicense:
 
 
 class TestHoctEnvManager:
-    """Conda environment bootstrap, with every subprocess mocked."""
+    """Virtual environment bootstrap, with every subprocess mocked."""
 
-    def test_get_conda_cmd_prefers_mamba(self, monkeypatch):
-        monkeypatch.setattr(
-            mod.shutil,
-            "which",
-            lambda name: "/x/mamba" if name == "mamba" else None,
+    def test_env_lives_under_home_on_python_311(self, tmp_path):
+        env = mod._hoct_env
+        assert env.env_dir == str(
+            tmp_path / "home" / ".napari-tmidas" / "envs" / "hoct"
         )
-        assert mod.HoctEnvManager.get_conda_cmd() == "mamba"
+        assert env.python_version == "3.11"
 
-    def test_get_conda_cmd_falls_back_to_conda(self, monkeypatch):
-        monkeypatch.setattr(
-            mod.shutil,
-            "which",
-            lambda name: "/x/conda" if name == "conda" else None,
+    def test_hoct_path_is_the_env_entry_point(self, monkeypatch):
+        env = mod._hoct_env
+        monkeypatch.setattr(mod.platform, "system", lambda: "Linux")
+        assert env.get_hoct_path() == os.path.join(env.env_dir, "bin", "hoct")
+        monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+        assert env.get_hoct_path() == os.path.join(
+            env.env_dir, "Scripts", "hoct.exe"
         )
-        assert mod.HoctEnvManager.get_conda_cmd() == "conda"
 
-    def test_get_conda_cmd_raises_without_a_package_manager(self, monkeypatch):
-        monkeypatch.setattr(mod.shutil, "which", lambda name: None)
-        with pytest.raises(RuntimeError, match="Neither conda nor mamba"):
-            mod.HoctEnvManager.get_conda_cmd()
+    def test_cli_probe_runs_hoct_version(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            seen["timeout"] = kwargs.get("timeout")
+            return _Completed(0)
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        assert mod._hoct_env._hoct_cli_ready() is True
+        assert seen["cmd"] == [mod._hoct_env.get_hoct_path(), "--version"]
+        assert seen["timeout"] == 30
+
+    def test_cli_probe_false_on_nonzero_exit(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.subprocess, "run", lambda *a, **k: _Completed(1)
+        )
+        assert mod._hoct_env._hoct_cli_ready() is False
 
     @pytest.mark.parametrize(
-        ("method", "binary", "timeout"),
-        # The two probes differ only in *which* executable they run, so the
-        # binary (not the shared ``--version`` flag) is what must be pinned:
-        # `check_env_exists` only proves the env resolves, `_hoct_cli_ready`
-        # proves the HOCT entry point itself is installed.
-        [("check_env_exists", "python", 10), ("_hoct_cli_ready", "hoct", 30)],
+        "error",
+        [
+            subprocess.TimeoutExpired(["hoct"], 30),
+            FileNotFoundError("hoct"),  # env built but hoct never installed
+        ],
     )
-    def test_probe_returns_true_on_zero_exit(
-        self, monkeypatch, method, binary, timeout
-    ):
-        seen = []
+    def test_cli_probe_swallows_launch_errors(self, monkeypatch, error):
+        def boom(*args, **kwargs):
+            raise error
 
-        def fake_run(cmd, **kwargs):
-            seen.append((list(cmd), kwargs))
-            return _Completed(0)
-
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
-        assert getattr(mod.HoctEnvManager, method)() is True
-        assert len(seen) == 1
-        cmd, kwargs = seen[0]
-        assert cmd == ["conda", "run", "-n", "hoct", binary, "--version"]
-        assert kwargs["timeout"] == timeout
-        assert kwargs["capture_output"] is True
-        # `check=True` would turn a bad exit into an exception instead of the
-        # False that both callers rely on.
-        assert kwargs.get("check", False) is False
-
-    @pytest.mark.parametrize("method", ["check_env_exists", "_hoct_cli_ready"])
-    def test_probe_returns_false_on_nonzero_exit(self, monkeypatch, method):
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            mod.subprocess, "run", lambda *a, **k: _Completed(127)
-        )
-        assert getattr(mod.HoctEnvManager, method)() is False
-
-    @pytest.mark.parametrize("method", ["check_env_exists", "_hoct_cli_ready"])
-    def test_probe_swallows_launch_errors(self, monkeypatch, method):
-        def boom(*a, **k):
-            raise subprocess.TimeoutExpired(["conda"], 10)
-
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
         monkeypatch.setattr(mod.subprocess, "run", boom)
-        assert getattr(mod.HoctEnvManager, method)() is False
+        assert mod._hoct_env._hoct_cli_ready() is False
 
-    def test_create_env_builds_env_then_pip_installs(self, monkeypatch):
+    def test_install_dependencies_installs_hoct_with_bioio(self, monkeypatch):
         calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _Completed(0)
-
         monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: False
+            mod.subprocess, "check_call", lambda cmd: calls.append(cmd)
         )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
-
-        assert mod.HoctEnvManager.create_env() is True
-        assert calls[0][:2] == ["conda", "clean"]
-        # `--no-default-packages` is conda-only and must stay before `-y`.
-        assert calls[1] == [
-            "conda",
-            "create",
-            "-n",
-            "hoct",
-            "python=3.11",
-            "--no-default-packages",
-            "-y",
+        mod._hoct_env._install_dependencies("/env/python")
+        # conftest pins the pip layout; the uv one is tested in
+        # test_env_manager.
+        assert calls == [
+            ["/env/python", "-m", "pip", "install", "hoct[bioio]"]
         ]
-        assert calls[2][-3:] == ["pip", "install", "hoct[bioio]"]
-
-    def test_create_env_omits_conda_only_flag_for_mamba(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
-        monkeypatch.setattr(
-            mod.subprocess,
-            "run",
-            lambda cmd, **k: (calls.append(list(cmd)), _Completed(0))[1],
-        )
-        mod.HoctEnvManager.create_env()
-        assert "--no-default-packages" not in calls[1]
-
-    def test_create_env_skips_creation_when_env_exists(
-        self, monkeypatch, capsys
-    ):
-        calls = []
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            mod.subprocess,
-            "run",
-            lambda cmd, **k: (calls.append(list(cmd)), _Completed(0))[1],
-        )
-        assert mod.HoctEnvManager.create_env() is True
-        assert len(calls) == 1  # only the pip install
-        assert "already exists" in capsys.readouterr().out
-
-    def test_create_env_returns_false_when_creation_fails(self, monkeypatch):
-        def fake_run(cmd, **kwargs):
-            if cmd[1] == "create":
-                raise subprocess.CalledProcessError(1, cmd)
-            return _Completed(0)
-
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
-        assert mod.HoctEnvManager.create_env() is False
-
-    def test_create_env_returns_false_when_pip_fails(self, monkeypatch):
-        def fake_run(cmd, **kwargs):
-            if "pip" in cmd:
-                raise subprocess.CalledProcessError(1, cmd)
-            return _Completed(0)
-
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
-        assert mod.HoctEnvManager.create_env() is False
 
     def test_ensure_env_ready_short_circuits_when_healthy(self, monkeypatch):
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "_hoct_cli_ready", lambda: True
-        )
-        assert mod.HoctEnvManager.ensure_env_ready() is True
+        env = mod._hoct_env
+        monkeypatch.setattr(env, "is_env_created", lambda: True)
+        monkeypatch.setattr(env, "_hoct_cli_ready", lambda: True)
+        monkeypatch.setattr(env, "create_env", _guard_run)
+        assert env.ensure_env_ready() is True
+
+    def test_ensure_env_ready_creates_a_missing_env(self, monkeypatch):
+        env = mod._hoct_env
+        created = []
+        monkeypatch.setattr(env, "is_env_created", lambda: False)
+        monkeypatch.setattr(env, "create_env", lambda: created.append(1))
+        monkeypatch.setattr(env, "_hoct_cli_ready", lambda: True)
+        assert env.ensure_env_ready() is True
+        assert created == [1]
 
     def test_ensure_env_ready_fails_when_creation_fails(self, monkeypatch):
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(mod.HoctEnvManager, "create_env", lambda: False)
-        assert mod.HoctEnvManager.ensure_env_ready() is False
+        env = mod._hoct_env
+
+        def fail():
+            raise subprocess.CalledProcessError(1, ["uv", "venv"])
+
+        monkeypatch.setattr(env, "is_env_created", lambda: False)
+        monkeypatch.setattr(env, "create_env", fail)
+        assert env.ensure_env_ready() is False
 
     def test_ensure_env_ready_repairs_a_missing_cli(self, monkeypatch):
+        env = mod._hoct_env
         states = iter([False, True])
         calls = []
+        monkeypatch.setattr(env, "is_env_created", lambda: True)
+        monkeypatch.setattr(env, "_hoct_cli_ready", lambda: next(states))
         monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
+            mod.subprocess, "check_call", lambda cmd: calls.append(cmd)
         )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "_hoct_cli_ready", lambda: next(states)
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            mod.subprocess,
-            "run",
-            lambda cmd, **k: (calls.append(list(cmd)), _Completed(0))[1],
-        )
-        assert mod.HoctEnvManager.ensure_env_ready() is True
+        assert env.ensure_env_ready() is True
+        assert calls[0][0] == env.get_env_python_path()
         assert calls[0][-3:] == ["install", "--upgrade", "hoct[bioio]"]
 
     def test_ensure_env_ready_gives_up_if_repair_does_not_help(
         self, monkeypatch
     ):
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "_hoct_cli_ready", lambda: False
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            mod.subprocess, "run", lambda *a, **k: _Completed(0)
-        )
-        assert mod.HoctEnvManager.ensure_env_ready() is False
+        env = mod._hoct_env
+        monkeypatch.setattr(env, "is_env_created", lambda: True)
+        monkeypatch.setattr(env, "_hoct_cli_ready", lambda: False)
+        monkeypatch.setattr(mod.subprocess, "check_call", lambda cmd: 0)
+        assert env.ensure_env_ready() is False
 
     def test_ensure_env_ready_fails_when_repair_install_raises(
         self, monkeypatch
     ):
-        def boom(cmd, **kwargs):
+        env = mod._hoct_env
+
+        def boom(cmd):
             raise subprocess.CalledProcessError(1, cmd)
 
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "_hoct_cli_ready", lambda: False
-        )
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(mod.subprocess, "run", boom)
-        assert mod.HoctEnvManager.ensure_env_ready() is False
+        monkeypatch.setattr(env, "is_env_created", lambda: True)
+        monkeypatch.setattr(env, "_hoct_cli_ready", lambda: False)
+        monkeypatch.setattr(mod.subprocess, "check_call", boom)
+        assert env.ensure_env_ready() is False
 
 
 class TestZarrIntrospection:
@@ -1033,11 +920,10 @@ def hoct_pair(tmp_path):
 
 @pytest.fixture
 def ready_env(monkeypatch):
-    """Pretend the dedicated conda env exists and inputs are 1-channel."""
+    """Pretend the dedicated env exists and inputs are 1-channel."""
     from napari_tmidas import _file_selector as fs
 
-    monkeypatch.setattr(mod.HoctEnvManager, "ensure_env_ready", lambda: True)
-    monkeypatch.setattr(mod.HoctEnvManager, "get_conda_cmd", lambda: "conda")
+    monkeypatch.setattr(mod._hoct_env, "ensure_env_ready", lambda: True)
     monkeypatch.setattr(
         fs, "detect_channels_for_file", lambda p, image_data=None: (1, None)
     )
@@ -1055,9 +941,7 @@ class TestHoctTrackingGuards:
         assert "only one timepoint" in capsys.readouterr().out
 
     def test_invalid_options_are_normalised(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            mod.HoctEnvManager, "ensure_env_ready", lambda: False
-        )
+        monkeypatch.setattr(mod._hoct_env, "ensure_env_ready", lambda: False)
         result = mod.hoct_tracking(
             np.zeros((2, 8, 8), np.uint16),
             device="tpu",
@@ -1100,7 +984,7 @@ class TestHoctTrackingGuards:
         assert np.array_equal(
             tifffile.imread(result), hoct_pair.tracked
         )
-        assert run.cmds[0][6:8] == [
+        assert run.cmds[0][2:4] == [
             str(hoct_pair.raw_path),
             str(hoct_pair.label_path),
         ]
@@ -1215,9 +1099,9 @@ class TestHoctTrackingRun:
         assert np.array_equal(written, hoct_pair.tracked)
 
         cmd = run.cmds[0]
-        assert cmd[:6] == ["conda", "run", "-n", "hoct", "hoct", "track"]
-        assert cmd[6] == str(hoct_pair.raw_path)
-        assert cmd[7] == str(hoct_pair.label_path)
+        assert cmd[:2] == [mod._hoct_env.get_hoct_path(), "track"]
+        assert cmd[2] == str(hoct_pair.raw_path)
+        assert cmd[3] == str(hoct_pair.label_path)
         assert cmd[cmd.index("-d") + 1] == "cpu"
         assert cmd[cmd.index("-w") + 1] == "7"
         assert cmd[cmd.index("--max-distance") + 1] == "12.5"
@@ -1281,7 +1165,7 @@ class TestHoctTrackingRun:
         result = mod.hoct_tracking(hoct_pair.labels, device="cpu")
 
         assert result == str(tmp_path / "movie_hoct_tracked.tif")
-        assert run.cmds[0][7] == str(hoct_pair.label_path)
+        assert run.cmds[0][3] == str(hoct_pair.label_path)
 
     def test_stale_ctc_directory_is_removed_before_the_run(
         self, monkeypatch, ready_env, hoct_pair, tmp_path
@@ -1327,7 +1211,7 @@ class TestHoctTrackingRun:
         # The pattern is not a suffix here, so the extension is stripped
         # instead of the pattern and nothing is cut out of the middle.
         assert result == str(tmp_path / "movie_labels_v2_hoct_tracked.tif")
-        assert run.cmds[0][6] == str(tmp_path / "movie_v2.tif")
+        assert run.cmds[0][2] == str(tmp_path / "movie_v2.tif")
 
     def test_nonzero_exit_discards_the_output(
         self, monkeypatch, ready_env, hoct_pair, capsys
@@ -1387,8 +1271,8 @@ class TestHoctTrackingRun:
         )
 
         cmd = run.cmds[0]
-        assert cmd[6].endswith(".zarr")  # raw staged
-        assert cmd[7].endswith(".zarr")  # labels staged
+        assert cmd[2].endswith(".zarr")  # raw staged
+        assert cmd[3].endswith(".zarr")  # labels staged
         assert result is not None
         assert list(tmp_path.glob("*.zarr")) == []
 

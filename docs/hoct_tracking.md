@@ -13,17 +13,18 @@ maintaining consistent object IDs throughout the time series.
 - **Deep Learning-Based Tracking**: Uses pre-trained HOCT models (auto-downloaded on first use)
 - **2D and 3D Support**: Handles both TYX and TZYX time-lapse data
 - **Tiled Inference**: Automatically tiles large volumes to avoid GPU out-of-memory errors
-- **Automatic Environment Management**: Creates a dedicated conda environment for HOCT
+- **Automatic Environment Management**: Creates a dedicated virtual environment for HOCT (no conda needed)
 - **Multi-GPU Aware**: Runs one or more workers per available GPU (configurable via `workers_per_gpu`, not the CPU thread-count control) so concurrent files spread across cards, matching the Trackastra/Cellpose pattern
 
 ## Installation
 
-HOCT runs in a dedicated conda environment that is automatically created
-when first used. The environment includes:
+HOCT runs in a dedicated virtual environment at `~/.napari-tmidas/envs/hoct`,
+built with [uv](https://docs.astral.sh/uv/) on Python 3.11 when first used
+(uv downloads that Python if needed). The environment includes:
 - `hoct[bioio]` (pulls in torch, gurobipy, tracksdata, and related dependencies)
 
-These are automatically installed into a dedicated `hoct` conda environment
-when first used.
+Earlier versions used a conda environment named `hoct`. It is no longer used
+and can be removed with `conda env remove -n hoct`.
 
 ## Parameters
 
@@ -154,16 +155,16 @@ plugin:
 ### Processing Pipeline
 
 1. **Input validation**: Checks for time dimension and minimum timepoints
-2. **Environment check**: Ensures the dedicated `hoct` conda environment exists and the `hoct` CLI is usable
+2. **Environment check**: Ensures the dedicated `hoct` environment exists and the `hoct` CLI is usable
 3. **File preparation**: Identifies label and raw image pairs
 4. **Tracking**: Runs `hoct track ... -f ctc` in the dedicated environment
 5. **Output assembly**: Streams the CTC mask frames into a single relabeled TIFF
 
 ### Environment Isolation
 
-- Dedicated `hoct` conda environment
+- Dedicated `hoct` virtual environment
 - Isolated from main napari-tmidas environment
-- Uses subprocess calls (`conda run -n hoct hoct track ...`) for cross-environment execution
+- Runs the environment's own `hoct` executable (`~/.napari-tmidas/envs/hoct/bin/hoct track ...`) as a subprocess
 - Prevents dependency conflicts (e.g. HOCT pins `gurobipy<13.0.0`, which can differ from other trackers)
 
 ## Troubleshooting
