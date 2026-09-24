@@ -364,32 +364,6 @@ class TestGenerateWithSensitivity:
 class TestGenerate3dSegmentation:
     """Setting up the SAM2 video predictor for a stack."""
 
-    @pytest.fixture(autouse=True)
-    def _restore_napari_callbacks(self, processor, monkeypatch):
-        """Give napari back the label-layer callbacks the setup strips.
-
-        ``_generate_3d_segmentation`` empties ``mouse_drag_callbacks``
-        entirely, including the handler napari's labels-polygon overlay
-        installed, and napari then raises when the viewer closes the layer.
-        That is a bug in the module (reported, not pinned here); this
-        fixture only re-adds napari's own handlers after the test so the
-        viewer can be torn down.  It is a no-op once the bug is fixed.
-        """
-        snapshots = []
-        original = processor._update_label_layer
-
-        def recording_update():
-            original()
-            layer = processor.label_layer
-            snapshots.append((layer, list(layer.mouse_drag_callbacks)))
-
-        monkeypatch.setattr(processor, "_update_label_layer", recording_update)
-        yield
-        for layer, callbacks in snapshots:
-            for callback in callbacks:
-                if callback not in layer.mouse_drag_callbacks:
-                    layer.mouse_drag_callbacks.append(callback)
-
     @pytest.fixture
     def converted(self, volume, monkeypatch, tmp_path):
         """Record MP4 conversions instead of running ffmpeg."""
@@ -441,6 +415,22 @@ class TestGenerate3dSegmentation:
         ]
         assert labels == [proc.label_layer]
         assert proc.viewer.dims.point[0] == 0
+
+    def test_napari_own_drag_callbacks_survive(self, converted):
+        # Regression: the setup used to empty mouse_drag_callbacks, taking
+        # napari's labels-polygon handler with it, and removing the layer
+        # then raised ValueError.
+        proc, _ = converted
+
+        proc._generate_3d_segmentation(0.7, proc.images[0])
+
+        ours = (proc._on_label_clicked, proc._on_3d_label_clicked)
+        assert [
+            cb
+            for cb in proc.label_layer.mouse_drag_callbacks
+            if cb not in ours
+        ]
+        proc.viewer.layers.remove(proc.label_layer)
 
     def test_an_existing_mp4_is_reused(self, converted, tmp_path):
         proc, conversions = converted
@@ -831,103 +821,6 @@ class TestPropagateFallbacks:
 
 
 # --------------------------------------------------------------------------
-# _add_3d_prompt and on_apply_propagate
-# --------------------------------------------------------------------------
-class TestAdd3dPrompt:
-    @pytest.fixture
-    def prompted(self, volume):
-        weak = np.zeros((3, 8, 8), dtype=bool)
-        weak[:, 0, 0] = True
-        strong = np.zeros((3, 8, 8), dtype=bool)
-        strong[1, 2:4, 2:4] = True
-        volume.predictor = ImagePredictor([weak, strong], scores=[0.2, 0.9])
-        volume._sam2_state = object()
-        volume._sam2_next_obj_id = 3
-        return volume
-
-    def test_the_best_scoring_mask_becomes_a_new_object(self, prompted):
-        prompted._add_3d_prompt((2, 3, 1))
-
-        (call,) = prompted.predictor.predict_kwargs
-        assert call["state"] is prompted._sam2_state
-        np.testing.assert_array_equal(call["point_coords"], [[2, 3, 1]])
-        np.testing.assert_array_equal(call["point_labels"], [1])
-        assert call["multimask_output"] is True
-        assert int((prompted.segmentation_result == 3).sum()) == 4
-        assert prompted.segmentation_result[1, 2, 2] == 3
-        assert prompted.segmentation_result[0, 0, 0] == 0
-        assert prompted._sam2_next_obj_id == 4
-        assert prompted.label_layer.data is prompted.segmentation_result
-
-    def test_no_mask_leaves_the_segmentation_alone(self, prompted):
-        prompted.predictor.masks = np.zeros((0, 3, 8, 8), dtype=bool)
-        prompted.predictor.scores = np.zeros(0)
-
-        prompted._add_3d_prompt((2, 3, 1))
-
-        assert prompted.viewer.status == "No mask found for this prompt."
-        assert not prompted.segmentation_result.any()
-        assert prompted._sam2_next_obj_id == 3
-
-    def test_without_a_video_state_nothing_is_asked(self, prompted):
-        prompted._sam2_state = None
-
-        prompted._add_3d_prompt((2, 3, 1))
-
-        assert prompted.viewer.status == "SAM2 3D state not initialized."
-        assert prompted.predictor.predict_kwargs == []
-
-    def test_without_a_model_nothing_is_asked(self, prompted):
-        prompted.predictor = None
-
-        prompted._add_3d_prompt((2, 3, 1))
-
-        assert prompted.viewer.status == "SAM2 predictor not initialized."
-        assert not prompted.segmentation_result.any()
-
-
-class TestApplyPropagate:
-    """Rebuilding the whole segmentation from one propagation pass."""
-
-    class MultiObjectPredictor:
-        def __init__(self, frames):
-            self.frames = frames
-
-        def propagate_in_video(self, state):
-            yield from self.frames
-
-    def test_every_object_is_written_to_every_frame(self, volume):
-        volume.segmentation_result[:] = 9  # stale result, must go
-        one = square((8, 8), 0, 2, 0, 2)
-        two = square((8, 8), 5, 8, 5, 8)
-        frame_logits = FakeTensor(np.where(np.stack([one, two]), 1.0, -1.0))
-        volume.predictor = self.MultiObjectPredictor(
-            [
-                (0, [1, 2], frame_logits),
-                (2, [1, 2], frame_logits),
-                (5, [1, 2], frame_logits),  # beyond the stack
-            ]
-        )
-        volume._sam2_state = object()
-
-        volume.on_apply_propagate()
-
-        for frame in (0, 2):
-            np.testing.assert_array_equal(
-                volume.segmentation_result[frame] == 1, one
-            )
-            np.testing.assert_array_equal(
-                volume.segmentation_result[frame] == 2, two
-            )
-        assert not volume.segmentation_result[1].any()
-        assert (volume.segmentation_result != 9).all()
-        assert volume.label_layer.data is volume.segmentation_result
-        assert volume.viewer.status == "Propagation complete!"
-        qt_window = volume.viewer.window._qt_window
-        assert qt_window.cursor().shape() == ca.Qt.ArrowCursor
-
-
-# --------------------------------------------------------------------------
 # _on_points_clicked, 3D
 # --------------------------------------------------------------------------
 class TestOnPointsClicked3d:
@@ -1045,6 +938,38 @@ class TestOnPointsClicked3d:
         )
         assert not armed.segmentation_result[0].any()
 
+    def test_only_propagated_masks_need_upscaling(self, armed):
+        # Regression: a function-local ``import resize`` made ``resize``
+        # unbound when the clicked frame was full size but a propagated
+        # frame was not, raising UnboundLocalError.
+        small = np.zeros((4, 4), dtype=bool)
+        small[0, 0] = True
+        armed.predictor.propagated = {2: small}
+
+        self.click(armed, (1, 2, 3))
+
+        np.testing.assert_array_equal(
+            armed.segmentation_result[1] == 1, self.MASK
+        )
+        np.testing.assert_array_equal(
+            armed.segmentation_result[2] == 1, square((8, 8), 0, 2, 0, 2)
+        )
+
+    def test_the_progress_overlay_shows_propagated_frames(self, armed):
+        # Regression: the overlay was a uint32 copy of the labels, so the
+        # 0.8 "processed" value was truncated to 0 and nothing showed.
+        self.click(armed, (1, 2, 3))
+
+        (overlay,) = [
+            layer
+            for layer in armed.viewer.layers
+            if layer.name == "Propagation Progress"
+        ]
+        assert np.issubdtype(overlay.data.dtype, np.floating)
+        for frame in range(3):
+            np.testing.assert_allclose(overlay.data[frame][self.MASK], 0.8)
+            assert not overlay.data[frame][~self.MASK].any()
+
     def test_an_existing_progress_layer_is_reused(self, armed):
         armed.viewer.add_image(
             np.zeros((3, 8, 8)), name="Propagation Progress"
@@ -1160,26 +1085,8 @@ class TestOnPointsClicked2d:
 
 
 # --------------------------------------------------------------------------
-# _add_segmentation_point, reset_sam2_state
+# reset_sam2_state
 # --------------------------------------------------------------------------
-class TestAddSegmentationPoint:
-    """Only the no-model path: see the module report for the model path."""
-
-    def test_points_are_recorded_as_x_y_with_sam2_labels(self, scene):
-        scene.predictor = None
-
-        scene._add_segmentation_point(3, 7, FakeEvent((7, 3)))
-        scene._add_segmentation_point(
-            4, 8, FakeEvent((8, 4), modifiers=("Shift",))
-        )
-
-        assert scene.current_points == [[3, 7], [4, 8]]
-        # SAM2 image predictors use 0 (not -1) for background points.
-        assert scene.current_labels == [1, 0]
-        assert scene.current_obj_id == 1
-        assert not scene.segmentation_result.any()
-
-
 class TestResetSam2State:
     @pytest.fixture
     def prepared(self, scene):

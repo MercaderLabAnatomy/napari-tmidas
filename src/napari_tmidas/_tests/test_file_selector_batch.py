@@ -1220,9 +1220,37 @@ class TestTableMouseAndLoading:
 # save_as_zarr without ome-zarr
 # ---------------------------------------------------------------------------
 class TestSaveAsZarrFallback:
-    # The basic-zarr write itself is not tested: zarr>=3's ``zarr.save``
-    # treats every keyword argument as another array to store, so the
-    # fallback's ``chunks=``/``compressors=`` kwargs always raise TypeError.
+    @pytest.mark.parametrize("chunks", ["auto", (2, 3)])
+    def test_basic_zarr_is_written_with_chunks_and_zstd(
+        self, tmp_path, monkeypatch, chunks
+    ):
+        # Regression: this path used zarr.save, which in zarr 3 treats the
+        # chunks=/compressors= keywords as extra arrays and raises.
+        zarr = pytest.importorskip("zarr")
+        monkeypatch.setitem(sys.modules, "ome_zarr.io", None)
+        data = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        target = str(tmp_path / "x.zarr")
+
+        fs.save_as_zarr(data, target, chunks=chunks)
+
+        stored = zarr.open_array(target, mode="r")
+        np.testing.assert_array_equal(stored[:], data)
+        assert stored.dtype == np.uint16
+        if chunks != "auto":
+            assert stored.chunks == chunks
+        assert type(stored.compressors[0]).__name__ == "ZstdCodec"
+
+    def test_basic_zarr_failure_is_a_value_error(self, tmp_path, monkeypatch):
+        zarr = pytest.importorskip("zarr")
+        monkeypatch.setitem(sys.modules, "ome_zarr.io", None)
+
+        def broken(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(zarr, "create_array", broken)
+        with pytest.raises(ValueError, match="disk full"):
+            fs.save_as_zarr(np.zeros((2, 2)), str(tmp_path / "x.zarr"))
+
     def test_old_zarr_is_rejected(self, tmp_path, monkeypatch):
         zarr = pytest.importorskip("zarr")
         monkeypatch.setitem(sys.modules, "ome_zarr.io", None)

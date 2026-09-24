@@ -1345,20 +1345,22 @@ def save_as_zarr(
                 "Zarr v3+ is required. Please upgrade your environment to zarr>=3."
             )
 
-        if chunks == "auto":
-            chunks = True  # Let zarr decide
+        from zarr.codecs import ZstdCodec as _ZstdCodec
 
+        # zarr.save treats every keyword as another array to store, so
+        # chunking and compression have to go through create_array.
         try:
-            from zarr.codecs import ZstdCodec as _ZstdCodec
-
-            zarr.save(
+            zarr.create_array(
                 filepath,
-                data,
+                data=data,
                 chunks=chunks,
                 compressors=[_ZstdCodec(level=3)],
+                overwrite=True,
             )
-        except Exception:
-            zarr.save(filepath, data, chunks=chunks)  # no compression fallback
+        except Exception as zarr_error:
+            raise ValueError(
+                f"Failed to save Zarr: {zarr_error}"
+            ) from zarr_error
         print(f"Saved basic Zarr to: {filepath}")
     except Exception as e:
         raise ValueError(f"Failed to save Zarr: {e}") from e

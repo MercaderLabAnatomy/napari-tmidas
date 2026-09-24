@@ -950,8 +950,12 @@ class BatchCropAnything:
             if self.label_layer is not None and hasattr(
                 self.label_layer, "mouse_drag_callbacks"
             ):
-                # Safely remove all existing callbacks
-                for callback in list(self.label_layer.mouse_drag_callbacks):
+                # Remove only our own handlers; napari's built-in drag
+                # callbacks must stay or closing the layer raises ValueError.
+                for callback in (
+                    self._on_label_clicked,
+                    self._on_3d_label_clicked,
+                ):
                     with contextlib.suppress(ValueError):
                         self.label_layer.mouse_drag_callbacks.remove(callback)
 
@@ -1119,8 +1123,6 @@ class BatchCropAnything:
 
                 # Check mask dimensions and resize if needed
                 if mask.shape != self.segmentation_result[z].shape:
-                    from skimage.transform import resize
-
                     mask = resize(
                         mask.astype(float),
                         self.segmentation_result[z].shape,
@@ -1254,8 +1256,6 @@ class BatchCropAnything:
                                         frame_idx
                                     ].shape
                                 ):
-                                    from skimage.transform import resize
-
                                     mask = resize(
                                         mask.astype(float),
                                         self.segmentation_result[
@@ -1339,76 +1339,6 @@ class BatchCropAnything:
 
             self.viewer.status = f"Error in propagation: {str(e)}"
             traceback.print_exc()
-
-    def _add_3d_prompt(self, prompt_coords):
-        """
-        Given a 3D coordinate (x, y, z), run SAM2 video predictor to segment the object at that point,
-        update the segmentation result and label layer.
-        """
-        device_type = "cuda" if self.device.type == "cuda" else "cpu"
-        if not hasattr(self, "_sam2_state") or self._sam2_state is None:
-            self.viewer.status = "SAM2 3D state not initialized."
-            return
-
-        if self.predictor is None:
-            self.viewer.status = "SAM2 predictor not initialized."
-            return
-
-        # Prepare prompt for SAM2: point_coords is [[x, y, t]], point_labels is [1]
-        x, y, z = prompt_coords
-        point_coords = np.array([[x, y, z]])
-        point_labels = np.array([1])  # 1 = foreground
-
-        with (
-            torch.inference_mode(),
-            torch.autocast(device_type, dtype=torch.float32),
-        ):
-            masks, scores, _ = self.predictor.predict(
-                state=self._sam2_state,
-                point_coords=point_coords,
-                point_labels=point_labels,
-                multimask_output=True,
-            )
-
-        # Pick the best mask (highest score)
-        if masks is not None and len(masks) > 0:
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-            obj_id = self._sam2_next_obj_id
-            self.segmentation_result[mask] = obj_id
-            self._sam2_next_obj_id += 1
-            self.viewer.status = (
-                f"Added object {obj_id} at (x={x}, y={y}, z={z})"
-            )
-            self._update_label_layer()
-        else:
-            self.viewer.status = "No mask found for this prompt."
-
-    def on_apply_propagate(self):
-        """Propagate masks across the video and update the segmentation layer."""
-        self.viewer.status = "Propagating masks across all frames..."
-        self.viewer.window._qt_window.setCursor(Qt.WaitCursor)
-
-        self.segmentation_result[:] = 0
-
-        for (
-            frame_idx,
-            object_ids,
-            mask_logits,
-        ) in self.predictor.propagate_in_video(self._sam2_state):
-            masks = (mask_logits > 0.0).cpu().numpy()
-            if frame_idx >= self.segmentation_result.shape[0]:
-                print(
-                    f"Warning: frame_idx {frame_idx} out of bounds for segmentation_result with shape {self.segmentation_result.shape}"
-                )
-                continue
-            for i, obj_id in enumerate(object_ids):
-                self.segmentation_result[frame_idx][masks[i]] = obj_id
-            self.viewer.status = f"Propagating: frame {frame_idx+1}"
-
-        self._update_label_layer()
-        self.viewer.status = "Propagation complete!"
-        self.viewer.window._qt_window.setCursor(Qt.ArrowCursor)
 
     def _update_label_layer(self):
         """Update the label layer in the viewer."""
@@ -1666,8 +1596,6 @@ class BatchCropAnything:
 
                     # Resize if needed
                     if mask.shape != self.segmentation_result[t].shape:
-                        from skimage.transform import resize
-
                         mask = resize(
                             mask.astype(float),
                             self.segmentation_result[t].shape,
@@ -1795,8 +1723,6 @@ class BatchCropAnything:
                                     best_mask.shape
                                     != self.segmentation_result.shape
                                 ):
-                                    from skimage.transform import resize
-
                                     best_mask = resize(
                                         best_mask.astype(float),
                                         self.segmentation_result.shape,
@@ -1994,7 +1920,9 @@ class BatchCropAnything:
                             break
 
                     if progress_layer is None:
-                        progress_data = np.zeros_like(self.segmentation_result)
+                        progress_data = np.zeros_like(
+                            self.segmentation_result, dtype=float
+                        )
                         progress_layer = self.viewer.add_image(
                             progress_data,
                             name="Propagation Progress",
@@ -2024,8 +1952,6 @@ class BatchCropAnything:
 
                     # Resize if needed
                     if mask.shape != self.segmentation_result[t].shape:
-                        from skimage.transform import resize
-
                         mask = resize(
                             mask.astype(float),
                             self.segmentation_result[t].shape,
@@ -2111,31 +2037,6 @@ class BatchCropAnything:
                                 if frame_idx % 5 == 0:
                                     self.viewer.status = f"Propagating: frame {frame_idx+1}/{frame_count}"
                                     # Remove the viewer.update() call as it's causing errors
-
-                    # Process any missing frames
-                    processed_frames = set(range(frame_count))
-                    for frame_idx in range(frame_count):
-                        if (
-                            progress_data[frame_idx].max() == 0
-                        ):  # Frame not processed yet
-                            # Use nearest processed frame's mask
-                            nearest_idx = min(
-                                processed_frames,
-                                key=lambda x: abs(x - frame_idx),
-                            )
-                            if progress_data[nearest_idx].max() > 0:
-                                self.segmentation_result[frame_idx][
-                                    (self.segmentation_result[frame_idx] == 0)
-                                    & (
-                                        self.segmentation_result[nearest_idx]
-                                        == obj_id
-                                    )
-                                ] = obj_id
-
-                                # Update progress visualization
-                                progress_data[frame_idx] = (
-                                    progress_data[nearest_idx] * 0.6
-                                )  # Mark as copied
 
                     # Final update of progress layer
                     progress_layer.data = progress_data
@@ -2285,8 +2186,6 @@ class BatchCropAnything:
                                 best_mask.shape
                                 != self.segmentation_result.shape
                             ):
-                                from skimage.transform import resize
-
                                 best_mask = resize(
                                     best_mask.astype(float),
                                     self.segmentation_result.shape,
@@ -2485,94 +2384,6 @@ class BatchCropAnything:
 
             self.viewer.status = f"Error in click handling: {str(e)}"
             traceback.print_exc()
-
-    def _add_segmentation_point(self, x, y, event):
-        """Add a point for segmentation."""
-        is_negative = "Shift" in event.modifiers
-
-        # Initialize tracking if needed
-        if not hasattr(self, "current_points"):
-            self.current_points = []
-            self.current_labels = []
-            self.current_obj_id = 1
-
-        # Add point
-        self.current_points.append([x, y])
-        self.current_labels.append(0 if is_negative else 1)
-
-        # Run SAM2 prediction
-        if self.predictor is not None:
-            # Prepare image
-            image = self._prepare_image_for_sam2()
-
-            # Set the image in the predictor (only for ImagePredictor, not VideoPredictor)
-            if hasattr(self.predictor, "set_image"):
-                self.predictor.set_image(image)
-            else:
-                self.viewer.status = (
-                    "Error: This operation requires Image Predictor (2D mode)"
-                )
-                return
-
-            # Predict
-            device_type = "cuda" if self.device.type == "cuda" else "cpu"
-            with torch.inference_mode(), torch.autocast(device_type):
-                masks, scores, _ = self.predictor.predict(
-                    point_coords=np.array(
-                        self.current_points, dtype=np.float32
-                    ),
-                    point_labels=np.array(self.current_labels, dtype=np.int32),
-                    multimask_output=False,
-                )
-
-            # Update segmentation
-            if len(masks) > 0:
-                mask = masks[0] > 0.5
-                if self.current_scale_factor < 1.0:
-                    mask = resize(
-                        mask, self.segmentation_result.shape, order=0
-                    ).astype(bool)
-
-                # Update segmentation result
-                self.segmentation_result[mask] = self.current_obj_id
-
-                # Move to next object if adding positive point
-                if not is_negative:
-                    self.current_obj_id += 1
-                    self.current_points = []
-                    self.current_labels = []
-
-                self._update_label_layer()
-
-    def _add_point_marker(self, coords, label_type):
-        """Add a visible marker for where the user clicked."""
-        # Remove previous point markers
-        for layer in list(self.viewer.layers):
-            if "Point Prompt" in layer.name:
-                with contextlib.suppress(ValueError):
-                    self.viewer.layers.remove(layer)
-
-        # Create points layer
-        color = (
-            "red" if label_type < 0 else "green"
-        )  # Red for negative, green for positive
-        self.viewer.add_points(
-            [coords],
-            name="Point Prompt",
-            size=10,
-            face_color=color,
-            edge_color="white",
-            edge_width=2,
-            opacity=0.8,
-        )
-
-        with contextlib.suppress(AttributeError, ValueError):
-            self.points_layer.mouse_drag_callbacks.remove(
-                self._on_points_clicked
-            )
-            self.points_layer.mouse_drag_callbacks.append(
-                self._on_points_clicked
-            )
 
     def create_label_table(self, parent_widget):
         """Create a table widget displaying all detected labels."""
