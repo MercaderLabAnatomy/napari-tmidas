@@ -78,8 +78,7 @@ def test_trackastra_tracking_uses_zarr_raw_for_tif_label(tmp_path, monkeypatch):
         out.write_bytes(b"TIFF")
         return _Completed()
 
-    monkeypatch.setattr(trackastra_mod.TrackAstraEnvManager, "ensure_env_ready", lambda: True)
-    monkeypatch.setattr(trackastra_mod.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba")
+    monkeypatch.setattr(trackastra_mod._trackastra_env, "ensure_env_ready", lambda: True)
     monkeypatch.setattr(trackastra_mod, "create_trackastra_script", fake_create_trackastra_script)
     monkeypatch.setattr(trackastra_mod.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(
@@ -260,10 +259,7 @@ def test_trackastra_normalizes_invalid_mode(tmp_path, monkeypatch):
         return "print('mock')\n"
 
     monkeypatch.setattr(
-        trackastra_mod.TrackAstraEnvManager, "ensure_env_ready", lambda: True
-    )
-    monkeypatch.setattr(
-        trackastra_mod.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
+        trackastra_mod._trackastra_env, "ensure_env_ready", lambda: True
     )
     monkeypatch.setattr(
         trackastra_mod, "create_trackastra_script", fake_create_trackastra_script
@@ -308,7 +304,7 @@ def test_trackastra_tolerates_skip_load_none_image(tmp_path, monkeypatch):
 
     # Env not ready → returns early (None) without touching `image.shape`.
     monkeypatch.setattr(
-        trackastra_mod.TrackAstraEnvManager, "ensure_env_ready", lambda: False
+        trackastra_mod._trackastra_env, "ensure_env_ready", lambda: False
     )
 
     result = trackastra_mod.trackastra_tracking(
@@ -331,7 +327,7 @@ def test_trackastra_env_requires_zarr_for_py311():
 def test_ensure_env_ready_recreates_env_on_python_version_mismatch(
     tmp_path, monkeypatch
 ):
-    """When Python is too old, ensure_env_ready must delete+recreate rather than repair."""
+    """When Python is too old, ensure_env_ready must rebuild rather than repair."""
     old_status = {
         "python": "3.10.0",
         "packages": {
@@ -355,22 +351,17 @@ def test_ensure_env_ready_recreates_env_on_python_version_mismatch(
 
     calls = []
     statuses = [old_status, new_status]
+    env = TrackAstraEnvManager()
 
-    monkeypatch.setattr(TrackAstraEnvManager, "check_env_exists", lambda: True)
-    monkeypatch.setattr(TrackAstraEnvManager, "get_env_status", lambda: statuses.pop(0))
-    monkeypatch.setattr(TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba")
-    monkeypatch.setattr(
-        trackastra_mod.subprocess,
-        "run",
-        lambda cmd, **kwargs: calls.append(cmd) or type("R", (), {"returncode": 0})(),
-    )
-    monkeypatch.setattr(TrackAstraEnvManager, "create_env", lambda: True)
+    monkeypatch.setattr(env, "is_env_created", lambda: True)
+    monkeypatch.setattr(env, "get_env_status", lambda: statuses.pop(0))
+    monkeypatch.setattr(env, "create_env", lambda: calls.append("create"))
+    monkeypatch.setattr(env, "repair_env", lambda: calls.append("repair"))
 
-    result = TrackAstraEnvManager.ensure_env_ready()
+    result = env.ensure_env_ready()
 
     assert result is True
-    remove_calls = [c for c in calls if "remove" in c]
-    assert remove_calls, "Expected env remove call when Python version is wrong"
+    assert calls == ["create"], "Expected a rebuild, not a repair"
 
 
 def test_trackastra_env_needs_repair_when_zarr_missing():

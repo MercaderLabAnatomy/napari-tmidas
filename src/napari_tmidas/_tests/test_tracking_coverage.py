@@ -2,7 +2,7 @@
 
 Neither ``trackastra`` nor ``ultrack`` is installed in this environment, so
 every test here exercises the *orchestration* layer that lives in the main
-env: conda environment bootstrap/repair, raw/label file pairing, GPU
+env: dedicated environment bootstrap/repair, raw/label file pairing, GPU
 pinning, the subprocess invocation and its failure handling, and result
 collection.  Heavy collaborators (``subprocess``, ``shutil.which``, the
 ultrack env-manager helpers, ``imread``) are stubbed on the module object so
@@ -54,6 +54,19 @@ def no_gpu_env(monkeypatch):
     """Remove the env vars ``_detect_gpu_ids`` consults."""
     monkeypatch.delenv("TRACKASTRA_GPUS", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def trackastra_env(monkeypatch, tmp_path):
+    """A Trackastra env manager rooted in a throwaway HOME.
+
+    The module-level manager resolved its env dir from the real home at
+    import; tests get one under tmp_path instead.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    env = ta.TrackAstraEnvManager()
+    monkeypatch.setattr(ta, "_trackastra_env", env)
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -324,77 +337,39 @@ class TestLoadZarrArray:
 # ---------------------------------------------------------------------------
 
 
-class TestTrackAstraCondaCmd:
-    """`get_conda_cmd` prefers mamba and fails loudly when neither exists."""
+class TestTrackAstraEnvLayout:
+    """Where the env lives and what goes into it."""
 
-    def test_mamba_preferred(self, monkeypatch):
-        """mamba wins when both are on PATH."""
-        monkeypatch.setattr(ta.shutil, "which", lambda name: "/bin/" + name)
-        assert ta.TrackAstraEnvManager.get_conda_cmd() == "mamba"
-
-    def test_conda_fallback(self, monkeypatch):
-        """conda is used when mamba is absent."""
-        monkeypatch.setattr(
-            ta.shutil,
-            "which",
-            lambda name: "/bin/conda" if name == "conda" else None,
+    def test_env_lives_under_home_on_python_311(
+        self, trackastra_env, tmp_path
+    ):
+        assert trackastra_env.env_dir == str(
+            tmp_path / "home" / ".napari-tmidas" / "envs" / "trackastra"
         )
-        assert ta.TrackAstraEnvManager.get_conda_cmd() == "conda"
+        assert trackastra_env.python_version == "3.11"
 
-    def test_neither_raises_runtime_error(self, monkeypatch):
-        """Missing both is a RuntimeError telling the user to install one."""
-        monkeypatch.setattr(ta.shutil, "which", lambda name: None)
-        with pytest.raises(RuntimeError, match="Neither conda nor mamba"):
-            ta.TrackAstraEnvManager.get_conda_cmd()
-
-
-class TestTrackAstraCheckEnvExists:
-    """`check_env_exists` maps `conda run python --version` onto a bool."""
-
-    def test_returns_true_on_zero_exit(self, monkeypatch):
-        """rc == 0 means the env exists."""
-        seen = {}
-
-        def fake_run(cmd, **kwargs):
-            seen["cmd"] = cmd
-            seen["timeout"] = kwargs.get("timeout")
-            return _FakeCompleted(0, "Python 3.11.9")
-
+    def test_install_dependencies_installs_the_ilp_stack(
+        self, trackastra_env, monkeypatch
+    ):
+        """gurobipy is listed explicitly: trackastra[ilp] does not pull it."""
+        calls = []
         monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
+            ta.subprocess, "check_call", lambda cmd: calls.append(cmd)
         )
-        monkeypatch.setattr(ta.subprocess, "run", fake_run)
-        assert ta.TrackAstraEnvManager.check_env_exists() is True
-        assert seen["cmd"][:5] == [
-            "mamba",
-            "run",
-            "-n",
-            "trackastra",
-            "python",
+        trackastra_env._install_dependencies("/env/python")
+        assert calls == [
+            [
+                "/env/python",
+                "-m",
+                "pip",
+                "install",
+                "trackastra[ilp]",
+                "motile==0.4.0",
+                "ilpy>=0.5.1",
+                "gurobipy>=13",
+                "zarr>=3",
+            ]
         ]
-        assert seen["timeout"] == 10
-
-    def test_returns_false_on_nonzero_exit(self, monkeypatch):
-        """rc != 0 means the env is missing."""
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            ta.subprocess, "run", lambda *a, **k: _FakeCompleted(1)
-        )
-        assert ta.TrackAstraEnvManager.check_env_exists() is False
-
-    def test_timeout_is_treated_as_missing(self, monkeypatch):
-        """A hung conda call is reported as 'env not there'."""
-
-        def boom(*a, **k):
-            raise subprocess.TimeoutExpired(["conda"], 10)
-
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(ta.subprocess, "run", boom)
-        assert ta.TrackAstraEnvManager.check_env_exists() is False
 
 
 class TestTrackAstraVersionHelpers:
@@ -435,9 +410,9 @@ class TestTrackAstraVersionHelpers:
 
 
 class TestTrackAstraGetEnvStatus:
-    """`get_env_status` shells into the env and parses its JSON report."""
+    """`get_env_status` runs the env's Python and parses its JSON report."""
 
-    def test_parses_json_payload(self, monkeypatch):
+    def test_parses_json_payload(self, trackastra_env, monkeypatch):
         """Valid JSON on stdout is returned as a dict."""
         payload = {
             "python": "3.11.9",
@@ -450,150 +425,59 @@ class TestTrackAstraGetEnvStatus:
             seen["check"] = kwargs.get("check")
             return _FakeCompleted(0, json.dumps(payload) + "\n")
 
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
         monkeypatch.setattr(ta.subprocess, "run", fake_run)
-        assert ta.TrackAstraEnvManager.get_env_status() == payload
+        assert trackastra_env.get_env_status() == payload
         assert seen["check"] is True
-        assert seen["cmd"][:4] == ["mamba", "run", "-n", "trackastra"]
+        assert seen["cmd"][:2] == [
+            trackastra_env.get_env_python_path(),
+            "-c",
+        ]
 
-    def test_failure_is_reported_as_error_dict(self, monkeypatch):
+    def test_failure_is_reported_as_error_dict(
+        self, trackastra_env, monkeypatch
+    ):
         """Any exception becomes {'error': ...} instead of propagating."""
 
         def boom(*a, **k):
-            raise subprocess.CalledProcessError(1, ["mamba"])
+            raise FileNotFoundError("no python in env")
 
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
         monkeypatch.setattr(ta.subprocess, "run", boom)
-        status = ta.TrackAstraEnvManager.get_env_status()
+        status = trackastra_env.get_env_status()
         assert list(status) == ["error"]
-        assert "mamba" in status["error"]
+        assert "no python in env" in status["error"]
 
-    def test_invalid_json_is_reported_as_error_dict(self, monkeypatch):
+    def test_invalid_json_is_reported_as_error_dict(
+        self, trackastra_env, monkeypatch
+    ):
         """Garbage stdout also lands in the error dict."""
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
         monkeypatch.setattr(
             ta.subprocess, "run", lambda *a, **k: _FakeCompleted(0, "not json")
         )
-        assert "error" in ta.TrackAstraEnvManager.get_env_status()
+        assert "error" in trackastra_env.get_env_status()
 
 
 class TestTrackAstraRepairEnv:
-    """`repair_env` runs clean + solver install + pip upgrade."""
+    """`repair_env` upgrades the pinned stack in place."""
 
-    def test_runs_the_three_expected_commands(self, monkeypatch):
-        """Order: cache clean (check=False), ilpy/gurobi, pip upgrade."""
+    def test_upgrades_the_pinned_stack(self, trackastra_env, monkeypatch):
         calls = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append((list(cmd), kwargs.get("check")))
-            return _FakeCompleted(0)
-
         monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
+            ta.subprocess, "check_call", lambda cmd: calls.append(cmd)
         )
-        monkeypatch.setattr(ta.subprocess, "run", fake_run)
-        assert ta.TrackAstraEnvManager.repair_env() is True
-        assert len(calls) == 3
-        assert calls[0][0][1] == "clean"
-        assert calls[0][1] is False
-        assert "ilpy" in calls[1][0]
-        assert calls[1][1] is True
-        assert "trackastra[ilp]" in calls[2][0]
-        assert "motile==0.4.0" in calls[2][0]
+        assert trackastra_env.repair_env() is True
+        assert len(calls) == 1
+        assert calls[0][0] == trackastra_env.get_env_python_path()
+        assert calls[0][3:5] == ["install", "--upgrade"]
+        assert calls[0][5:] == ta.TrackAstraEnvManager.PACKAGES
 
-    def test_install_failure_returns_false(self, monkeypatch):
+    def test_install_failure_returns_false(self, trackastra_env, monkeypatch):
         """A failing install is caught and reported as False."""
 
-        def fake_run(cmd, **kwargs):
-            if kwargs.get("check"):
-                raise subprocess.CalledProcessError(1, list(cmd))
-            return _FakeCompleted(0)
+        def boom(cmd):
+            raise subprocess.CalledProcessError(1, cmd)
 
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
-        monkeypatch.setattr(ta.subprocess, "run", fake_run)
-        assert ta.TrackAstraEnvManager.repair_env() is False
-
-
-class TestTrackAstraCreateEnv:
-    """`create_env` is a no-op when the env exists, else builds it."""
-
-    def test_existing_env_short_circuits(self, monkeypatch):
-        """No subprocess is spawned when the env is already there."""
-
-        def explode(*a, **k):
-            raise AssertionError("should not shell out")
-
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "check_env_exists", lambda: True
-        )
-        monkeypatch.setattr(ta.subprocess, "run", explode)
-        assert ta.TrackAstraEnvManager.create_env() is True
-
-    def test_conda_gets_no_default_packages_flag(self, monkeypatch):
-        """`--no-default-packages` is conda-only; mamba rejects it."""
-        calls = []
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "conda"
-        )
-        monkeypatch.setattr(
-            ta.subprocess,
-            "run",
-            lambda cmd, **k: calls.append(list(cmd)) or _FakeCompleted(0),
-        )
-        assert ta.TrackAstraEnvManager.create_env() is True
-        create_cmd = calls[1]
-        assert create_cmd[:4] == ["conda", "create", "-n", "trackastra"]
-        assert "--no-default-packages" in create_cmd
-        assert create_cmd[-1] == "-y"
-        assert "python=3.11" in create_cmd
-
-    def test_mamba_omits_no_default_packages_flag(self, monkeypatch):
-        """mamba builds the same env without the conda-only flag."""
-        calls = []
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
-        monkeypatch.setattr(
-            ta.subprocess,
-            "run",
-            lambda cmd, **k: calls.append(list(cmd)) or _FakeCompleted(0),
-        )
-        assert ta.TrackAstraEnvManager.create_env() is True
-        assert len(calls) == 4
-        assert "--no-default-packages" not in calls[1]
-        assert "trackastra[ilp]" in calls[3]
-        assert "zarr>=3" in calls[3]
-
-    def test_failure_returns_false(self, monkeypatch):
-        """A CalledProcessError during creation is caught."""
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "check_env_exists", lambda: False
-        )
-        monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-        )
-
-        def fake_run(cmd, **kwargs):
-            if kwargs.get("check"):
-                raise subprocess.CalledProcessError(2, list(cmd))
-            return _FakeCompleted(0)
-
-        monkeypatch.setattr(ta.subprocess, "run", fake_run)
-        assert ta.TrackAstraEnvManager.create_env() is False
+        monkeypatch.setattr(ta.subprocess, "check_call", boom)
+        assert trackastra_env.repair_env() is False
 
 
 _HEALTHY_STATUS = {
@@ -649,122 +533,112 @@ class TestTrackAstraEnvNeedsRepair:
 class TestTrackAstraEnsureEnvReady:
     """`ensure_env_ready` is the create -> inspect -> repair state machine."""
 
-    def _patch(self, monkeypatch, **attrs):
-        for name, value in attrs.items():
-            monkeypatch.setattr(ta.TrackAstraEnvManager, name, value)
+    @pytest.fixture(autouse=True)
+    def _patch(self, trackastra_env, monkeypatch):
+        self.env = trackastra_env
+        self.calls = []
 
-    def test_create_failure_aborts(self, monkeypatch):
-        """If the env is missing and cannot be created, give up."""
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: False,
-            create_env=lambda: False,
-        )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is False
+        def patch(**attrs):
+            for name, value in attrs.items():
+                monkeypatch.setattr(self.env, name, value)
 
-    def test_healthy_env_is_ready(self, monkeypatch):
-        """An existing, healthy env needs neither repair nor rebuild."""
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
+        self.patch = patch
+
+    def _record(self, name):
+        return lambda: self.calls.append(name)
+
+    def test_missing_env_is_created(self):
+        self.patch(
+            is_env_created=lambda: False,
+            create_env=self._record("create"),
             get_env_status=lambda: _HEALTHY_STATUS,
         )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is True
+        assert self.env.ensure_env_ready() is True
+        assert self.calls == ["create"]
 
-    def test_package_drift_triggers_repair_only(self, monkeypatch):
+    def test_create_failure_aborts(self):
+        """If the env is missing and cannot be created, give up."""
+
+        def fail():
+            raise subprocess.CalledProcessError(1, ["uv", "pip", "install"])
+
+        self.patch(is_env_created=lambda: False, create_env=fail)
+        assert self.env.ensure_env_ready() is False
+
+    def test_healthy_env_is_ready(self):
+        """An existing, healthy env needs neither repair nor rebuild."""
+        self.patch(
+            is_env_created=lambda: True,
+            get_env_status=lambda: _HEALTHY_STATUS,
+            create_env=self._record("create"),
+            repair_env=self._record("repair"),
+        )
+        assert self.env.ensure_env_ready() is True
+        assert self.calls == []
+
+    def test_package_drift_triggers_repair_only(self):
         """Package drift repairs in place; the interpreter is left alone."""
         drifted = json.loads(json.dumps(_HEALTHY_STATUS))
         drifted["packages"]["zarr"]["present"] = False
         statuses = [drifted, _HEALTHY_STATUS]
-        calls = []
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
+        self.patch(
+            is_env_created=lambda: True,
             get_env_status=lambda: statuses.pop(0),
-            repair_env=lambda: calls.append("repair") or True,
+            create_env=self._record("create"),
+            repair_env=lambda: self.calls.append("repair") or True,
         )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is True
-        assert calls == ["repair"]
+        assert self.env.ensure_env_ready() is True
+        assert self.calls == ["repair"]
 
-    def test_repair_failure_aborts(self, monkeypatch):
+    def test_repair_failure_aborts(self):
         """A failed repair short-circuits before the recheck."""
         drifted = json.loads(json.dumps(_HEALTHY_STATUS))
         drifted["packages"]["motile"]["version"] = "1.1.0"
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
+        self.patch(
+            is_env_created=lambda: True,
             get_env_status=lambda: drifted,
             repair_env=lambda: False,
         )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is False
+        assert self.env.ensure_env_ready() is False
 
-    def test_still_unhealthy_after_repair_aborts(self, monkeypatch):
+    def test_still_unhealthy_after_repair_aborts(self):
         """A repair that does not fix the drift reports failure."""
         drifted = json.loads(json.dumps(_HEALTHY_STATUS))
         drifted["packages"]["ilpy"]["present"] = False
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
+        self.patch(
+            is_env_created=lambda: True,
             get_env_status=lambda: drifted,
             repair_env=lambda: True,
         )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is False
+        assert self.env.ensure_env_ready() is False
 
-    def test_python_drift_removes_and_recreates(self, monkeypatch):
-        """A wrong interpreter forces `conda env remove` + create."""
+    def test_python_drift_rebuilds_the_env(self):
+        """A wrong interpreter forces a full rebuild, not a package repair."""
         drifted = json.loads(json.dumps(_HEALTHY_STATUS))
         drifted["python"] = "3.9.18"
         statuses = [drifted, _HEALTHY_STATUS]
-        removed = []
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
-            get_conda_cmd=lambda: "mamba",
+        self.patch(
+            is_env_created=lambda: True,
             get_env_status=lambda: statuses.pop(0),
-            create_env=lambda: True,
+            create_env=self._record("create"),
+            repair_env=self._record("repair"),
         )
-        monkeypatch.setattr(
-            ta.subprocess,
-            "run",
-            lambda cmd, **k: removed.append(list(cmd)) or _FakeCompleted(0),
-        )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is True
-        assert removed == [
-            ["mamba", "env", "remove", "-n", "trackastra", "-y"]
-        ]
+        assert self.env.ensure_env_ready() is True
+        assert self.calls == ["create"]
 
-    def test_env_remove_failure_aborts(self, monkeypatch):
-        """If the old env cannot be removed, bail out."""
+    def test_rebuild_failure_aborts(self):
         drifted = json.loads(json.dumps(_HEALTHY_STATUS))
         drifted["python"] = "3.9.18"
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
-            get_conda_cmd=lambda: "mamba",
+
+        def fail():
+            raise OSError("uv vanished")
+
+        self.patch(
+            is_env_created=lambda: True,
             get_env_status=lambda: drifted,
+            create_env=fail,
         )
-
-        def boom(*a, **k):
-            raise subprocess.CalledProcessError(1, ["mamba", "env", "remove"])
-
-        monkeypatch.setattr(ta.subprocess, "run", boom)
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is False
-
-    def test_recreate_failure_aborts(self, monkeypatch):
-        """Removal succeeds but recreation fails -> False."""
-        drifted = json.loads(json.dumps(_HEALTHY_STATUS))
-        drifted["python"] = "3.9.18"
-        self._patch(
-            monkeypatch,
-            check_env_exists=lambda: True,
-            get_conda_cmd=lambda: "mamba",
-            get_env_status=lambda: drifted,
-            create_env=lambda: False,
-        )
-        monkeypatch.setattr(
-            ta.subprocess, "run", lambda *a, **k: _FakeCompleted(0)
-        )
-        assert ta.TrackAstraEnvManager.ensure_env_ready() is False
+        assert self.env.ensure_env_ready() is False
 
 
 # ---------------------------------------------------------------------------
@@ -780,12 +654,7 @@ def _stub_trackastra(monkeypatch, *, returncode=0, produce=True):
     """
     rec = {"script_args": None, "cmd": None, "env": {}, "runs": 0}
 
-    monkeypatch.setattr(
-        ta.TrackAstraEnvManager, "ensure_env_ready", lambda: True
-    )
-    monkeypatch.setattr(
-        ta.TrackAstraEnvManager, "get_conda_cmd", lambda: "mamba"
-    )
+    monkeypatch.setattr(ta._trackastra_env, "ensure_env_ready", lambda: True)
 
     def fake_script(*args):
         rec["script_args"] = args
@@ -824,9 +693,9 @@ class TestTrackastraInputValidation:
         assert ta.trackastra_tracking(image) is image
 
     def test_env_not_ready_returns_unchanged(self, monkeypatch):
-        """A broken conda env aborts before touching the filesystem."""
+        """A broken env aborts before touching the filesystem."""
         monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "ensure_env_ready", lambda: False
+            ta._trackastra_env, "ensure_env_ready", lambda: False
         )
         image = np.zeros((3, 4, 4), dtype=np.uint16)
         assert ta.trackastra_tracking(image) is image
@@ -971,7 +840,7 @@ class TestTrackastraPathPairing:
         raising TypeError instead of honouring what it just printed.
         """
         monkeypatch.setattr(
-            ta.TrackAstraEnvManager, "ensure_env_ready", lambda: True
+            ta._trackastra_env, "ensure_env_ready", lambda: True
         )
 
         def no_shell_out(*a, **k):
@@ -994,7 +863,7 @@ class TestTrackastraSubprocess:
     def test_command_targets_the_trackastra_env(
         self, tmp_path, monkeypatch, gpu_pool_reset
     ):
-        """The generated script is run via ``<conda> run -n trackastra``."""
+        """The generated script is run by the trackastra env's Python."""
         label = tmp_path / "movie_labels.tif"
         label.write_text("", encoding="utf-8")
         rec = _stub_trackastra(monkeypatch)
@@ -1006,14 +875,9 @@ class TestTrackastraSubprocess:
             label_pattern="_labels.tif",
             _source_filepath=str(label),
         )
-        assert rec["cmd"][:5] == [
-            "mamba",
-            "run",
-            "-n",
-            "trackastra",
-            "python",
-        ]
-        script_name = Path(rec["cmd"][5]).name
+        assert rec["cmd"][0] == ta._trackastra_env.get_env_python_path()
+        assert len(rec["cmd"]) == 2
+        script_name = Path(rec["cmd"][1]).name
         assert script_name.startswith("run_tracking_movie_labels_")
         assert script_name.endswith(f"_{os.getpid()}.py")
 
@@ -1107,10 +971,10 @@ class TestTrackastraSubprocess:
         monkeypatch.setattr(ta, "_resolve_gurobi_license", lambda _x: None)
 
         def boom(*a, **k):
-            raise OSError("conda vanished")
+            raise OSError("python vanished")
 
         monkeypatch.setattr(ta.subprocess, "run", boom)
-        with pytest.raises(OSError, match="conda vanished"):
+        with pytest.raises(OSError, match="python vanished"):
             ta.trackastra_tracking(
                 None,
                 gpus="4",

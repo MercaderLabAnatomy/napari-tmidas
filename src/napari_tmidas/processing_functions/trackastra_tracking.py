@@ -3,14 +3,14 @@
 TrackAstra Cell Tracking Module for napari-tmidas
 
 This module integrates TrackAstra deep learning-based cell tracking into the
-napari-tmidas batch processing framework. It uses a dedicated conda environment
-to manage TrackAstra dependencies separately from the main environment.
+napari-tmidas batch processing framework. It uses a dedicated virtual
+environment to manage TrackAstra dependencies separately from the main
+environment.
 """
 
 import os
 import queue
 import re
-import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -19,6 +19,7 @@ import numpy as np
 from skimage.io import imread
 
 # Add the registry import
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 from napari_tmidas._registry import BatchProcessingRegistry
 
 
@@ -148,7 +149,7 @@ def _resolve_gurobi_license(gurobi_license: str = ""):
 
     Trackastra's ``ilp`` mode solves via motile/ilpy → Gurobi. The pip
     ``gurobipy`` package ships a bundled *size-limited* license
-    (``TYPE=PIP``) inside the conda env (``.../envs/trackastra/lib/gurobi.lic``)
+    (``TYPE=PIP``) inside the environment
     and prioritises it, so it shadows a full/academic license placed in the
     home directory. Setting ``GRB_LICENSE_FILE`` explicitly overrides that,
     since it takes precedence over every default search location.
@@ -213,10 +214,11 @@ def _load_zarr_array(path: str) -> np.ndarray:
     raise ValueError(f"No arrays found in zarr group: {path}")
 
 
-class TrackAstraEnvManager:
-    """Manages the TrackAstra conda environment."""
+class TrackAstraEnvManager(BaseEnvironmentManager):
+    """Manages the dedicated virtual environment for TrackAstra."""
 
-    ENV_NAME = "trackastra"
+    # zarr>=3 needs Python 3.11+; TrackAstra itself supports 3.10-3.13.
+    python_version = "3.11"
     REQUIRED_VERSIONS = {
         "python": "3.11",
         "gurobipy": "13.0.0",
@@ -229,34 +231,19 @@ class TrackAstraEnvManager:
     MAX_VERSIONS = {
         "motile": "1.0.0",  # 1.0.0 renamed NodeSelection -> NodeSelectedCost
     }
+    # All from PyPI: ilpy >= 0.6 is pure Python over pyscipopt/gurobipy, so
+    # the conda-only funkelab build is no longer needed. trackastra[ilp]
+    # does not pull in gurobipy itself.
+    PACKAGES = [
+        "trackastra[ilp]",
+        "motile==0.4.0",
+        "ilpy>=0.5.1",
+        "gurobipy>=13",
+        "zarr>=3",
+    ]
 
-    @staticmethod
-    def get_conda_cmd():
-        """Get the conda/mamba command available on the system."""
-        # Try mamba first (faster)
-        if shutil.which("mamba"):
-            return "mamba"
-        elif shutil.which("conda"):
-            return "conda"
-        else:
-            raise RuntimeError(
-                "Neither conda nor mamba found. Please install Anaconda/Miniconda/Miniforge."
-            )
-
-    @classmethod
-    def check_env_exists(cls):
-        conda_cmd = cls.get_conda_cmd()
-        try:
-            # Try running python --version in the env
-            result = subprocess.run(
-                [conda_cmd, "run", "-n", cls.ENV_NAME, "python", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-            return False
+    def __init__(self):
+        super().__init__("trackastra")
 
     @staticmethod
     def _version_tuple(version_str):
@@ -282,10 +269,17 @@ class TrackAstraEnvManager:
         return found_norm >= required_tuple
 
 
-    @classmethod
-    def get_env_status(cls):
+    def _install_dependencies(self, env_python: str) -> None:
+        subprocess.check_call(
+            pip_command(env_python, "install", *self.PACKAGES)
+        )
+
+    def is_package_installed(self) -> bool:
+        needs_repair, _ = self.env_needs_repair(self.get_env_status())
+        return not needs_repair
+
+    def get_env_status(self):
         """Return package/version status for the TrackAstra environment."""
-        conda_cmd = cls.get_conda_cmd()
         check_script = r'''
 import importlib.util
 import json
@@ -313,15 +307,7 @@ print(json.dumps(status))
 '''
         try:
             result = subprocess.run(
-                [
-                    conda_cmd,
-                    "run",
-                    "-n",
-                    cls.ENV_NAME,
-                    "python",
-                    "-c",
-                    check_script,
-                ],
+                [self.get_env_python_path(), "-c", check_script],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -365,139 +351,43 @@ print(json.dumps(status))
 
         return (len(reasons) > 0), reasons
 
-    @classmethod
-    def repair_env(cls):
-        """Repair/upgrade TrackAstra environment using upstream ILP recipe."""
+    def repair_env(self):
+        """Upgrade the environment's packages to the required versions."""
         print("Repairing TrackAstra environment to required package versions...")
-        conda_cmd = cls.get_conda_cmd()
         try:
-            # Clear corrupted/stale cached packages before installing.
-            subprocess.run(
-                [conda_cmd, "clean", "--packages", "--index-cache", "-y"],
-                check=False,
+            subprocess.check_call(
+                pip_command(
+                    self.get_env_python_path(),
+                    "install",
+                    "--upgrade",
+                    *self.PACKAGES,
+                )
             )
-            # Keep solver stack aligned with TrackAstra ILP requirements.
-            solver_cmd = [
-                conda_cmd,
-                "install",
-                "-n",
-                cls.ENV_NAME,
-                "-c",
-                "conda-forge",
-                "-c",
-                "gurobi",
-                "-c",
-                "funkelab",
-                "ilpy",
-                "gurobi",
-                "-y",
-            ]
-            subprocess.run(solver_cmd, check=True)
-
-            pip_cmd = [
-                conda_cmd,
-                "run",
-                "-n",
-                cls.ENV_NAME,
-                "pip",
-                "install",
-                "--upgrade",
-                "trackastra[ilp]",
-                "motile==0.4.0",
-                "zarr>=3",
-            ]
-            subprocess.run(pip_cmd, check=True)
-
             print("TrackAstra environment repair completed.")
             return True
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
             print(f"Error repairing TrackAstra environment: {e}")
             return False
 
-    @classmethod
-    def create_env(cls):
-        """Create the TrackAstra conda environment if it doesn't exist."""
-        if cls.check_env_exists():
-            print("TrackAstra environment already exists.")
-            return True
-
-        print("Creating TrackAstra conda environment...")
-        conda_cmd = cls.get_conda_cmd()
-
-        # Create environment with Python 3.11+ (required for zarr>=3; TrackAstra supports 3.10-3.13)
-        env_create_cmd = [
-            conda_cmd,
-            "create",
-            "-n",
-            cls.ENV_NAME,
-            "python=3.11",
-            "-y",
-        ]
-        # `--no-default-packages` is a conda-only flag; mamba rejects it.
-        if os.path.basename(conda_cmd) == "conda":
-            env_create_cmd.insert(-1, "--no-default-packages")
-
+    def _build_env(self):
+        """(Re)build the environment from scratch; False on failure."""
         try:
-            # Clear corrupted/stale cached packages before installing.
-            subprocess.run(
-                [conda_cmd, "clean", "--packages", "--index-cache", "-y"],
-                check=False,
-            )
-            subprocess.run(env_create_cmd, check=True)
-
-            # Install ilpy first from conda-forge
-            ilpy_cmd = [
-                conda_cmd,
-                "install",
-                "-n",
-                cls.ENV_NAME,
-                "-c",
-                "conda-forge",
-                "-c",
-                "gurobi",
-                "-c",
-                "funkelab",
-                "ilpy",
-                "gurobi",
-                "-y",
-            ]
-            subprocess.run(ilpy_cmd, check=True)
-
-            # Install TrackAstra ILP extras via pip (upstream recipe).
-            pip_packages = [
-                "trackastra[ilp]",
-                "motile==0.4.0",
-                "zarr>=3",
-            ]
-
-            pip_cmd = [
-                conda_cmd,
-                "run",
-                "-n",
-                cls.ENV_NAME,
-                "pip",
-                "install",
-            ] + pip_packages
-
-            subprocess.run(pip_cmd, check=True)
-
-            print("TrackAstra environment created successfully!")
+            self.create_env()
             return True
-
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
             print(f"Error creating TrackAstra environment: {e}")
             return False
 
-    @classmethod
-    def ensure_env_ready(cls):
+    def ensure_env_ready(self):
         """Ensure environment exists and required package versions are present."""
-        if not cls.check_env_exists():
+        # is_env_created() is also False for an env on the wrong Python.
+        if not self.is_env_created():
             print("TrackAstra environment not found. Creating it now...")
-            if not cls.create_env():
+            if not self._build_env():
                 return False
 
-        status = cls.get_env_status()
-        needs_repair, reasons = cls.env_needs_repair(status)
+        status = self.get_env_status()
+        needs_repair, reasons = self.env_needs_repair(status)
         if needs_repair:
             print("TrackAstra environment drift detected:")
             for reason in reasons:
@@ -506,31 +396,23 @@ print(json.dumps(status))
             # If the Python version itself is wrong the only fix is a full
             # env rebuild — pip installs cannot change the interpreter.
             python_version = (status or {}).get("python", "")
-            python_ok = cls._version_at_least(python_version, cls.REQUIRED_VERSIONS["python"])
+            python_ok = self._version_at_least(
+                python_version, self.REQUIRED_VERSIONS["python"]
+            )
             if not python_ok:
                 print(
                     f"Python {python_version} < required "
-                    f"{cls.REQUIRED_VERSIONS['python']}; "
+                    f"{self.REQUIRED_VERSIONS['python']}; "
                     "recreating environment..."
                 )
-                conda_cmd = cls.get_conda_cmd()
-                try:
-                    subprocess.run(
-                        [conda_cmd, "env", "remove", "-n", cls.ENV_NAME, "-y"],
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    print(f"Error removing old environment: {e}")
+                if not self._build_env():
                     return False
-                if not cls.create_env():
-                    return False
-            else:
-                if not cls.repair_env():
-                    return False
+            elif not self.repair_env():
+                return False
 
             # Recheck after attempted repair/recreate.
-            status = cls.get_env_status()
-            needs_repair, reasons = cls.env_needs_repair(status)
+            status = self.get_env_status()
+            needs_repair, reasons = self.env_needs_repair(status)
             if needs_repair:
                 print("TrackAstra environment is still not healthy after repair:")
                 for reason in reasons:
@@ -539,6 +421,9 @@ print(json.dumps(status))
 
         print("TrackAstra environment is ready.")
         return True
+
+
+_trackastra_env = TrackAstraEnvManager()
 
 
 def create_trackastra_script(
@@ -1046,7 +931,7 @@ def trackastra_tracking(
         Optional path to a Gurobi license file (.lic) used by the 'ilp' mode
         solver. Leave empty to auto-detect ~/gurobi.lic (or an already-exported
         GRB_LICENSE_FILE); only needed to override the bundled size-limited pip
-        license that ships in the conda env. Ignored by the greedy modes.
+        license that ships in the environment. Ignored by the greedy modes.
     gpus : str
         Comma-separated GPU ids to pin to (e.g. '0' or '0,1'). Empty
         auto-detects and uses all available GPUs; 'cpu'/'none' disables
@@ -1101,7 +986,7 @@ def trackastra_tracking(
         mode = corrected
 
     # Ensure TrackAstra environment exists and has compatible package versions.
-    if not TrackAstraEnvManager.ensure_env_ready():
+    if not _trackastra_env.ensure_env_ready():
         print("Failed to prepare TrackAstra environment. Returning unchanged.")
         return image
 
@@ -1186,15 +1071,7 @@ def trackastra_tracking(
         f.write(script_content)
 
     # Run TrackAstra in the dedicated environment
-    conda_cmd = TrackAstraEnvManager.get_conda_cmd()
-    cmd = [
-        conda_cmd,
-        "run",
-        "-n",
-        TrackAstraEnvManager.ENV_NAME,
-        "python",
-        str(script_path),
-    ]
+    cmd = [_trackastra_env.get_env_python_path(), str(script_path)]
 
     # Acquire a GPU from the shared pool so concurrent files spread across cards
     # (blocks until one is free; no-op when no GPUs are detected/pinning is off).
