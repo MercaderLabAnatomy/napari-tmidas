@@ -1207,47 +1207,28 @@ class TestVerifyAndFixUltrackEnv:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert ut._verify_and_fix_ultrack_env("myenv") is True
-        assert calls[0] == ["which", "mamba"]
-        assert calls[-1] == [
-            "mamba",
-            "run",
-            "-n",
-            "myenv",
-            "pip",
-            "install",
-            "tifffile",
+        # conftest pins the pip layout; the uv one is tested in
+        # test_env_manager.
+        assert calls == [
+            [ut.get_env_python("myenv"), "-m", "pip", "install", "tifffile"]
         ]
 
-    def test_conda_is_used_when_mamba_is_absent(self, monkeypatch):
-        """`which mamba` failing falls through to conda."""
+    def test_every_missing_package_is_installed_in_order(self, monkeypatch):
+        """Each missing package gets its own install, spec not import name."""
         monkeypatch.setattr(
             ut,
             "is_package_installed",
-            lambda pkg, env_name="ultrack": pkg != "zarr",
+            lambda pkg, env_name="ultrack": pkg not in ("skimage", "zarr"),
         )
         calls = []
 
         def fake_run(cmd, **kwargs):
             calls.append(list(cmd))
-            if cmd[:1] == ["which"]:
-                return _FakeCompleted(0 if cmd[1] == "conda" else 1)
             return _FakeCompleted(0)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert ut._verify_and_fix_ultrack_env() is True
-        assert calls[-1][0] == "conda"
-
-    def test_no_conda_at_all_returns_false(self, monkeypatch):
-        """Neither mamba nor conda on PATH is a hard failure."""
-        monkeypatch.setattr(
-            ut,
-            "is_package_installed",
-            lambda pkg, env_name="ultrack": False,
-        )
-        monkeypatch.setattr(
-            subprocess, "run", lambda *a, **k: _FakeCompleted(1)
-        )
-        assert ut._verify_and_fix_ultrack_env() is False
+        assert [c[-1] for c in calls] == ["scikit-image", "zarr"]
 
     def test_failed_install_returns_false(self, monkeypatch):
         """A non-zero pip exit stops the loop and reports failure."""

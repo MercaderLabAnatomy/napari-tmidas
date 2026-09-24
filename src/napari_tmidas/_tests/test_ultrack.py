@@ -32,14 +32,15 @@ class TestUltrackEnvManager:
         result = is_env_created()
         assert isinstance(result, bool)
 
-    def test_get_conda_cmd(self):
-        """Test that conda/mamba command can be found."""
-        manager = UltrackEnvironmentManager()
-        try:
-            conda_cmd = manager._get_conda_cmd()
-            assert conda_cmd in ["conda", "mamba"]
-        except RuntimeError as e:
-            pytest.skip(f"Conda/mamba not available: {e}")
+    def test_env_lives_under_napari_tmidas_envs(self):
+        """The env is a plain venv, no conda needed."""
+        from napari_tmidas.processing_functions.ultrack_env_manager import (
+            get_env_python,
+        )
+
+        env_python = Path(get_env_python())
+        assert env_python.parents[1].name == "ultrack"
+        assert env_python.parents[2].name == "envs"
 
     def test_is_package_installed(self):
         """Test package installation check."""

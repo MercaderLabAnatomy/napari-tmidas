@@ -3,8 +3,9 @@
 Ultrack Cell Tracking Module for napari-tmidas
 
 This module integrates ultrack cell tracking with segmentation ensemble into the
-napari-tmidas batch processing framework. It uses a dedicated conda environment
-to manage ultrack dependencies separately from the main environment.
+napari-tmidas batch processing framework. It uses a dedicated virtual
+environment to manage ultrack dependencies separately from the main
+environment.
 
 Ultrack supports tracking cells across 2D, 3D, and multichannel datasets, and can
 handle segmentation uncertainty by evaluating multiple candidate segmentations.
@@ -18,10 +19,12 @@ from typing import List, Optional
 import numpy as np
 from skimage.io import imread
 
+from napari_tmidas._env_manager import pip_command
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions.ultrack_env_manager import (
     _ensure_scikit_image_fix,
     create_ultrack_env,
+    get_env_python,
     is_env_created,
     is_package_installed,
     run_ultrack_in_env,
@@ -35,7 +38,7 @@ def _resolve_gurobi_license(gurobi_license: str = "") -> Optional[str]:
     existing ``.lic`` file (academic/named-user license) is read directly by
     Gurobi and needs no ``grbgetkey`` activation step; we simply point
     ``GRB_LICENSE_FILE`` at it so it overrides any bundled/default license in
-    the conda env.
+    the environment.
 
     Resolution order (first hit wins):
       1. explicit ``gurobi_license`` path argument (from the widget),
@@ -302,8 +305,8 @@ if torch.cuda.is_available():
         if 'sm_120' in str(e) or 'Blackwell' in str(e) or 'no kernel image' in str(e):
             print("  → Blackwell GPU detected but not supported by PyTorch stable")
             print("  → SOLUTION: Upgrade to PyTorch nightly:")
-            print("     conda run -n ultrack pip uninstall -y torch torchvision")
-            print("     conda run -n ultrack pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130")
+            print("     ~/.napari-tmidas/envs/ultrack/bin/python -m pip uninstall -y torch torchvision")
+            print("     ~/.napari-tmidas/envs/ultrack/bin/python -m pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130")
         else:
             print(f"  → Error: {e}")
         print("  → Falling back to CPU mode (will work but slower)")
@@ -639,7 +642,7 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
     Parameters
     ----------
     env_name : str
-        Name of the conda environment (default: "ultrack")
+        Name of the environment (default: "ultrack")
     
     Returns
     -------
@@ -672,33 +675,20 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
     print(f"⚠ Found {len(missing_packages)} missing package(s) in '{env_name}' environment")
     print("Installing missing packages...")
     
+    env_python = get_env_python(env_name)
     try:
-        # Get conda command
-        conda_cmd = None
-        for cmd in ["mamba", "conda"]:
-            result = subprocess.run(
-                ["which", cmd], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                conda_cmd = cmd
-                break
-        
-        if conda_cmd is None:
-            print("✗ ERROR: Could not find conda or mamba")
-            return False
-        
         # Install each missing package
         for pkg_name, pkg_spec in missing_packages:
             print(f"  Installing {pkg_name}...")
             result = subprocess.run(
-                [conda_cmd, "run", "-n", env_name, "pip", "install", pkg_spec],
+                pip_command(env_python, "install", pkg_spec),
                 capture_output=True,
                 text=True,
                 timeout=300
             )
             if result.returncode != 0:
                 print(f"  ✗ Failed to install {pkg_name}: {result.stderr}")
-                print(f"  Please manually install: conda run -n {env_name} pip install {pkg_spec}")
+                print(f"  Please manually install: {env_python} -m pip install {pkg_spec}")
                 return False
             else:
                 print(f"  ✓ Installed {pkg_name}")
@@ -710,7 +700,7 @@ def _verify_and_fix_ultrack_env(env_name: str = "ultrack") -> bool:
         print(f"✗ Error installing packages: {e}")
         print(f"Please manually install missing packages:")
         for pkg_name, pkg_spec in missing_packages:
-            print(f"  conda run -n {env_name} pip install {pkg_spec}")
+            print(f"  {env_python} -m pip install {pkg_spec}")
         return False
 
 

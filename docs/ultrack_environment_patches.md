@@ -4,7 +4,7 @@ This document describes the compatibility patches applied to the ultrack environ
 
 ## Overview
 
-The ultrack conda environment requires several patches to ensure compatibility with:
+The ultrack environment requires several patches to ensure compatibility with:
 - Modern GPU architectures (NVIDIA Blackwell sm_120)
 - Latest dependency versions (scikit-image 0.26+, scipy)
 - Robust CPU/GPU fallback behavior
@@ -102,7 +102,7 @@ print(f"✓ Fixed deprecated min_size parameter")
 **Apply Manually**:
 ```bash
 # Find hierarchy.py in ultrack environment
-HIERARCHY_PATH=$(conda run -n ultrack python -c "import ultrack; from pathlib import Path; print(Path(ultrack.__file__).parent / 'core' / 'segmentation' / 'hierarchy.py')")
+HIERARCHY_PATH=$(~/.napari-tmidas/envs/ultrack/bin/python -c "import ultrack; from pathlib import Path; print(Path(ultrack.__file__).parent / 'core' / 'segmentation' / 'hierarchy.py')")
 
 # Apply patch
 python /tmp/fix_ultrack_hierarchy.py "$HIERARCHY_PATH"

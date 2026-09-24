@@ -13,7 +13,7 @@ The segmentation ensemble approach allows ultrack to evaluate multiple candidate
 - **Segmentation Ensemble**: Combine multiple segmentation methods for robust tracking
 - **Versatile**: Supports both TYX (2D+time) and TZYX (3D+time) data
 - **Optimized Solver**: Optional Gurobi integration for improved performance
-- **Automatic Environment Management**: Creates and manages a dedicated conda environment
+- **Automatic Environment Management**: Creates and manages a dedicated virtual environment at `~/.napari-tmidas/envs/ultrack` (Python 3.11, built with uv; no conda needed). Earlier versions used a conda environment named `ultrack`; it is no longer used and can be removed with `conda env remove -n ultrack`
 - **Auto-Repair**: Automatically detects and installs missing packages in existing environments
 - **GPU Acceleration**: Full support for modern NVIDIA GPUs including Blackwell architecture
 
@@ -371,14 +371,14 @@ Output:
 
 2. **If auto-install fails**: Manually install the missing package
    ```bash
-   conda run -n ultrack pip install zarr>=3.0.0
-   conda run -n ultrack pip install torch torchvision
-   conda run -n ultrack pip install tifffile
+   ~/.napari-tmidas/envs/ultrack/bin/python -m pip install "zarr>=3.0.0"
+   ~/.napari-tmidas/envs/ultrack/bin/python -m pip install torch torchvision
+   ~/.napari-tmidas/envs/ultrack/bin/python -m pip install tifffile
    ```
 
 3. **Nuclear option**: Recreate the environment
    ```bash
-   conda env remove -n ultrack
+   rm -rf ~/.napari-tmidas/envs/ultrack
    # Then run tracking again - environment will be recreated with all packages
    ```
 
@@ -405,9 +405,9 @@ This is the **most common issue**. Try these fixes **in order**:
    - Try 50-100 instead of default 100
    - Ensures small cells aren't filtered out
 ### "ultrack environment creation failed"
-- Ensure conda or mamba is installed
 - Check your internet connection
-- Try manually: `conda create -n ultrack python=3.11`
+- If you install packages through a mirror configured in `pip.conf` (uv does not read it), set `NAPARI_TMIDAS_NO_UV=1`
+- Delete `~/.napari-tmidas/envs/ultrack` and run tracking again
 
 ### Tracking produces many short tracks
 - Increase `disappear_weight` (make more negative, e.g., -0.5)
