@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 try:
     import tifffile
@@ -22,6 +22,9 @@ except ImportError:
 
 class ViscyEnvironmentManager(BaseEnvironmentManager):
     """Environment manager for VisCy."""
+
+    # The torch==2.0.1 pin below has no wheels for Python 3.12 or newer.
+    python_version = "3.11"
 
     def __init__(self):
         super().__init__("viscy")
@@ -64,16 +67,14 @@ class ViscyEnvironmentManager(BaseEnvironmentManager):
             print("Attempting PyTorch installation with CUDA support...")
             try:
                 subprocess.check_call(
-                    [
+                    pip_command(
                         env_python,
-                        "-m",
-                        "pip",
                         "install",
                         "torch==2.0.1",
                         "torchvision==0.15.2",
                         "--index-url",
                         "https://download.pytorch.org/whl/cu118",
-                    ]
+                    )
                 )
                 print("✓ PyTorch with CUDA 11.8 installed successfully")
 
@@ -114,32 +115,28 @@ except Exception as e:
         if not cuda_available:
             print("Installing PyTorch (CPU-only version)...")
             subprocess.check_call(
-                [
+                pip_command(
                     env_python,
-                    "-m",
-                    "pip",
                     "install",
                     "torch==2.0.1",
                     "torchvision==0.15.2",
                     "--index-url",
                     "https://download.pytorch.org/whl/cpu",
-                ]
+                )
             )
             print("✓ PyTorch (CPU-only) installed successfully")
 
         # Install VisCy and dependencies
         print("Installing VisCy and dependencies...")
         subprocess.check_call(
-            [
+            pip_command(
                 env_python,
-                "-m",
-                "pip",
                 "install",
                 "viscy",
                 "iohub",
                 "tifffile",
                 "numpy",
-            ]
+            )
         )
 
         print("✓ VisCy and dependencies installed successfully")

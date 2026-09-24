@@ -10,7 +10,7 @@ import tempfile
 
 import numpy as np
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 try:
     import tifffile
@@ -20,6 +20,9 @@ except ImportError:
 
 class SpotiflowEnvironmentManager(BaseEnvironmentManager):
     """Environment manager for Spotiflow."""
+
+    # The torch==2.0.1 pin below has no wheels for Python 3.12 or newer.
+    python_version = "3.11"
 
     def __init__(self):
         super().__init__("spotiflow")
@@ -64,16 +67,14 @@ class SpotiflowEnvironmentManager(BaseEnvironmentManager):
             try:
                 # First try with CUDA 11.8 which supports sm_61 (GTX 1080 Ti) and other older GPUs
                 subprocess.check_call(
-                    [
+                    pip_command(
                         env_python,
-                        "-m",
-                        "pip",
                         "install",
                         "torch==2.0.1",
                         "torchvision==0.15.2",
                         "--index-url",
                         "https://download.pytorch.org/whl/cu118",
-                    ]
+                    )
                 )
                 print("✓ PyTorch with CUDA 11.8 installed successfully")
 
@@ -103,25 +104,21 @@ except Exception as e:
                     )
                     # Uninstall CUDA version and install CPU version
                     subprocess.check_call(
-                        [
+                        pip_command(
                             env_python,
-                            "-m",
-                            "pip",
                             "uninstall",
                             "-y",
                             "torch",
                             "torchvision",
-                        ]
+                        )
                     )
                     subprocess.check_call(
-                        [
+                        pip_command(
                             env_python,
-                            "-m",
-                            "pip",
                             "install",
                             "torch==2.0.1",
                             "torchvision==0.15.2",
-                        ]
+                        )
                     )
                     print(
                         "✓ Switched to CPU-only PyTorch due to CUDA incompatibility"
@@ -134,39 +131,33 @@ except Exception as e:
                 print("Falling back to CPU-only PyTorch...")
                 # Install PyTorch without CUDA
                 subprocess.check_call(
-                    [
+                    pip_command(
                         env_python,
-                        "-m",
-                        "pip",
                         "install",
                         "torch==2.0.1",
                         "torchvision==0.15.2",
-                    ]
+                    )
                 )
                 print("✓ CPU-only PyTorch installed as fallback")
         else:
             # Install PyTorch without CUDA
             print("Installing PyTorch without CUDA support...")
             subprocess.check_call(
-                [
+                pip_command(
                     env_python,
-                    "-m",
-                    "pip",
                     "install",
                     "torch==2.0.1",
                     "torchvision==0.15.2",
-                ]
+                )
             )
 
         # Install Spotiflow with all dependencies, but force CPU usage to avoid GPU issues
         print("Installing Spotiflow in the dedicated environment...")
-        subprocess.check_call(
-            [env_python, "-m", "pip", "install", "spotiflow"]
-        )
+        subprocess.check_call(pip_command(env_python, "install", "spotiflow"))
 
         # Install additional dependencies for image handling
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "tifffile", "numpy"]
+            pip_command(env_python, "install", "tifffile", "numpy")
         )
 
         # Check if installation was successful

@@ -10,7 +10,7 @@ import tempfile
 
 import tifffile
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 
 class CAREamicsEnvironmentManager(BaseEnvironmentManager):
@@ -38,24 +38,24 @@ class CAREamicsEnvironmentManager(BaseEnvironmentManager):
             # Install PyTorch with CUDA support
             print("Installing PyTorch with CUDA support...")
             subprocess.check_call(
-                [env_python, "-m", "pip", "install", "torch", "torchvision"]
+                pip_command(env_python, "install", "torch", "torchvision")
             )
         else:
             # Install PyTorch without CUDA
             print("Installing PyTorch without CUDA support...")
             subprocess.check_call(
-                [env_python, "-m", "pip", "install", "torch", "torchvision"]
+                pip_command(env_python, "install", "torch", "torchvision")
             )
 
         # Install CAREamics and dependencies
         print("Installing CAREamics in the dedicated environment...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "careamics[tensorboard]"]
+            pip_command(env_python, "install", "careamics[tensorboard]")
         )
 
         # Install tifffile for image handling
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "tifffile", "numpy"]
+            pip_command(env_python, "install", "tifffile", "numpy")
         )
 
         # Check if installation was successful

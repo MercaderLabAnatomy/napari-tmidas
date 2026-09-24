@@ -7,7 +7,7 @@ This module manages a dedicated virtual environment for SAM2.
 import os
 import subprocess
 
-from napari_tmidas._env_manager import BaseEnvironmentManager
+from napari_tmidas._env_manager import BaseEnvironmentManager, pip_command
 
 
 class SAM2EnvironmentManager(BaseEnvironmentManager):
@@ -23,7 +23,7 @@ class SAM2EnvironmentManager(BaseEnvironmentManager):
         # Install numpy and torch first for compatibility
         print("Installing torch and torchvision...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "torch", "torchvision"]
+            pip_command(env_python, "install", "torch", "torchvision")
         )
 
         # Clone SAM2 repository into the environment directory
@@ -50,7 +50,7 @@ class SAM2EnvironmentManager(BaseEnvironmentManager):
         # Install SAM2 from the cloned repository
         print("Installing SAM2 package from cloned repository...")
         subprocess.check_call(
-            [env_python, "-m", "pip", "install", "-e", self.sam2_repo_dir]
+            pip_command(env_python, "install", "-e", self.sam2_repo_dir)
         )
 
         # Download model checkpoint
