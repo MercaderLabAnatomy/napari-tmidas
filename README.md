@@ -106,6 +106,17 @@ python -m pip install "napari[all]"
 | **Standard installation** | `pip install napari-tmidas` |
 | **Want the latest dev features** | `pip install git+https://github.com/MercaderLabAnatomy/napari-tmidas.git` |
 
+### Alternative: install with uv
+
+[uv](https://docs.astral.sh/uv/) replaces both mamba and pip and fetches Python itself:
+
+```sh
+uv venv --python 3.12 napari-tmidas-env
+source napari-tmidas-env/bin/activate
+uv pip install "napari[all]" napari-tmidas
+napari
+```
+
 ## 🖼️ Screenshots
 
 <details>
@@ -158,12 +169,16 @@ What is left:
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please ensure tests pass before submitting PRs:
+Contributions are welcome! Development uses [uv](https://docs.astral.sh/uv/); dependency versions are pinned in `uv.lock`, which CI installs exactly. Please ensure tests pass before submitting PRs:
 
 ```sh
-pip install tox
-tox
+git clone https://github.com/MercaderLabAnatomy/napari-tmidas.git
+cd napari-tmidas
+uv sync                          # creates .venv with the package and dev tools
+uv run pytest -m "not slow"      # run the test suite
 ```
+
+After changing dependencies in `pyproject.toml`, run `uv lock` and commit the updated `uv.lock`. `tox` still works for testing against a fresh resolve.
 
 ## 📄 License
 

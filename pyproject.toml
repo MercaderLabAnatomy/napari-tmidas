@@ -58,6 +58,23 @@ all = [
     "napari-tmidas[testing]",
 ]
 
+# Development-only dependencies (PEP 735). Unlike extras they are never
+# published with the package; `uv sync` installs the "dev" group by default.
+# The "testing" extra above stays for tox and for pip users.
+[dependency-groups]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov",
+    "pytest-qt",
+    "pytest-timeout",
+    "napari",
+]
+dev = [
+    {include-group = "test"},
+    "pre-commit",
+    "ruff",
+]
+
 [project.entry-points."napari.manifest"]
 napari-tmidas = "napari_tmidas:napari.yaml"
 

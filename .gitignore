@@ -35,7 +35,7 @@ docs/_build/
 # Environments
 env/
 venv/
-.python-version
+.venv/
 
 # Editors / IDE
 .idea/
