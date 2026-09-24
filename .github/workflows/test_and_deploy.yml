@@ -1,5 +1,5 @@
-# This workflows will upload a Python Package using Twine when a release is created
-# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions#publishing-to-package-registries
+# Runs the test matrix with uv, and publishes to PyPI with `uv publish` when a
+# v* tag is pushed.
 
 name: tests
 
@@ -47,33 +47,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      # uv installs the requested Python itself and caches downloaded wheels
+      # keyed on uv.lock, so no separate setup-python or pip cache step.
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       # these libraries enable testing on Qt on linux
       - uses: tlambert03/setup-qt-libs@v1
-
-      # note: if you need dependencies from conda, considering using
-      # setup-miniconda: https://github.com/conda-incubator/setup-miniconda
-      # and
-      # tox-conda: https://github.com/tox-dev/tox-conda
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install setuptools tox tox-gh-actions scikit-learn-extra
-          
-      - name: Pip cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml', 'tox.ini') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Remove .tox cache
-        run: rm -rf .tox
 
       - name: Free up disk space (Linux)
         if: runner.os == 'Linux'
@@ -85,11 +69,6 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h
-
-      - name: Upgrade critical dependencies
-        run: |
-          python -m pip install --upgrade numpy psygnal pytest
-          python -m pip install --upgrade pip setuptools wheel
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -103,13 +82,16 @@ jobs:
             libxrender1 \
             libgomp1
 
-      # this runs the platform-specific tests declared in tox.ini
-      - name: Test with tox
+      # --locked fails the job if uv.lock is out of date with pyproject.toml,
+      # instead of silently resolving different versions than developers use.
+      - name: Install dependencies
+        run: uv sync --locked --group test
+
+      - name: Test
         uses: aganders3/headless-gui@v2
         with:
-          run: python -m tox -r -- -m "not slow"
+          run: uv run --locked pytest --cov=napari_tmidas --cov-report=xml --timeout=300 -m "not slow" -v
         env:
-          PLATFORM: ${{ matrix.platform }}
           QT_QPA_PLATFORM: offscreen
           MPLBACKEND: Agg
           PYTHONUNBUFFERED: 1
@@ -119,19 +101,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          echo "Checking for coverage.xml..."
-          FOUND=0
           if [ -f coverage.xml ]; then
-            echo "Found coverage.xml at repo root"; FOUND=1
-          fi
-          # Glob inside .tox envs (quiet if none)
-          if ls .tox/*/coverage.xml >/dev/null 2>&1; then
-            echo "Found coverage.xml inside .tox environment"; FOUND=1
-          fi
-          if [ "$FOUND" -eq 0 ]; then
-            echo "No coverage.xml found (this may be fine if tests were skipped).";
-            ls -al . | sed -n '1,120p'
+            echo "Found coverage.xml at repo root"
+          else
+            echo "No coverage.xml found (this may be fine if tests were skipped)."
+            ls -al .
           fi
 
       - name: Coverage
@@ -150,26 +124,19 @@ jobs:
 
   deploy:
     # this will run when you have tagged a commit, starting with "v*"
-    # and requires that you have put your twine API key in your
+    # and requires that you have put your PyPI API token (secret TWINE_API_KEY) in your
     # github secrets (see readme for details)
     needs: [test]
     runs-on: ubuntu-latest
     if: contains(github.ref, 'tags')
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -U setuptools setuptools_scm wheel twine build
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.2.0
       - name: Build and publish
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TWINE_API_KEY }}
+          UV_PUBLISH_TOKEN: ${{ secrets.TWINE_API_KEY }}
         run: |
           git tag
-          python -m build .
-          twine upload dist/*
+          uv build
+          uv publish
