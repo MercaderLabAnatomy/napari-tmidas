@@ -59,6 +59,8 @@ except ImportError:
     imread = None
     _HAS_SKIMAGE = False
 
+from napari_tmidas._workflow_log import WorkflowLog, relative_path
+
 sys.path.append("src/napari_tmidas")
 
 
@@ -1107,6 +1109,23 @@ def _save_label_wrapper(wrapper: "_DaskFancyIndexWrapper", path: str) -> None:
     wrapper._cache.clear()
 
 
+def _wrapper_edit_summary(wrapper: "_DaskFancyIndexWrapper") -> dict:
+    """Pending edits of *wrapper* for the workflow log: the first-axis (T)
+    slices holding local edits, and how many label IDs were remapped across
+    every slice."""
+    try:
+        summary = {
+            "edited_slices": sorted(
+                int(key[1]) for key in wrapper._diffs if key[0] == 0
+            )
+        }
+        if wrapper._lut:
+            summary["ids_remapped_all_slices"] = len(wrapper._lut)
+        return summary
+    except Exception:  # bookkeeping only, never block a save
+        return {}
+
+
 def _resample_nearest(arr: np.ndarray, shape: tuple) -> np.ndarray:
     """Nearest-neighbor resample *arr* to *shape* (same ndim, no interpolation).
 
@@ -1541,10 +1560,36 @@ class LabelInspector:
         # For dask-backed wrappers, write T-by-T to avoid loading the full
         # dataset into RAM.
         if isinstance(labels_layer.data, _DaskFancyIndexWrapper):
+            # The save clears the edit state, so read it first.
+            edits = _wrapper_edit_summary(labels_layer.data)
             _save_label_wrapper(labels_layer.data, label_path)
+            written = True
         else:
-            labels_layer.save(label_path)
+            edits = {}
+            # napari returns the written paths; [] means no writer took it.
+            written = labels_layer.save(label_path) != []
         self.viewer.status = f"Saved labels to {label_path}."
+        if written:
+            self._log_saved_labels(label_path, edits)
+
+    def _log_saved_labels(self, label_path: str, edits: dict) -> None:
+        """Record a saved label file in the workspace's workflow log."""
+        try:
+            image_path = self.image_label_pairs[self.current_index][0]
+            n_pairs = len(self.image_label_pairs)
+            folder = os.path.dirname(os.path.abspath(label_path))
+            WorkflowLog(folder).event(
+                widget="label_inspection",
+                file=label_path,
+                output=label_path,
+                extra={
+                    "image": relative_path(image_path, folder),
+                    "pair": f"{self.current_index + 1}/{n_pairs}",
+                    **edits,
+                },
+            )
+        except Exception as exc:
+            print(f"Workflow log: could not record label save: {exc}")
 
     def _find_labels_layer(self):
         """The regular (source-backed) labels layer, never a track view."""

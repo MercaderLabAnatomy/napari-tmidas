@@ -428,3 +428,189 @@ def test_prevent_removing_all_frames(make_napari_viewer, monkeypatch):
     assert warning_called
     assert 2 not in widget.frames_to_remove
     assert len(widget.frames_to_remove) == 2
+
+
+# ---------------------------------------------------------------------------
+# Workflow log and replay
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def log_on(monkeypatch):
+    monkeypatch.delenv("NAPARI_TMIDAS_NO_WORKFLOW_LOG", raising=False)
+    monkeypatch.delenv("NAPARI_TMIDAS_WORKFLOW_LOG", raising=False)
+
+
+def _save_with_widget(viewer, monkeypatch, output_path, source=None,
+                      frames=(2, 5)):
+    """Load a (10, 8, 8) movie into the widget, mark ``frames`` and save."""
+    import tifffile
+    from napari.layers._source import layer_source
+
+    import napari_tmidas._frame_removal as fr
+
+    data = np.arange(10)[:, None, None] * np.ones((1, 8, 8), dtype=np.uint16)
+    if source is not None:
+        tifffile.imwrite(str(source), data)
+        with layer_source(path=str(source)):
+            layer = viewer.add_image(data, name="movie")
+    else:
+        layer = viewer.add_image(data, name="movie")
+
+    widget = fr.FrameRemovalWidget(viewer)
+    widget._on_layer_selected(layer)
+    widget.frames_to_remove = list(frames)
+
+    monkeypatch.setattr(
+        fr.QFileDialog,
+        "getSaveFileName",
+        lambda *a, **k: (str(output_path), ""),
+    )
+    monkeypatch.setattr(fr.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(fr.QMessageBox, "critical", lambda *a, **k: None)
+    widget._save_result()
+    return data
+
+
+def test_save_records_workflow_run(make_napari_viewer, tmp_path, monkeypatch,
+                                   log_on):
+    import napari_tmidas._workflow_replay as wr
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _save_with_widget(
+        make_napari_viewer(), monkeypatch, ws / "movie_cleaned.tif",
+        source=ws / "movie.tif", frames=(5, 2),
+    )
+
+    (run,) = wr.load_runs(str(ws))
+    assert run["widget"] == "frame_removal"
+    assert run["status"] == "finished"
+    assert run["replayable"] is True
+    assert run["input_folder"] == str(ws)
+    assert run["files"] == ["movie.tif"]
+    assert run["params"] == {"frames_removed": [2, 5], "frame_axis": 0}
+    assert run["extra"]["layer"] == "movie"
+    assert run["extra"]["original_shape"] == [10, 8, 8]
+    assert run["extra"]["output_file"] == "movie_cleaned.tif"
+    assert run["results"][0]["processed_file"] == "movie_cleaned.tif"
+    assert run["results"][0]["original_file"] == "movie.tif"
+    assert run["results"][0]["shape"] == [8, 8, 8]
+
+
+def test_layer_without_source_is_not_replayable(make_napari_viewer, tmp_path,
+                                                monkeypatch, log_on):
+    import napari_tmidas._workflow_replay as wr
+
+    out = tmp_path / "out"
+    out.mkdir()
+    _save_with_widget(make_napari_viewer(), monkeypatch, out / "clean.tif")
+
+    (run,) = wr.load_runs(str(out))
+    assert run["replayable"] is False
+    assert run["files"] == []
+    assert run["input_folder"] == str(out)
+    assert run["status"] == "finished"
+    assert not wr.is_replayable(run)
+
+
+def test_failed_save_is_recorded(make_napari_viewer, tmp_path, monkeypatch,
+                                 log_on):
+    import napari_tmidas._workflow_replay as wr
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _save_with_widget(
+        make_napari_viewer(), monkeypatch, ws / "missing" / "clean.tif",
+        source=ws / "movie.tif",
+    )
+
+    (run,) = wr.load_runs(str(ws))
+    assert run["status"] == "failed"
+    assert run["errors"][0]["file"] == "movie.tif"
+    assert run["errors"][0]["error"]
+
+
+def test_replay_frame_removal_in_moved_folder(make_napari_viewer, tmp_path,
+                                              monkeypatch, log_on):
+    import shutil
+
+    import tifffile
+
+    import napari_tmidas._workflow_replay as wr
+    from napari_tmidas._frame_removal import replay_frame_removal_run
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    data = _save_with_widget(
+        make_napari_viewer(), monkeypatch, ws / "movie_cleaned.tif",
+        source=ws / "movie.tif",
+    )
+    (run,) = wr.load_runs(str(ws))
+
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    shutil.copy(ws / "movie.tif", moved / "movie.tif")
+    outcome = replay_frame_removal_run(
+        run, input_folder=str(moved), on_progress=lambda m: None
+    )
+
+    assert outcome["status"] == "finished"
+    assert outcome["errors"] == []
+    out = moved / "movie_cleaned.tif"
+    np.testing.assert_array_equal(
+        tifffile.imread(str(out)), np.delete(data, [2, 5], axis=0)
+    )
+    (new,) = wr.load_runs(str(moved))
+    assert new["extra"]["replayed_from"] == run["run_id"]
+    assert new["params"] == run["params"]
+    assert new["status"] == "finished"
+    assert new["replayable"] is True
+
+
+def test_replay_frame_removal_dry_run_writes_nothing(make_napari_viewer,
+                                                     tmp_path, monkeypatch,
+                                                     log_on):
+    import napari_tmidas._workflow_log as wl
+    import napari_tmidas._workflow_replay as wr
+    from napari_tmidas._frame_removal import replay_frame_removal_run
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _save_with_widget(
+        make_napari_viewer(), monkeypatch, ws / "movie_cleaned.tif",
+        source=ws / "movie.tif",
+    )
+    (run,) = wr.load_runs(str(ws))
+    (ws / "movie_cleaned.tif").unlink()
+    before = (ws / wl.LOG_NAME).read_text()
+
+    outcome = replay_frame_removal_run(
+        run, dry_run=True, on_progress=lambda m: None
+    )
+
+    assert outcome["dry_run"] is True
+    assert outcome["output_file"] == str(ws / "movie_cleaned.tif")
+    assert outcome["params"]["frames_removed"] == [2, 5]
+    assert not (ws / "movie_cleaned.tif").exists()
+    assert (ws / wl.LOG_NAME).read_text() == before
+
+
+def test_replay_frame_removal_refuses_changed_source(make_napari_viewer,
+                                                     tmp_path, monkeypatch,
+                                                     log_on):
+    import tifffile
+
+    import napari_tmidas._workflow_replay as wr
+    from napari_tmidas._frame_removal import replay_frame_removal_run
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    # Saving over the source is allowed; replaying must not cut it again.
+    _save_with_widget(
+        make_napari_viewer(), monkeypatch, ws / "movie.tif",
+        source=ws / "movie.tif",
+    )
+    (run,) = wr.load_runs(str(ws))
+    assert tifffile.imread(str(ws / "movie.tif")).shape[0] == 8
+
+    with pytest.raises(ValueError, match="shape"):
+        replay_frame_removal_run(run, on_progress=lambda m: None)

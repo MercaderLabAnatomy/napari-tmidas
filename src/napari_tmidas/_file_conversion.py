@@ -50,6 +50,8 @@ from qtpy.QtWidgets import (
 )
 from readlif.reader import LifFile
 
+from napari_tmidas._workflow_log import WorkflowLog, relative_path
+
 # Optional import - tiffslide conflicts with zarr v3
 try:
     from tiffslide import TiffSlide
@@ -1740,6 +1742,124 @@ class AcquiferLoader(FormatLoader):
             return {}
 
 
+DEFAULT_LOADERS = (
+    LIFLoader,
+    ND2Loader,
+    TIFFSlideLoader,
+    CZILoader,
+    AcquiferLoader,
+)
+
+CONVERSION_WIDGET = "file_conversion"
+
+
+def get_file_loader(
+    filepath: str, loaders=DEFAULT_LOADERS
+) -> Optional[FormatLoader]:
+    """The first of ``loaders`` that can read ``filepath``, else None."""
+    for loader in loaders:
+        if loader.can_load(filepath):
+            return loader
+    return None
+
+
+def conversion_output_path(
+    output_folder: str, filepath: str, series_index: int, use_zarr: bool
+) -> str:
+    """Where ConversionWorker writes one series of ``filepath``."""
+    extension = "zarr" if use_zarr else "tif"
+    return os.path.join(
+        output_folder,
+        f"{Path(filepath).stem}_series{series_index}.{extension}",
+    )
+
+
+class _ConversionOutcomes:
+    """
+    Per-file results and errors of one conversion run for the workflow log,
+    fed from ``ConversionWorker.file_done``.
+
+    The worker emits one ``file_done`` per queue entry in queue order, so
+    the n-th signal belongs to the n-th ``(path, series)``. A skipped file
+    ("SKIPPED: ..." message) wrote nothing, so it is an error with
+    ``"skipped": True``, not a result.
+    """
+
+    def __init__(self, files_to_convert, output_folder, use_zarr):
+        self._queue = list(files_to_convert)
+        self._next = 0
+        self.output_folder = output_folder
+        self.use_zarr = use_zarr
+        self.results: List[Dict[str, Any]] = []
+        self.errors: List[Dict[str, Any]] = []
+
+    def add(self, filepath: str, success: bool, message: str):
+        try:
+            series_index = None
+            if self._next < len(self._queue):
+                queued_path, queued_index = self._queue[self._next]
+                if queued_path == filepath:
+                    series_index = queued_index
+            self._next += 1
+            if success:
+                self.results.append(
+                    {
+                        "original_file": filepath,
+                        "series_index": series_index,
+                        "processed_file": conversion_output_path(
+                            self.output_folder,
+                            filepath,
+                            series_index or 0,
+                            self.use_zarr,
+                        ),
+                    }
+                )
+                return
+            error = {
+                "file": filepath,
+                "series_index": series_index,
+                "error": message,
+            }
+            if message.startswith("SKIPPED:"):
+                error["skipped"] = True
+            self.errors.append(error)
+        except Exception as exc:  # the log must never break a conversion
+            print(f"Workflow log: could not record a conversion result: {exc}")
+
+
+def _record_conversion_started(
+    input_folder, files_to_convert, output_folder, use_zarr, extra=None
+):
+    """Open the workflow log and write ``run_started``; never raises."""
+    outcomes = _ConversionOutcomes(files_to_convert, output_folder, use_zarr)
+    try:
+        paths = list(dict.fromkeys(path for path, _ in files_to_convert))
+        if not input_folder and paths:
+            input_folder = os.path.commonpath(
+                [os.path.dirname(os.path.abspath(p)) for p in paths]
+            )
+        log = WorkflowLog(input_folder, output_folder)
+        run_id = log.run_started(
+            widget=CONVERSION_WIDGET,
+            files=paths,
+            output_folder=output_folder,
+            output_format="zarr" if use_zarr else "tiff",
+            replayable=True,
+            extra={
+                "series": [
+                    [relative_path(path, log.input_folder), int(index)]
+                    for path, index in files_to_convert
+                ],
+                "use_zarr": bool(use_zarr),
+                **(extra or {}),
+            },
+        )
+        return log, run_id, outcomes
+    except Exception as exc:
+        print(f"Workflow log: could not record the conversion run: {exc}")
+        return None, None, outcomes
+
+
 class ScanFolderWorker(QThread):
     """Worker thread for scanning folders"""
 
@@ -1973,18 +2093,14 @@ class ConversionWorker(QThread):
 
             # Generate output path
             base_name = Path(filepath).stem
+            output_path = conversion_output_path(
+                self.output_folder, filepath, series_index, self.use_zarr
+            )
             if self.use_zarr:
-                output_path = os.path.join(
-                    self.output_folder,
-                    f"{base_name}_series{series_index}.zarr",
-                )
                 result = self._save_zarr(
                     image_data, output_path, metadata, base_name, series_index
                 )
             else:
-                output_path = os.path.join(
-                    self.output_folder, f"{base_name}_series{series_index}.tif"
-                )
                 result = self._save_tif(image_data, output_path, metadata)
 
             return result
@@ -2444,13 +2560,7 @@ class MicroscopyImageConverterWidget(QWidget):
         self.viewer = viewer
 
         # Register format loaders
-        self.loaders = [
-            LIFLoader,
-            ND2Loader,
-            TIFFSlideLoader,
-            CZILoader,
-            AcquiferLoader,
-        ]
+        self.loaders = list(DEFAULT_LOADERS)
 
         # Conversion state
         self.selected_series = {}
@@ -2458,6 +2568,7 @@ class MicroscopyImageConverterWidget(QWidget):
         self.scan_worker = None
         self.conversion_worker = None
         self.updating_format_buttons = False
+        self._workflow_run_id = None
 
         self._setup_ui()
 
@@ -2709,6 +2820,9 @@ class MicroscopyImageConverterWidget(QWidget):
             self.scan_worker = None
 
         if self.conversion_worker and self.conversion_worker.isRunning():
+            # The worker is discarded here, so its finished signal may
+            # never arrive: close the run now.
+            self._record_conversion_finished("cancelled")
             self.conversion_worker.stop()
             self.conversion_worker.deleteLater()
             self.conversion_worker = None
@@ -2741,10 +2855,7 @@ class MicroscopyImageConverterWidget(QWidget):
 
     def get_file_loader(self, filepath: str) -> Optional[FormatLoader]:
         """Get appropriate loader for file"""
-        for loader in self.loaders:
-            if loader.can_load(filepath):
-                return loader
-        return None
+        return get_file_loader(filepath, self.loaders)
 
     def show_series_details(self, filepath: str):
         """Show series details"""
@@ -2876,11 +2987,22 @@ class MicroscopyImageConverterWidget(QWidget):
         self, files_to_convert: List[Tuple[str, int]], output_folder: str
     ):
         """Start the conversion worker thread"""
+        use_zarr = self.zarr_radio.isChecked()
         self.conversion_worker = ConversionWorker(
             files_to_convert=files_to_convert,
             output_folder=output_folder,
-            use_zarr=self.zarr_radio.isChecked(),
+            use_zarr=use_zarr,
             file_loader_func=self.get_file_loader,
+        )
+        (
+            self._workflow_log,
+            self._workflow_run_id,
+            self._workflow_outcomes,
+        ) = _record_conversion_started(
+            self.folder_edit.text().strip(),
+            files_to_convert,
+            output_folder,
+            use_zarr,
         )
 
         self.conversion_worker.progress.connect(
@@ -2986,6 +3108,8 @@ class MicroscopyImageConverterWidget(QWidget):
         self, filepath: str, success: bool, message: str
     ):
         """Handle single file conversion result"""
+        if getattr(self, "_workflow_run_id", None) is not None:
+            self._workflow_outcomes.add(filepath, success, message)
         filename = Path(filepath).name
         if success:
             print(f"Successfully converted: {filename}")
@@ -3001,6 +3125,7 @@ class MicroscopyImageConverterWidget(QWidget):
 
     def conversion_completed(self, success_count: int):
         """Handle conversion completion"""
+        self._record_conversion_finished("finished")
         self.conversion_progress.setVisible(False)
         self.cancel_button.setVisible(False)
 
@@ -3025,6 +3150,19 @@ class MicroscopyImageConverterWidget(QWidget):
         else:
             self.status_label.setText("No files were converted")
 
+    def _record_conversion_finished(self, status: str):
+        """Write the run's end record once, whichever path comes first."""
+        run_id = getattr(self, "_workflow_run_id", None)
+        if run_id is None:
+            return
+        self._workflow_run_id = None
+        self._workflow_log.run_finished(
+            run_id,
+            status=status,
+            results=self._workflow_outcomes.results,
+            errors=self._workflow_outcomes.errors,
+        )
+
 
 @magicgui(call_button="Start Microscopy Image Converter", layout="vertical")
 def microscopy_converter(viewer: napari.Viewer):
@@ -3039,3 +3177,117 @@ def microscopy_converter(viewer: napari.Viewer):
 def napari_experimental_provide_dock_widget():
     """Provide the converter widget to Napari"""
     return microscopy_converter
+
+
+def replay_conversion_run(
+    run: Dict[str, Any],
+    *,
+    input_folder: Optional[str] = None,
+    output_folder: Optional[str] = None,
+    dry_run: bool = False,
+    on_progress=print,
+) -> Dict[str, Any]:
+    """
+    Repeat a recorded conversion run headless (no viewer, no widget).
+
+    ``input_folder`` / ``output_folder`` override the recorded folders; an
+    output folder that was inside the input folder moves with it. Recorded
+    files that no longer exist are skipped. With ``dry_run`` nothing is
+    written.
+    """
+    from napari_tmidas._workflow_replay import resolve_output_folder
+
+    if run.get("widget") != CONVERSION_WIDGET:
+        raise ValueError(
+            f"Run {run.get('run_id')} comes from {run.get('widget')!r}, "
+            "not the microscopy image converter"
+        )
+    extra = run.get("extra") or {}
+    in_folder = os.path.abspath(input_folder or run.get("input_folder") or ".")
+    use_zarr = bool(extra.get("use_zarr", run.get("output_format") == "zarr"))
+    series = extra.get("series") or [[f, 0] for f in run.get("files") or []]
+
+    queue, missing = [], []
+    for path, index in series:
+        full = path if os.path.isabs(path) else os.path.join(in_folder, path)
+        (queue if os.path.exists(full) else missing).append((full, int(index)))
+    if missing:
+        on_progress(
+            f"Warning: {len(missing)} recorded file(s) no longer exist and "
+            "are skipped: "
+            + ", ".join(sorted({os.path.basename(p) for p, _ in missing}))
+        )
+    out_folder = resolve_output_folder(run, in_folder, output_folder)
+    output_format = "zarr" if use_zarr else "tiff"
+
+    plan = {
+        "run_id": None,
+        "replayed_from": run.get("run_id"),
+        "input_folder": in_folder,
+        "files": queue,
+        "output_folder": out_folder,
+        "output_format": output_format,
+    }
+    on_progress(
+        f"Replay of {run.get('run_id')}: converting {len(queue)} file/series "
+        f"from {in_folder} -> {out_folder} ({output_format})"
+    )
+    if dry_run:
+        for path, index in queue:
+            target = conversion_output_path(out_folder, path, index, use_zarr)
+            on_progress(
+                f"  {relative_path(path, in_folder)} series {index} -> "
+                f"{os.path.basename(target)}"
+            )
+        return {**plan, "dry_run": True}
+    if not queue:
+        raise FileNotFoundError(f"No input files to convert in {in_folder}")
+
+    os.makedirs(out_folder, exist_ok=True)
+    worker = ConversionWorker(
+        files_to_convert=queue,
+        output_folder=out_folder,
+        use_zarr=use_zarr,
+        file_loader_func=get_file_loader,
+    )
+    log, run_id, outcomes = _record_conversion_started(
+        in_folder,
+        queue,
+        out_folder,
+        use_zarr,
+        extra={"replayed_from": run.get("run_id")},
+    )
+
+    def on_file_done(filepath, success, message):
+        outcomes.add(filepath, success, message)
+        state = "done" if success else "error"
+        detail = "" if success else f": {message}"
+        on_progress(f"  {state}: {os.path.basename(filepath)}{detail}")
+
+    worker.file_done.connect(on_file_done)
+    status = "failed"
+    try:
+        # Synchronously on this thread; the signals are delivered directly.
+        worker.run()
+        status = "finished"
+    finally:
+        if log is not None:
+            log.run_finished(
+                run_id,
+                status=status,
+                results=outcomes.results,
+                errors=outcomes.errors,
+            )
+
+    on_progress(
+        f"Replay finished: {len(outcomes.results)} output(s), "
+        f"{len(outcomes.errors)} error(s)"
+    )
+    return {
+        **plan,
+        "run_id": run_id,
+        "status": status,
+        "results": outcomes.results,
+        "errors": outcomes.errors,
+        "log_path": getattr(log, "path", None),
+    }

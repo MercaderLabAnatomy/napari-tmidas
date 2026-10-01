@@ -2095,3 +2095,80 @@ class TestMessageBoxes:
         assert inspector._show_message("warning", "T", "body") is None
         # The dialog really was attempted — the failure came from Qt.
         assert calls == [("T", "body")]
+
+
+class TestWorkflowLogEvents:
+    """A saved label file is recorded once in the workflow log."""
+
+    @pytest.fixture
+    def log_on(self, monkeypatch):
+        import napari_tmidas._workflow_log as wl
+
+        monkeypatch.delenv(wl.DISABLE_ENV, raising=False)
+        monkeypatch.delenv(wl.PATH_ENV, raising=False)
+
+    def _save(self, tmp_path, layer_data=None):
+        base = np.zeros((3, 4, 4), dtype=np.uint32)
+        base[:, 0, 0] = 5
+        image_path, label_path = _write_pair(
+            tmp_path, "a", np.zeros((3, 4, 4), dtype=np.uint16), base
+        )
+        if layer_data is None:
+            layer_data = _wrap(base.copy())
+            layer_data.remap_values({5: 9})
+            layer_data[1, 2, 2] = 7
+        inspector = LabelInspector(_FakeViewer([_FakeLabels(layer_data)]))
+        inspector.image_label_pairs = [(image_path, label_path)]
+        inspector.save_current_labels()
+        return tmp_path / "tmidas_workflow.jsonl"
+
+    def test_wrapper_save_records_one_event(
+        self, tmp_path, fake_labels_cls, log_on
+    ):
+        import napari_tmidas._workflow_log as wl
+
+        log = self._save(tmp_path)
+
+        (record,) = wl.read_records(str(log))
+        assert record["record"] == "event"
+        assert record["widget"] == "label_inspection"
+        assert record["file"] == "a_labels.tif"
+        assert record["output"] == "a_labels.tif"
+        assert record["replayable"] is False
+        assert record["extra"] == {
+            "image": "a.tif",
+            "pair": "1/1",
+            "edited_slices": [1],
+            "ids_remapped_all_slices": 1,
+        }
+        assert (tmp_path / wl.MARKDOWN_NAME).exists()
+
+    def test_layer_save_records_one_event(
+        self, tmp_path, fake_labels_cls, log_on, monkeypatch
+    ):
+        import napari_tmidas._workflow_log as wl
+
+        monkeypatch.setattr(
+            _FakeLabels, "save", lambda self, path: [path], raising=False
+        )
+        log = self._save(tmp_path, np.zeros((3, 4, 4), dtype=np.uint32))
+
+        (record,) = wl.read_records(str(log))
+        assert record["output"] == "a_labels.tif"
+        assert record["extra"] == {"image": "a.tif", "pair": "1/1"}
+
+    def test_nothing_written_by_napari_is_not_logged(
+        self, tmp_path, fake_labels_cls, log_on, monkeypatch
+    ):
+        monkeypatch.setattr(
+            _FakeLabels, "save", lambda self, path: [], raising=False
+        )
+        log = self._save(tmp_path, np.zeros((3, 4, 4), dtype=np.uint32))
+
+        assert not log.exists()
+
+    def test_disabled_log_writes_nothing(self, tmp_path, fake_labels_cls):
+        log = self._save(tmp_path)
+
+        assert not log.exists()
+        assert not (tmp_path / "tmidas_workflow.md").exists()

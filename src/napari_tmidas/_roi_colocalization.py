@@ -39,6 +39,8 @@ from qtpy.QtWidgets import (
 )
 from skimage import measure
 
+from napari_tmidas._workflow_log import WorkflowLog, relative_path
+
 
 def convert_semantic_to_instance_labels(image, connectivity=None):
     """
@@ -195,6 +197,121 @@ def group_files_by_common_substring(file_lists, channels):
     }
 
     return valid_groups
+
+
+COLOCALIZATION_WIDGET = "roi_colocalization"
+
+
+class _ColocalizationRecord:
+    """
+    The workflow-log record of one colocalization run, written by the widget
+    and by the replayer. Never raises.
+
+    Settings go in ``params`` (keyword arguments of ColocalizationWorker,
+    plus ``channel_names``); the matched file sets go in ``extra.pairs``.
+    One result per file set whose analysis finished, with the overlay image
+    as ``processed_file`` when one was saved.
+    """
+
+    def __init__(
+        self,
+        file_pairs,
+        channel_names,
+        settings,
+        output_folder,
+        thread_count=None,
+        channel_folders=(),
+        channel_patterns=(),
+        extra=None,
+    ):
+        self.results = []
+        self.errors = []
+        self.log = None
+        self.run_id = None
+        try:
+            pairs = [
+                tuple(os.path.abspath(p) for p in pair) for pair in file_pairs
+            ]
+            self._pair_by_name = {os.path.basename(p[0]): p for p in pairs}
+            # error_occurred reports a file set as str(tuple)
+            self._pair_by_text = {
+                str(original): pair
+                for original, pair in zip(file_pairs, pairs)
+            }
+            files = list(dict.fromkeys(p for pair in pairs for p in pair))
+            input_folder = (
+                os.path.commonpath([os.path.dirname(p) for p in files])
+                if files
+                else None
+            )
+            self.log = WorkflowLog(input_folder, output_folder or None)
+            base = self.log.input_folder
+            record_extra = {
+                "pairs": [
+                    [relative_path(p, base) for p in pair] for pair in pairs
+                ],
+                "channel_folders": [
+                    relative_path(os.path.abspath(f), base)
+                    for f in channel_folders
+                    if f
+                ],
+                "channel_patterns": list(channel_patterns),
+            }
+            if output_folder:
+                record_extra["csv_file"] = relative_path(
+                    os.path.join(
+                        output_folder,
+                        f"{'_'.join(channel_names)}_colocalization.csv",
+                    ),
+                    base,
+                )
+            record_extra.update(extra or {})
+            self.run_id = self.log.run_started(
+                widget=COLOCALIZATION_WIDGET,
+                params={"channel_names": list(channel_names), **settings},
+                files=files,
+                output_folder=output_folder or None,
+                output_format="csv",
+                thread_count=thread_count,
+                replayable=True,
+                extra=record_extra,
+            )
+        except Exception as exc:
+            print(
+                f"Workflow log: could not record the colocalization run: {exc}"
+            )
+
+    def add_result(self, result):
+        try:
+            pair = self._pair_by_name.get(result.get("filename"))
+            entry = {"original_file": pair[0] if pair else None}
+            if result.get("output_path"):
+                entry["processed_file"] = result["output_path"]
+            self.results.append(entry)
+        except Exception as exc:
+            print(
+                f"Workflow log: could not record a colocalization result: {exc}"
+            )
+
+    def add_error(self, file_pair_text, message):
+        try:
+            pair = self._pair_by_text.get(file_pair_text)
+            # A failed CSV setup reports "CSV file" instead of a file set.
+            self.errors.append(
+                {"file": pair[0] if pair else None, "error": message}
+            )
+        except Exception as exc:
+            print(
+                f"Workflow log: could not record a colocalization error: {exc}"
+            )
+
+    def finish(self, status):
+        """Write ``run_finished`` once; later calls do nothing."""
+        run_id, self.run_id = self.run_id, None
+        if run_id and self.log is not None:
+            self.log.run_finished(
+                run_id, status=status, results=self.results, errors=self.errors
+            )
 
 
 class ColocalizationWorker(QThread):
@@ -1581,6 +1698,7 @@ class ColocalizationAnalysisWidget(QWidget):
         self.file_pairs = []  # Will hold matched files for analysis
         self.file_results = {}  # Store results by filename
         self.worker = None
+        self._workflow = None
 
         # Ensure default channel names are set
         self.channel_names = ["CH1", "CH2", "CH3"][
@@ -2320,6 +2438,37 @@ class ColocalizationAnalysisWidget(QWidget):
         # Set thread count
         self.worker.thread_count = self.thread_count.value()
 
+        self._workflow = _ColocalizationRecord(
+            self.file_pairs,
+            active_channel_names,
+            {
+                "get_sizes": get_sizes,
+                "size_method": size_method,
+                "channel2_is_labels": channel2_is_labels,
+                "channel3_is_labels": channel3_is_labels,
+                "count_positive": count_positive,
+                "threshold_method": threshold_method,
+                "threshold_value": threshold_value,
+                "save_images": save_images,
+                "convert_to_instances_c2": convert_to_instances_c2,
+                "convert_to_instances_c3": convert_to_instances_c3,
+                "count_c2_positive_for_c3": count_c2_positive_for_c3,
+            },
+            output_folder,
+            thread_count=self.thread_count.value(),
+            channel_folders=[ch1_folder, ch2_folder]
+            + ([ch3_folder] if len(active_channel_names) == 3 else []),
+            channel_patterns=[
+                self.ch1_pattern.text().strip() or "*_labels.tif",
+                self.ch2_pattern.text().strip() or "*_labels.tif",
+            ]
+            + (
+                [self.ch3_pattern.text().strip() or "*_labels.tif"]
+                if len(active_channel_names) == 3
+                else []
+            ),
+        )
+
         # Connect signals
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.file_processed.connect(self.file_processed)
@@ -2351,11 +2500,14 @@ class ColocalizationAnalysisWidget(QWidget):
 
     def file_processed(self, result):
         """Handle a processed file result"""
+        if getattr(self, "_workflow", None) is not None:
+            self._workflow.add_result(result)
         if self.results_widget:
             self.results_widget.add_result(result)
 
     def processing_finished(self):
         """Handle processing completion"""
+        self._finish_workflow_run("finished")
         # Update UI
         self.progress_bar.setValue(100)
         self.analyze_button.setEnabled(True)
@@ -2379,12 +2531,17 @@ class ColocalizationAnalysisWidget(QWidget):
 
     def processing_error(self, filepath, error_msg):
         """Handle processing errors"""
+        if getattr(self, "_workflow", None) is not None:
+            self._workflow.add_error(filepath, error_msg)
         print(f"Error processing {filepath}: {error_msg}")
         self.status_label.setText(f"Error: {error_msg}")
 
     def cancel_analysis(self):
         """Cancel the current processing operation"""
         if self.worker and self.worker.isRunning():
+            # Close the run now: a terminated worker never signals the end,
+            # and a late processing_finished then finds nothing to write.
+            self._finish_workflow_run("cancelled")
             self.worker.stop()
             # Wait for the worker to finish with timeout
             if not self.worker.wait(1000):  # Wait up to 1 second
@@ -2400,6 +2557,11 @@ class ColocalizationAnalysisWidget(QWidget):
             self.cancel_button.setEnabled(False)
             self.status_label.setText("Analysis cancelled")
             self.progress_bar.setVisible(False)
+
+    def _finish_workflow_run(self, status):
+        record = getattr(self, "_workflow", None)
+        if record is not None:
+            record.finish(status)
 
 
 # This is the key change: use magic_factory to create a widget that Napari can understand
@@ -2436,6 +2598,7 @@ def roi_colocalization_analyzer(viewer: Viewer):
             and analysis_widget.worker
             and analysis_widget.worker.isRunning()
         ):
+            analysis_widget._finish_workflow_run("cancelled")
             analysis_widget.worker.stop()
             if not analysis_widget.worker.wait(1000):
                 analysis_widget.worker.terminate()
@@ -2449,3 +2612,149 @@ def roi_colocalization_analyzer(viewer: Viewer):
     analysis_widget.closeEvent = enhanced_close_event
 
     return analysis_widget
+
+
+def replay_colocalization_run(
+    run,
+    *,
+    input_folder=None,
+    output_folder=None,
+    dry_run=False,
+    on_progress=print,
+):
+    """
+    Repeat a recorded colocalization run headless (no viewer, no widget).
+
+    ``input_folder`` / ``output_folder`` override the recorded folders; an
+    output folder that was inside the input folder moves with it. File sets
+    with a missing file are skipped; when none is left, the recorded channel
+    folders are matched again with the recorded patterns. With ``dry_run``
+    nothing is written.
+    """
+    import glob
+    import inspect
+
+    from napari_tmidas._workflow_replay import resolve_output_folder
+
+    if run.get("widget") != COLOCALIZATION_WIDGET:
+        raise ValueError(
+            f"Run {run.get('run_id')} comes from {run.get('widget')!r}, "
+            "not the ROI colocalization widget"
+        )
+    extra = run.get("extra") or {}
+    params = dict(run.get("params") or {})
+    channel_names = params.pop("channel_names", None)
+    in_folder = os.path.abspath(input_folder or run.get("input_folder") or ".")
+
+    def full(path):
+        return path if os.path.isabs(path) else os.path.join(in_folder, path)
+
+    pairs = [tuple(full(p) for p in pair) for pair in extra.get("pairs") or []]
+    present = [p for p in pairs if all(os.path.exists(f) for f in p)]
+    if len(present) < len(pairs):
+        on_progress(
+            f"Warning: {len(pairs) - len(present)} recorded file set(s) have "
+            "missing files and are skipped"
+        )
+    folders = [full(f) for f in extra.get("channel_folders") or []]
+    patterns = extra.get("channel_patterns") or []
+    if not present and len(folders) >= 2 and len(patterns) == len(folders):
+        file_lists = {
+            f"CH{i + 1}": sorted(glob.glob(os.path.join(folder, pattern)))
+            for i, (folder, pattern) in enumerate(zip(folders, patterns))
+        }
+        present = [
+            tuple(files)
+            for files in group_files_by_common_substring(
+                file_lists, list(file_lists)
+            ).values()
+        ]
+        on_progress(
+            f"Matched the channel folders again: {len(present)} file set(s)"
+        )
+
+    accepted = set(inspect.signature(ColocalizationWorker.__init__).parameters)
+    for name in list(params):
+        if name not in accepted or name in ("file_pairs", "output_folder"):
+            on_progress(
+                f"Warning: setting {name!r} no longer exists; ignoring the "
+                f"recorded value {params.pop(name)!r}"
+            )
+    if not channel_names:
+        channel_names = [
+            os.path.basename(os.path.dirname(p)) for p in (present or [()])[0]
+        ]
+    if output_folder or run.get("output_folder"):
+        out_folder = resolve_output_folder(run, in_folder, output_folder)
+    else:
+        out_folder = None
+    threads = run.get("thread_count")
+
+    plan = {
+        "run_id": None,
+        "replayed_from": run.get("run_id"),
+        "params": params,
+        "channel_names": channel_names,
+        "input_folder": in_folder,
+        "files": present,
+        "output_folder": out_folder,
+    }
+    on_progress(
+        f"Replay of {run.get('run_id')}: colocalization of "
+        f"{len(present)} file set(s) from {in_folder} -> "
+        f"{out_folder or 'no output folder (results are only returned)'}"
+    )
+    if dry_run:
+        for key, value in params.items():
+            on_progress(f"  {key} = {value!r}")
+        return {**plan, "dry_run": True}
+    if not present:
+        raise FileNotFoundError(f"No complete file sets found in {in_folder}")
+
+    worker = ColocalizationWorker(
+        present, channel_names, output_folder=out_folder, **params
+    )
+    if threads:
+        worker.thread_count = int(threads)
+    record = _ColocalizationRecord(
+        present,
+        channel_names,
+        params,
+        out_folder,
+        thread_count=worker.thread_count,
+        channel_folders=folders,
+        channel_patterns=patterns,
+        extra={"replayed_from": run.get("run_id")},
+    )
+    new_run_id = record.run_id
+
+    def on_result(result):
+        record.add_result(result)
+        on_progress(f"  done: {result.get('filename')}")
+
+    def on_error(file_pair_text, message):
+        record.add_error(file_pair_text, message)
+        on_progress(f"  error: {file_pair_text}: {message}")
+
+    worker.file_processed.connect(on_result)
+    worker.error_occurred.connect(on_error)
+    status = "failed"
+    try:
+        # Synchronously on this thread; the signals are delivered directly.
+        worker.run()
+        status = "finished"
+    finally:
+        record.finish(status)
+
+    on_progress(
+        f"Replay finished: {len(record.results)} file set(s), "
+        f"{len(record.errors)} error(s)"
+    )
+    return {
+        **plan,
+        "run_id": new_run_id,
+        "status": status,
+        "results": record.results,
+        "errors": record.errors,
+        "log_path": getattr(record.log, "path", None),
+    }

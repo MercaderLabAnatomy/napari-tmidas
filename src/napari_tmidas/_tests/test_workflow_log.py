@@ -211,6 +211,12 @@ class TestRecords:
         log.run_finished("abc", status="finished")
         assert "disk full" in capsys.readouterr().out
 
+    def test_bad_input_folder_never_raises(self, log_on, capsys):
+        log = wl.WorkflowLog(object())
+        assert not log.enabled
+        assert log.run_started(widget="batch_processing") is None
+        assert "Workflow log disabled" in capsys.readouterr().out
+
     def test_event_record(self, home, log_on):
         ws = _mkdir(home / "ws")
         wl.WorkflowLog(str(ws)).event(

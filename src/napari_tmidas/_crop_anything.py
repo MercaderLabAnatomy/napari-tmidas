@@ -103,6 +103,7 @@ from napari_tmidas._file_selector import (
     load_image_file as load_any_image,
 )
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
+from napari_tmidas._workflow_log import WorkflowLog
 from napari_tmidas.processing_functions.sam2_env_manager import (
     manager as sam2_manager,
 )
@@ -2838,11 +2839,13 @@ class BatchCropAnything:
             # Save using tifffile with explicit parameters for best compatibility
             imwrite(output_path, cropped_image, compression="zlib")
             self.viewer.status = f"Saved cropped image to {output_path}"
+            self._log_crop(image_path, output_path, "cropped_image")
 
             # Save the label image with exact same dimensions as original
             label_output_path = f"{base_name}_sam2_labels.tif"
             imwrite(label_output_path, label_image, compression="zlib")
             self.viewer.status += f"\nSaved label mask to {label_output_path}"
+            self._log_crop(image_path, label_output_path, "label_mask")
 
             # Make sure the segmentation layer is active again
             if self.label_layer is not None:
@@ -2853,6 +2856,26 @@ class BatchCropAnything:
         except (Exception, ValueError) as e:
             self.viewer.status = f"Error cropping image: {str(e)}"
             return False
+
+    def _log_crop(self, image_path, output_path, kind):
+        """Record one saved crop output in the workspace's workflow log."""
+        try:
+            label_ids = sorted(int(i) for i in self.selected_labels)
+            extra = {
+                "kind": kind,
+                "objects": len(label_ids),
+                "3d": self.use_3d,
+            }
+            if len(label_ids) <= 20:
+                extra["label_ids"] = label_ids
+            WorkflowLog(os.path.dirname(os.path.abspath(image_path))).event(
+                widget="crop_anything",
+                file=image_path,
+                output=output_path,
+                extra=extra,
+            )
+        except Exception as exc:
+            print(f"Workflow log: could not record crop: {exc}")
 
     def reset_sam2_state(self):
         """Reset SAM2 predictor state for 2D segmentation."""

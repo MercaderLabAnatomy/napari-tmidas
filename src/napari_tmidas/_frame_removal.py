@@ -13,9 +13,11 @@ Users can:
 """
 
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import numpy as np
+
+from napari_tmidas._workflow_log import WorkflowLog, relative_path
 
 # Lazy imports for optional heavy dependencies
 try:
@@ -86,6 +88,176 @@ except ImportError:
 
 if TYPE_CHECKING:
     import napari
+
+WIDGET_NAME = "frame_removal"
+FRAME_AXIS = 0
+
+
+def remove_frames(data, frames, axis: int = FRAME_AXIS):
+    """``data`` without the frames whose indices along ``axis`` are in ``frames``."""
+    drop = {int(f) for f in frames}
+    keep = [i for i in range(data.shape[axis]) if i not in drop]
+    return data[(slice(None),) * axis + (keep,)]
+
+
+def save_cleaned_image(filepath: str, data, is_tzyx: bool) -> None:
+    tifffile.imwrite(
+        filepath,
+        data,
+        compression="zlib",
+        metadata={"axes": "TZYX" if is_tzyx else "TYX"},
+    )
+
+
+def _record_frame_removal(
+    *,
+    source: Optional[str],
+    output: str,
+    frames: List[int],
+    is_tzyx: bool,
+    original_shape,
+    result_shape=None,
+    error: Optional[str] = None,
+    input_folder: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+):
+    """
+    Write one saved frame removal to the workflow log as a finished (or
+    failed) run. Returns ``(run_id, log_path)``; never raises.
+    """
+    try:
+        source = os.fspath(source) if source else None
+        output = os.path.abspath(output)
+        folder = input_folder or os.path.dirname(os.path.abspath(source or output))
+        log = WorkflowLog(folder, os.path.dirname(output))
+        run_id = log.run_started(
+            widget=WIDGET_NAME,
+            params={
+                "frames_removed": sorted(int(f) for f in frames),  # 0-based
+                "frame_axis": FRAME_AXIS,
+            },
+            files=[source] if source else [],
+            output_folder=os.path.dirname(output),
+            output_format="tiff",
+            # The replayer reads the source with tifffile.
+            replayable=bool(source)
+            and source.lower().endswith((".tif", ".tiff")),
+            extra={
+                "axes": "TZYX" if is_tzyx else "TYX",
+                "original_shape": [int(n) for n in original_shape],
+                "output_file": relative_path(output, log.input_folder),
+                **(extra or {}),
+            },
+        )
+        if error is None:
+            result = {"processed_file": output}
+            if source:
+                result["original_file"] = source
+            if result_shape is not None:
+                result["shape"] = [int(n) for n in result_shape]
+            log.run_finished(run_id, status="finished", results=[result])
+        else:
+            log.run_finished(
+                run_id,
+                status="failed",
+                errors=[{"file": source or output, "error": error}],
+            )
+        return run_id, log.path
+    except Exception as exc:
+        print(f"Workflow log: could not record frame removal: {exc}")
+        return None, None
+
+
+def replay_frame_removal_run(
+    run: Dict[str, Any],
+    *,
+    input_folder: Optional[str] = None,
+    output_folder: Optional[str] = None,
+    dry_run: bool = False,
+    on_progress: Callable[[str], None] = print,
+) -> Dict[str, Any]:
+    """
+    Repeat a recorded save: remove the same frames from the same source
+    file and write the result under the recorded output name. An output
+    that was inside the recorded input folder moves with ``input_folder``.
+    """
+    if run.get("widget") != WIDGET_NAME:
+        raise ValueError(f"Run {run.get('run_id')} is not a frame removal run")
+    params = run.get("params") or {}
+    extra = run.get("extra") or {}
+    frames = [int(f) for f in params.get("frames_removed") or []]
+    axis = int(params.get("frame_axis", FRAME_AXIS))
+    in_folder = os.path.abspath(input_folder or run.get("input_folder") or ".")
+    if not run.get("files"):
+        raise ValueError(f"Run {run.get('run_id')} has no source file")
+    source = os.path.join(in_folder, run["files"][0])
+    output = extra.get("output_file")
+    if not output:
+        raise ValueError(f"Run {run.get('run_id')} has no recorded output file")
+    if output_folder:
+        output = os.path.join(
+            os.path.abspath(output_folder), os.path.basename(output)
+        )
+    output = os.path.abspath(os.path.join(in_folder, output))
+
+    plan = {
+        "run_id": None,
+        "replayed_from": run.get("run_id"),
+        "widget": WIDGET_NAME,
+        "params": {"frames_removed": frames, "frame_axis": axis},
+        "input_folder": in_folder,
+        "files": [source],
+        "output_file": output,
+    }
+    on_progress(
+        f"Replay of {run.get('run_id')}: remove frames {frames} from "
+        f"{source} -> {output}"
+    )
+    if dry_run:
+        return {**plan, "dry_run": True}
+    if not os.path.isfile(source):
+        raise FileNotFoundError(f"Source file not found: {source}")
+
+    data = tifffile.imread(source)
+    expected = extra.get("original_shape")
+    if expected and list(data.shape) != list(expected):
+        raise ValueError(
+            f"{source} has shape {data.shape}, but the recorded run removed "
+            f"frames from shape {tuple(expected)}"
+        )
+    is_tzyx = extra.get("axes", "TZYX" if data.ndim == 4 else "TYX") == "TZYX"
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    cleaned = None
+    try:
+        cleaned = remove_frames(data, frames, axis)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        save_cleaned_image(output, cleaned, is_tzyx)
+        results.append({"original_file": source, "processed_file": output})
+    except (OSError, ValueError, RuntimeError) as exc:
+        errors.append({"file": source, "error": str(exc)})
+        on_progress(f"  error: {exc}")
+    run_id, log_path = _record_frame_removal(
+        source=source,
+        output=output,
+        frames=frames,
+        is_tzyx=is_tzyx,
+        original_shape=data.shape,
+        result_shape=None if cleaned is None else cleaned.shape,
+        error=errors[0]["error"] if errors else None,
+        input_folder=in_folder,
+        extra={"replayed_from": run.get("run_id")},
+    )
+    status = "failed" if errors else "finished"
+    on_progress(f"Replay {status}: {output}")
+    return {
+        **plan,
+        "run_id": run_id,
+        "status": status,
+        "results": results,
+        "errors": errors,
+        "log_path": log_path,
+    }
 
 
 class FrameRemovalWidget(QWidget):
@@ -451,14 +623,7 @@ class FrameRemovalWidget(QWidget):
         if self.original_data is None or not self.frames_to_remove:
             return self.original_data
 
-        # Create mask for frames to keep
-        num_frames = self.original_data.shape[0]
-        frames_to_keep = [i for i in range(num_frames) if i not in self.frames_to_remove]
-
-        # Remove frames along the time axis (first dimension)
-        cleaned_data = self.original_data[frames_to_keep]
-
-        return cleaned_data
+        return remove_frames(self.original_data, self.frames_to_remove)
 
     def _preview_result(self):
         """Preview the result by creating a new layer."""
@@ -518,13 +683,8 @@ class FrameRemovalWidget(QWidget):
             # Create cleaned data
             cleaned_data = self._create_cleaned_data()
 
-            # Save using tifffile
-            tifffile.imwrite(
-                filepath,
-                cleaned_data,
-                compression="zlib",
-                metadata={"axes": "TZYX" if self.is_tzyx else "TYX"},
-            )
+            save_cleaned_image(filepath, cleaned_data, self.is_tzyx)
+            self._record_save(filepath, result_shape=cleaned_data.shape)
 
             QMessageBox.information(
                 self,
@@ -540,9 +700,24 @@ class FrameRemovalWidget(QWidget):
             self.viewer.status = f"Saved cleaned image to {filepath}"
 
         except (OSError, ValueError, RuntimeError) as e:
+            self._record_save(filepath, error=str(e))
             QMessageBox.critical(
                 self, "Save Failed", f"Failed to save image:\n{str(e)}"
             )
+
+    def _record_save(self, filepath: str, result_shape=None, error=None):
+        """Record one save in the workflow log; never raises."""
+        source = getattr(getattr(self.image_layer, "source", None), "path", None)
+        _record_frame_removal(
+            source=source,
+            output=filepath,
+            frames=self.frames_to_remove,
+            is_tzyx=self.is_tzyx,
+            original_shape=self.original_data.shape,
+            result_shape=result_shape,
+            error=error,
+            extra={"layer": getattr(self.image_layer, "name", None)},
+        )
 
 
 @magicgui(call_button="Open Frame Removal Tool")

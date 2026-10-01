@@ -80,6 +80,23 @@ The end entry holds:
 File paths are stored relative to the input folder, so the log stays valid
 when you move or copy the whole experiment folder.
 
+### Other widgets
+
+The other widgets write to the same log:
+
+| Widget | What is recorded | Can be replayed |
+|---|---|---|
+| Microscopy Image Converter | input files and series, output folder, TIFF or Zarr, the output for each series; skipped files are listed as errors | yes |
+| ROI Colocalization | all analysis settings, the matched file sets per channel, the CSV and overlay outputs | yes |
+| Frame Removal | source file, the removed frames, output file | yes, when the image was opened from a TIFF file |
+| Label-Based Cropping | layer names and their source files, crop settings, the new layer | no (the result is a layer, not a file) |
+| Batch Label Inspection | one entry per saved label file, with the edited slices | no (manual edits) |
+| Batch Crop Anything | one entry per saved crop and label mask, with the selected objects | no (manual selection) |
+
+The manual widgets record *that* a file was saved and when, so the log
+shows which outputs were edited by hand. They do not record the edits
+themselves.
+
 ## Repeating a run
 
 ### In napari: load the settings of an earlier run
@@ -110,7 +127,7 @@ napari-tmidas-workflow replay <workspace> --all [--dry-run]
 
 A run id can be shortened to any prefix that is unique in the log.
 
-`replay` runs a recorded batch run again, without opening napari, with the
+`replay` runs a recorded run again, without opening napari, with the
 same function, parameters and files. It is recorded in the log like any
 other run, marked as a replay of the original.
 

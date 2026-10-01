@@ -90,6 +90,9 @@ def find_run(runs: List[Dict[str, Any]], run_id: str) -> Dict[str, Any]:
 # returns a dict with at least "status" and "errors".
 REPLAYERS = {
     BATCH_WIDGET: "napari_tmidas._workflow_replay:replay_batch_run",
+    "frame_removal": "napari_tmidas._frame_removal:replay_frame_removal_run",
+    "file_conversion": "napari_tmidas._file_conversion:replay_conversion_run",
+    "roi_colocalization": "napari_tmidas._roi_colocalization:replay_colocalization_run",
 }
 
 
@@ -195,7 +198,7 @@ def resolve_files(
     return files
 
 
-def _resolve_output_folder(run, input_folder, output_folder):
+def resolve_output_folder(run, input_folder, output_folder):
     if output_folder:
         return os.path.abspath(output_folder)
     recorded_out = run.get("output_folder")
@@ -257,7 +260,7 @@ def replay_batch_run(
     params = resolve_params(run.get("params") or {}, info.get("parameters") or {}, on_progress)
     in_folder = os.path.abspath(input_folder or run.get("input_folder") or ".")
     files = resolve_files(run, in_folder, on_progress)
-    out_folder = _resolve_output_folder(run, in_folder, output_folder)
+    out_folder = resolve_output_folder(run, in_folder, output_folder)
     func = info["func"]
     threads, thread_note = resolve_thread_count(func, params, run.get("thread_count") or 1)
     output_format = run.get("output_format") or "tiff"

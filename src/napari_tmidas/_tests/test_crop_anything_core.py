@@ -485,6 +485,38 @@ class TestCropWithSelectedLabels:
         assert (tmp_path / "embryo_07_sam2_cropped.tif").exists()
         assert (tmp_path / "embryo_07_sam2_labels.tif").exists()
 
+    def test_each_saved_output_is_logged(self, loaded, tmp_path, monkeypatch):
+        import napari_tmidas._workflow_log as wl
+
+        monkeypatch.delenv(wl.DISABLE_ENV, raising=False)
+        monkeypatch.delenv(wl.PATH_ENV, raising=False)
+        loaded.selected_labels = {2, 1}
+
+        assert loaded.crop_with_selected_labels() is True
+
+        records = wl.read_records(str(tmp_path / wl.LOG_NAME))
+        assert [r["output"] for r in records] == [
+            "scene_sam2_cropped.tif",
+            "scene_sam2_labels.tif",
+        ]
+        for record, kind in zip(records, ["cropped_image", "label_mask"]):
+            assert record["record"] == "event"
+            assert record["widget"] == "crop_anything"
+            assert record["file"] == "scene.tif"
+            assert record["replayable"] is False
+            assert record["extra"] == {
+                "kind": kind,
+                "objects": 2,
+                "3d": False,
+                "label_ids": [1, 2],
+            }
+
+    def test_nothing_is_logged_when_the_log_is_off(self, loaded, tmp_path):
+        loaded.selected_labels = {1}
+
+        assert loaded.crop_with_selected_labels() is True
+        assert not (tmp_path / "tmidas_workflow.jsonl").exists()
+
     def test_three_d_volume_is_cropped_across_frames(
         self, processor, tmp_path
     ):

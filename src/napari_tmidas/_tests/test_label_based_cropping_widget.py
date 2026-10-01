@@ -237,6 +237,99 @@ class TestCroppingWorker:
 
 
 @requires_gui
+class TestWorkflowLog:
+    """Each crop is one run in tmidas_workflow.jsonl next to its source file."""
+
+    @pytest.fixture
+    def log_on(self, monkeypatch):
+        import napari_tmidas._label_based_cropping_widget as mod
+
+        monkeypatch.delenv("NAPARI_TMIDAS_NO_WORKFLOW_LOG", raising=False)
+        monkeypatch.delenv("NAPARI_TMIDAS_WORKFLOW_LOG", raising=False)
+        monkeypatch.setattr(mod.QMessageBox, "warning", lambda *a, **k: None)
+        monkeypatch.setattr(mod.QMessageBox, "critical", lambda *a, **k: None)
+
+    def _viewer_from_file(self, make_napari_viewer, ws):
+        import tifffile
+        from napari.layers._source import layer_source
+
+        image = (np.arange(8 * 32 * 32) % 251).astype(np.uint8)
+        image = image.reshape(8, 32, 32)
+        tifffile.imwrite(str(ws / "raw.tif"), image)
+        labels = np.zeros((8, 32, 32), dtype=np.uint32)
+        labels[3, 8:16, 8:16] = 1
+        viewer = make_napari_viewer()
+        with layer_source(path=str(ws / "raw.tif")):
+            viewer.add_image(image, name="raw")
+        viewer.add_labels(labels, name="mask")  # drawn, no file
+        return viewer
+
+    def test_crop_is_recorded(self, make_napari_viewer, tmp_path, qtbot,
+                              log_on):
+        import napari_tmidas._workflow_replay as wr
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        viewer = self._viewer_from_file(make_napari_viewer, ws)
+        widget = LabelBasedCroppingWidget(viewer)
+        widget._crop_name_input.setText("roi")
+
+        widget._on_crop_clicked()
+        qtbot.waitUntil(lambda: "roi" in viewer.layers, timeout=10000)
+
+        (run,) = wr.load_runs(str(ws))
+        assert run["widget"] == "label_based_cropping"
+        assert run["status"] == "finished"
+        assert run["replayable"] is False
+        assert run["files"] == ["raw.tif"]
+        assert run["params"] == {
+            "output_name": "roi", "expand_z": False, "expand_time": False,
+        }
+        assert run["extra"]["image_layer"] == "raw"
+        assert run["extra"]["label_layer"] == "mask"
+        assert run["extra"]["image_source"] == "raw.tif"
+        assert run["extra"]["label_source"] is None
+        assert run["extra"]["image_shape"] == [8, 32, 32]
+        assert run["results"][0]["output_layer"] == "roi"
+        assert run["results"][0]["original_file"] == "raw.tif"
+        assert run["results"][0]["shape"] == list(viewer.layers["roi"].data.shape)
+
+    def test_failed_crop_is_recorded(self, make_napari_viewer, tmp_path,
+                                     log_on):
+        import napari_tmidas._workflow_replay as wr
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        viewer = self._viewer_from_file(make_napari_viewer, ws)
+        widget = LabelBasedCroppingWidget(viewer)
+        widget._crop_name = "cropped"
+        widget._source_layer = viewer.layers["raw"]
+        widget._record_crop_started(viewer.layers["raw"], viewer.layers["mask"])
+
+        widget._on_crop_finished(False, "Error during cropping: boom", None)
+
+        (run,) = wr.load_runs(str(ws))
+        assert run["status"] == "failed"
+        assert run["errors"] == [
+            {"file": "raw.tif", "error": "Error during cropping: boom"}
+        ]
+
+    def test_layers_without_files_record_nothing(
+        self, viewer_with_layers, tmp_path, qtbot, monkeypatch, log_on
+    ):
+        monkeypatch.chdir(tmp_path)
+        widget = LabelBasedCroppingWidget(viewer_with_layers)
+
+        widget._on_crop_clicked()
+        qtbot.waitUntil(
+            lambda: "cropped" in viewer_with_layers.layers, timeout=10000
+        )
+
+        assert widget._log is None
+        assert list(tmp_path.rglob("tmidas_workflow.jsonl")) == []
+
+
+@requires_gui
 class TestInfoText:
     def test_messages_accumulate(self, viewer_with_layers):
         widget = LabelBasedCroppingWidget(viewer_with_layers)

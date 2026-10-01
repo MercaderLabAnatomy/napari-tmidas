@@ -1014,3 +1014,214 @@ def test_microscopy_converter_factory(make_napari_viewer):
 def test_dock_widget_hook_exposes_the_converter():
     hook = fc.napari_experimental_provide_dock_widget()
     assert hook is fc.microscopy_converter or callable(hook)
+
+
+# --------------------------------------------------------------------------
+# Workflow log: recording and replay
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slide_workspace(tmp_path, monkeypatch):
+    """
+    A workspace with two plain-TIFF ``.svs`` slides and one unreadable one,
+    converted through TIFFSlideLoader's tifffile fallback.
+    """
+    import napari_tmidas._workflow_log as wl
+
+    monkeypatch.delenv(wl.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(fc, "TiffSlide", None)
+    ws = tmp_path / "ws"
+    (ws / "raw").mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    data = {}
+    for name in ("a", "b"):
+        path = ws / "raw" / f"{name}.svs"
+        data[name] = rng.integers(0, 255, (16, 24), dtype=np.uint8)
+        tifffile.imwrite(path, data[name])
+    (ws / "raw" / "broken.svs").write_bytes(b"not a tiff")
+    return ws, data
+
+
+def _log_runs(folder):
+    import napari_tmidas._workflow_log as wl
+
+    return wl.merge_runs(wl.read_records(str(folder / wl.LOG_NAME)))
+
+
+class SyncConversionWorker(fc.ConversionWorker):
+    """Runs on the calling thread so the widget's slots fire in order."""
+
+    def start(self):
+        self.run()
+
+
+def test_module_level_get_file_loader(tmp_path):
+    assert fc.get_file_loader(str(tmp_path / "x.svs")) is fc.TIFFSlideLoader
+    assert fc.get_file_loader(str(tmp_path / "x.xyz")) is None
+    assert fc.get_file_loader(str(tmp_path / "x.czi"), loaders=()) is None
+
+
+@requires_gui
+class TestConversionWorkflowLog:
+    @pytest.fixture
+    def widget(self, make_napari_viewer, monkeypatch):
+        warnings = []
+
+        class Box:
+            @staticmethod
+            def warning(*args):
+                warnings.append(args)
+
+            critical = warning
+
+        monkeypatch.setattr(fc, "QMessageBox", Box)
+        widget = fc.MicroscopyImageConverterWidget(make_napari_viewer())
+        widget.warnings = warnings
+        return widget
+
+    def test_run_is_recorded(self, widget, slide_workspace, monkeypatch):
+        ws, _ = slide_workspace
+        monkeypatch.setattr(fc, "ConversionWorker", SyncConversionWorker)
+        widget.folder_edit.setText(str(ws))
+        out = ws / "converted"
+        out.mkdir()  # convert_files validates (creates) it before this
+        raw = ws / "raw"
+
+        widget._start_conversion_worker(
+            [(str(raw / "a.svs"), 0), (str(raw / "broken.svs"), 0)],
+            str(out),
+        )
+
+        (run,) = _log_runs(ws)
+        assert run["widget"] == "file_conversion"
+        assert run["files"] == ["raw/a.svs", "raw/broken.svs"]
+        assert run["output_folder"] == str(out)
+        assert run["output_format"] == "tiff"
+        assert run["replayable"] is True
+        assert run["extra"] == {
+            "series": [["raw/a.svs", 0], ["raw/broken.svs", 0]],
+            "use_zarr": False,
+        }
+        assert run["status"] == "finished"
+        assert run["results"] == [
+            {
+                "original_file": "raw/a.svs",
+                "series_index": 0,
+                "processed_file": "converted/a_series0.tif",
+            }
+        ]
+        assert [e["file"] for e in run["errors"]] == ["raw/broken.svs"]
+        assert len(widget.warnings) == 1
+        assert widget._workflow_run_id is None
+
+    def test_cancel_writes_one_finish_record(
+        self, widget, slide_workspace, monkeypatch
+    ):
+        import napari_tmidas._workflow_log as wl
+
+        ws, _ = slide_workspace
+        made = []
+
+        class IdleWorker(fc.ConversionWorker):
+            def start(self):
+                made.append(self)
+
+            def isRunning(self):
+                return True
+
+        monkeypatch.setattr(fc, "ConversionWorker", IdleWorker)
+        widget.folder_edit.setText(str(ws))
+        widget.zarr_radio.setChecked(True)
+        widget._start_conversion_worker(
+            [(str(ws / "raw" / "a.svs"), 0)], str(ws / "converted")
+        )
+
+        widget.cancel_operation()
+        # The worker still reports its end after the stop request.
+        made[0].finished.emit(0)
+
+        records = wl.read_records(str(ws / wl.LOG_NAME))
+        assert [r["record"] for r in records] == [
+            "run_started",
+            "run_finished",
+        ]
+        assert records[0]["output_format"] == "zarr"
+        assert records[1]["status"] == "cancelled"
+
+
+class TestConversionReplay:
+    def _record(self, ws):
+        raw = ws / "raw"
+        queue = [(str(raw / "a.svs"), 0), (str(raw / "b.svs"), 0)]
+        log, run_id, _ = fc._record_conversion_started(
+            str(ws), queue, str(ws / "converted"), False
+        )
+        log.run_finished(run_id, status="finished")
+        return run_id
+
+    def _run(self, ws, run_id):
+        return next(r for r in _log_runs(ws) if r["run_id"] == run_id)
+
+    def test_replay_converts_and_records(self, qapp, slide_workspace):
+        ws, data = slide_workspace
+        run_id = self._record(ws)
+        lines = []
+
+        outcome = fc.replay_conversion_run(
+            self._run(ws, run_id), on_progress=lines.append
+        )
+
+        assert outcome["status"] == "finished"
+        assert outcome["errors"] == []
+        for name in ("a", "b"):
+            np.testing.assert_array_equal(
+                tifffile.imread(ws / "converted" / f"{name}_series0.tif"),
+                data[name],
+            )
+        replay = self._run(ws, outcome["run_id"])
+        assert replay["extra"]["replayed_from"] == run_id
+        assert replay["extra"]["series"] == [["raw/a.svs", 0], ["raw/b.svs", 0]]
+        assert replay["status"] == "finished"
+        assert len(replay["results"]) == 2
+
+    def test_replay_follows_a_moved_workspace(
+        self, qapp, slide_workspace, tmp_path
+    ):
+        import shutil
+
+        ws, _ = slide_workspace
+        run = self._run(ws, self._record(ws))
+        moved = tmp_path / "moved"
+        shutil.copytree(ws, moved)
+        os.remove(moved / "raw" / "b.svs")
+        lines = []
+
+        outcome = fc.replay_conversion_run(
+            run, input_folder=str(moved), on_progress=lines.append
+        )
+
+        assert outcome["output_folder"] == str(moved / "converted")
+        assert (moved / "converted" / "a_series0.tif").is_file()
+        assert not (ws / "converted").exists()
+        assert any("no longer exist" in line for line in lines)
+        assert len(outcome["results"]) == 1
+
+    def test_dry_run_writes_nothing(self, qapp, slide_workspace):
+        ws, _ = slide_workspace
+        run_id = self._record(ws)
+        lines = []
+
+        plan = fc.replay_conversion_run(
+            self._run(ws, run_id), dry_run=True, on_progress=lines.append
+        )
+
+        assert plan["dry_run"] is True
+        assert len(plan["files"]) == 2
+        assert not (ws / "converted").exists()
+        assert len(_log_runs(ws)) == 1
+        assert any("a_series0.tif" in line for line in lines)
+
+    def test_rejects_other_widgets(self):
+        with pytest.raises(ValueError):
+            fc.replay_conversion_run({"widget": "batch_processing"})

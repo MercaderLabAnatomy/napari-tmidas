@@ -407,12 +407,14 @@ class WorkflowLog:
     """
 
     def __init__(self, input_folder, output_folder=None):
-        self.input_folder = os.path.abspath(os.fspath(input_folder)) if input_folder else None
+        self.input_folder: Optional[str] = None
         self.path: Optional[str] = None
         self._t0: Dict[str, float] = {}
-        if is_disabled() or not self.input_folder:
-            return
         try:
+            if input_folder:
+                self.input_folder = os.path.abspath(os.fspath(input_folder))
+            if is_disabled() or not self.input_folder:
+                return
             self.path = resolve_log_path(self.input_folder, output_folder)
         except Exception as exc:
             print(f"Workflow log disabled for this run: {exc}")

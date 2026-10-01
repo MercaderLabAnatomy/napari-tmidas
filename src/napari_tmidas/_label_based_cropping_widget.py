@@ -91,6 +91,7 @@ except ImportError:
 if TYPE_CHECKING:
     import napari
 
+from napari_tmidas._workflow_log import WorkflowLog, relative_path
 from napari_tmidas.processing_functions.label_based_cropping import (
     _crop_image_with_label,
     _expand_label_to_3d,
@@ -185,6 +186,8 @@ class LabelBasedCroppingWidget(QWidget if _HAS_QTPY else object):
         super().__init__()
         self._viewer = viewer
         self._worker = None
+        self._log = None
+        self._log_run_id = None
 
         if not _HAS_QTPY or not _HAS_NAPARI:
             return
@@ -500,6 +503,8 @@ class LabelBasedCroppingWidget(QWidget if _HAS_QTPY else object):
         # Store source layer for adding result back (in main thread)
         self._source_layer = image_layer
 
+        self._record_crop_started(image_layer, label_layer)
+
         # Disable button during processing
         self._crop_button.setEnabled(False)
         self._update_info("Starting cropping operation...")
@@ -517,6 +522,7 @@ class LabelBasedCroppingWidget(QWidget if _HAS_QTPY else object):
         """Handle worker completion"""
         self._update_info(message)
         self._crop_button.setEnabled(True)
+        self._record_crop_finished(success, message, cropped_data)
 
         if success and cropped_data is not None:
             # Add result to viewer (safe - we're in main thread)
@@ -532,6 +538,75 @@ class LabelBasedCroppingWidget(QWidget if _HAS_QTPY else object):
             self._update_info(f"Added result as '{self._crop_name}'")
         elif not success:
             QMessageBox.critical(self, "Error", message)
+
+    def _record_crop_started(self, image_layer, label_layer):
+        """
+        Start a workflow-log run for one crop. The log lives next to the
+        first layer that came from a file; without one nothing is recorded.
+        Never raises.
+        """
+        self._log = self._log_run_id = None
+        try:
+            sources = {}
+            for role, layer in (("image", image_layer), ("label", label_layer)):
+                path = getattr(getattr(layer, "source", None), "path", None)
+                sources[role] = os.path.abspath(os.fspath(path)) if path else None
+            files = list(
+                dict.fromkeys(p for p in sources.values() if p and os.path.exists(p))
+            )
+            if not files:
+                return
+            folder = os.path.dirname(files[0])
+            self._log = WorkflowLog(folder)
+            self._log_run_id = self._log.run_started(
+                widget="label_based_cropping",
+                params={
+                    "output_name": self._crop_name,
+                    "expand_z": self._expand_z_checkbox.isChecked(),
+                    "expand_time": self._expand_time_checkbox.isChecked(),
+                },
+                files=files,
+                # The label layer is usually drawn by hand in the viewer and
+                # the result is a layer, not a file: nothing to repeat yet.
+                replayable=False,
+                extra={
+                    "image_layer": image_layer.name,
+                    "label_layer": label_layer.name,
+                    "image_source": relative_path(sources["image"], folder),
+                    "label_source": relative_path(sources["label"], folder),
+                    "image_shape": list(np.shape(image_layer.data)),
+                    "label_shape": list(np.shape(label_layer.data)),
+                    "output_layer": self._crop_name,
+                },
+            )
+        except Exception as exc:
+            print(f"Workflow log: could not record crop: {exc}")
+
+    def _record_crop_finished(self, success: bool, message: str, cropped_data):
+        """Finish the run started by ``_record_crop_started``; never raises."""
+        log, run_id = self._log, self._log_run_id
+        self._log = self._log_run_id = None
+        if log is None or run_id is None:
+            return
+        try:
+            source = getattr(getattr(self._source_layer, "source", None), "path", None)
+            source = os.fspath(source) if source else None
+            if success and cropped_data is not None:
+                result = {
+                    "output_layer": self._crop_name,
+                    "shape": list(np.shape(cropped_data)),
+                }
+                if source:
+                    result["original_file"] = source
+                log.run_finished(run_id, status="finished", results=[result])
+            else:
+                log.run_finished(
+                    run_id,
+                    status="failed",
+                    errors=[{"file": source, "error": message}],
+                )
+        except Exception as exc:
+            print(f"Workflow log: could not record crop: {exc}")
 
 
 @magicgui(call_button="Open Label-Based Cropping", layout="vertical")

@@ -1377,3 +1377,218 @@ class TestAnalyzerFactory:
         built.closeEvent(QCloseEvent())
 
         assert built.worker is None
+
+
+# --------------------------------------------------------------------------
+# Workflow log: recording and replay
+# --------------------------------------------------------------------------
+
+
+def _log_runs(folder):
+    import napari_tmidas._workflow_log as wl
+
+    return wl.merge_runs(wl.read_records(str(folder / wl.LOG_NAME)))
+
+
+@pytest.fixture
+def coloc_workspace(tmp_path, monkeypatch):
+    """Two samples in two channel folders, below one workspace folder."""
+    import napari_tmidas._workflow_log as wl
+
+    monkeypatch.delenv(wl.DISABLE_ENV, raising=False)
+    ws = tmp_path / "ws"
+    for channel, make in (("chan1", make_c1), ("chan2", make_c2)):
+        (ws / channel).mkdir(parents=True)
+        for sample in ("s1", "s2"):
+            tifffile.imwrite(ws / channel / f"{sample}_labels.tif", make())
+    return ws
+
+
+class SyncColocalizationWorker(rc.ColocalizationWorker):
+    """Runs on the calling thread so the widget's slots fire in order."""
+
+    def start(self):
+        self.run()
+
+
+def _analyse(widget, ws):
+    widget.ch1_folder.setText(str(ws / "chan1"))
+    widget.ch2_folder.setText(str(ws / "chan2"))
+    widget.output_folder.setText(str(ws / "out"))
+    widget.save_images_checkbox.setChecked(True)
+    widget.get_sizes_checkbox.setChecked(True)
+    widget.thread_count.setValue(1)
+    widget.find_matching_files()
+    widget.start_analysis()
+
+
+class TestColocalizationWorkflowLog:
+    def test_run_is_recorded(self, widget, coloc_workspace, monkeypatch):
+        ws = coloc_workspace
+        monkeypatch.setattr(
+            rc, "ColocalizationWorker", SyncColocalizationWorker
+        )
+
+        _analyse(widget, ws)
+
+        (run,) = _log_runs(ws)
+        assert run["widget"] == "roi_colocalization"
+        assert run["replayable"] is True
+        assert run["status"] == "finished"
+        assert run["output_folder"] == str(ws / "out")
+        assert run["thread_count"] == 1
+        assert run["params"]["channel_names"] == ["chan1", "chan2"]
+        assert run["params"]["get_sizes"] is True
+        assert run["params"]["size_method"] == "median"
+        assert run["params"]["threshold_value"] == 75.0
+        assert sorted(run["files"]) == [
+            "chan1/s1_labels.tif",
+            "chan1/s2_labels.tif",
+            "chan2/s1_labels.tif",
+            "chan2/s2_labels.tif",
+        ]
+        extra = run["extra"]
+        assert sorted(extra["pairs"]) == [
+            ["chan1/s1_labels.tif", "chan2/s1_labels.tif"],
+            ["chan1/s2_labels.tif", "chan2/s2_labels.tif"],
+        ]
+        assert extra["channel_folders"] == ["chan1", "chan2"]
+        assert extra["channel_patterns"] == ["*_labels.tif", "*_labels.tif"]
+        assert extra["csv_file"] == "out/chan1_chan2_colocalization.csv"
+        assert sorted(r["processed_file"] for r in run["results"]) == [
+            "out/s1_labels_chan1_chan2_coloc.tif",
+            "out/s2_labels_chan1_chan2_coloc.tif",
+        ]
+        assert run["errors"] == []
+
+    def test_errors_are_recorded_against_channel_one(
+        self, widget, coloc_workspace, monkeypatch
+    ):
+        ws = coloc_workspace
+        tifffile.imwrite(
+            ws / "chan2" / "s2_labels.tif", np.zeros((4, 4), np.uint16)
+        )
+        monkeypatch.setattr(
+            rc, "ColocalizationWorker", SyncColocalizationWorker
+        )
+
+        _analyse(widget, ws)
+
+        (run,) = _log_runs(ws)
+        assert [e["file"] for e in run["errors"]] == ["chan1/s2_labels.tif"]
+        assert len(run["results"]) == 1
+
+    def test_cancel_writes_one_finish_record(
+        self, widget, coloc_workspace, monkeypatch
+    ):
+        import napari_tmidas._workflow_log as wl
+
+        ws = coloc_workspace
+        made = []
+
+        def factory(*args, **kwargs):
+            worker = FakeWorker(*args, **kwargs)
+            worker.running = True
+            made.append(worker)
+            return worker
+
+        monkeypatch.setattr(rc, "ColocalizationWorker", factory)
+        _analyse(widget, ws)
+
+        widget.cancel_analysis()
+        # A stopped worker still reports its end afterwards.
+        widget.processing_finished()
+
+        records = wl.read_records(str(ws / wl.LOG_NAME))
+        assert [r["record"] for r in records] == [
+            "run_started",
+            "run_finished",
+        ]
+        assert records[1]["status"] == "cancelled"
+
+
+class TestColocalizationReplay:
+    @pytest.fixture
+    def recorded(self, widget, coloc_workspace, monkeypatch):
+        import shutil
+
+        monkeypatch.setattr(
+            rc, "ColocalizationWorker", SyncColocalizationWorker
+        )
+        _analyse(widget, coloc_workspace)
+        shutil.rmtree(coloc_workspace / "out")
+        (run,) = _log_runs(coloc_workspace)
+        return coloc_workspace, run
+
+    def test_replay_reproduces_the_outputs(self, recorded):
+        ws, run = recorded
+        lines = []
+
+        outcome = rc.replay_colocalization_run(run, on_progress=lines.append)
+
+        assert outcome["status"] == "finished"
+        assert outcome["errors"] == []
+        csv_path = ws / "out" / "chan1_chan2_colocalization.csv"
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+        assert len(rows) == 1 + 4  # header + 2 ROIs x 2 samples
+        assert (ws / "out" / "s1_labels_chan1_chan2_coloc.tif").exists()
+        replay = next(
+            r for r in _log_runs(ws) if r["run_id"] == outcome["run_id"]
+        )
+        assert replay["extra"]["replayed_from"] == run["run_id"]
+        assert replay["params"] == run["params"]
+        assert replay["status"] == "finished"
+        assert len(replay["results"]) == 2
+
+    def test_renamed_files_are_matched_again(self, recorded, tmp_path):
+        ws, run = recorded
+        moved = tmp_path / "moved"
+        for channel in ("chan1", "chan2"):
+            (moved / channel).mkdir(parents=True)
+            for sample in ("s1", "s2"):
+                os.replace(
+                    ws / channel / f"{sample}_labels.tif",
+                    moved / channel / f"new_{sample}_labels.tif",
+                )
+        lines = []
+
+        outcome = rc.replay_colocalization_run(
+            run, input_folder=str(moved), on_progress=lines.append
+        )
+
+        assert outcome["output_folder"] == str(moved / "out")
+        assert len(outcome["results"]) == 2
+        assert (moved / "out" / "chan1_chan2_colocalization.csv").exists()
+        assert any("Matched the channel folders again" in x for x in lines)
+
+    def test_dry_run_writes_nothing(self, recorded):
+        ws, run = recorded
+        lines = []
+
+        plan = rc.replay_colocalization_run(
+            run, dry_run=True, on_progress=lines.append
+        )
+
+        assert plan["dry_run"] is True
+        assert len(plan["files"]) == 2
+        assert plan["channel_names"] == ["chan1", "chan2"]
+        assert not (ws / "out").exists()
+        assert len(_log_runs(ws)) == 1
+        assert "  size_method = 'median'" in lines
+
+    def test_unknown_settings_are_dropped(self, recorded):
+        ws, run = recorded
+        run = {**run, "params": {**run["params"], "retired": 1}}
+        lines = []
+
+        plan = rc.replay_colocalization_run(
+            run, dry_run=True, on_progress=lines.append
+        )
+
+        assert "retired" not in plan["params"]
+        assert any("'retired' no longer exists" in x for x in lines)
+
+    def test_rejects_other_widgets(self):
+        with pytest.raises(ValueError):
+            rc.replay_colocalization_run({"widget": "file_conversion"})
