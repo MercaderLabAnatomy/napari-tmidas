@@ -85,6 +85,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 - **[Label-Based Cropping](docs/label_based_cropping.md)** - Interactive ROI extraction with label expansion
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
+- **[Workflow Log](docs/workflow_log.md)** - Every batch run is recorded in `tmidas_workflow.jsonl` in your data folder: function, parameters, files, outputs and versions
 
 ### Advanced Features
 

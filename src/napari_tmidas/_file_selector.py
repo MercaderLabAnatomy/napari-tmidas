@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import sys
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -188,6 +189,7 @@ if not _HAS_QTPY:
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
+from napari_tmidas._workflow_log import WorkflowLog, param_schema
 
 sys.path.append("src/napari_tmidas")
 from napari_tmidas._reader import tiff_reader_function
@@ -2891,6 +2893,14 @@ class ProcessingWorker(QThread):
         self.processing_finished.emit()
 
     def process_file(self, filepath):
+        """Process one file; the result also records how long it took."""
+        t0 = time.monotonic()
+        result = self._process_file_impl(filepath)
+        if isinstance(result, dict):
+            result["elapsed_s"] = round(time.monotonic() - t0, 3)
+        return result
+
+    def _process_file_impl(self, filepath):
         """Process a single file with support for large TIFF and Zarr files"""
         try:
             # Pre-load filter: functions can attach a file_pre_filter(filepath, params)
@@ -4573,12 +4583,81 @@ class FileResultsWidget(QWidget):
         self.worker.file_processed.connect(self.file_processed)
         self.worker.processing_finished.connect(self.processing_finished)
         self.worker.error_occurred.connect(self.processing_error)
+        # QThread.finished also fires when run() died on an exception and
+        # never reached processing_finished.
+        self.worker.finished.connect(self._on_worker_thread_finished)
+
+        # Record the run before it starts, so a crash still leaves the
+        # settings needed to repeat it.
+        self._record_run_started(
+            selected_function_name,
+            function_info,
+            param_values,
+            output_folder,
+            output_suffix,
+            output_format,
+            worker_thread_count,
+        )
 
         # Start processing
         self.worker.start()
 
         # Update status
         self.viewer.status = f"Processing {len(self.file_list)} files with {selected_function_name} using {worker_thread_count} threads"
+
+    # ------------------------------------------------------------------
+    # Workflow log
+    # ------------------------------------------------------------------
+    def _record_run_started(
+        self,
+        function_name,
+        function_info,
+        param_values,
+        output_folder,
+        output_suffix,
+        output_format,
+        thread_count,
+    ):
+        self._workflow_run_id = None
+        self._workflow_errors = []
+        self._workflow_cancel_requested = False
+        input_folder =self.input_folder or (
+            os.path.dirname(self.file_list[0]) if self.file_list else None
+        )
+        self._workflow_log = WorkflowLog(input_folder, output_folder)
+        self._workflow_run_id = self._workflow_log.run_started(
+            widget="batch_processing",
+            function=function_name,
+            func=function_info.get("func"),
+            params=param_values,
+            param_schema=param_schema(function_info.get("parameters")),
+            files=self.file_list,
+            input_suffix=self.input_suffix,
+            output_folder=output_folder,
+            output_suffix=output_suffix,
+            output_format=output_format,
+            thread_count=thread_count,
+            dimension_order=param_values.get("dimension_order"),
+        )
+
+    def _record_run_finished(self, status):
+        """Write the run's end record once, whichever signal comes first."""
+        run_id = getattr(self, "_workflow_run_id", None)
+        if run_id is None:
+            return
+        self._workflow_run_id = None
+        if getattr(self, "_workflow_cancel_requested", False):
+            status = "cancelled"
+        self._workflow_log.run_finished(
+            run_id,
+            status=status,
+            results=self.processed_files_info,
+            errors=self._workflow_errors,
+        )
+
+    def _on_worker_thread_finished(self):
+        # Only reached with the run still open when the worker raised.
+        self._record_run_finished("failed")
 
     def update_progress(self, value):
         """Update the progress bar"""
@@ -4599,6 +4678,8 @@ class FileResultsWidget(QWidget):
 
         # Clean up worker
         self.worker = None
+
+        self._record_run_finished("finished")
 
         # Update status
         self.viewer.status = (
@@ -4656,6 +4737,8 @@ class FileResultsWidget(QWidget):
         enhanced_error = _enhance_processing_error_message(error_msg)
         print(f"Error processing {filepath}: {enhanced_error}")
         self.viewer.status = f"Error processing {filepath}: {enhanced_error}"
+        if getattr(self, "_workflow_run_id", None) is not None:
+            self._workflow_errors.append({"file": filepath, "error": error_msg})
 
     def cancel_processing(self):
         """Cancel the current processing operation"""
@@ -4666,6 +4749,11 @@ class FileResultsWidget(QWidget):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()  # Wait for the thread to finish
+
+            # The worker's last file_processed signals and its
+            # processing_finished are still queued behind wait(); the end
+            # record is written there, after the last result has arrived.
+            self._workflow_cancel_requested = True
 
             # Update UI
             self.batch_button.setEnabled(True)
