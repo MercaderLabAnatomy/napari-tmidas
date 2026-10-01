@@ -80,6 +80,60 @@ The end entry holds:
 File paths are stored relative to the input folder, so the log stays valid
 when you move or copy the whole experiment folder.
 
+## Repeating a run
+
+### In napari: load the settings of an earlier run
+
+In the batch processing widget, click **Load settings from log…** (next to
+the function selector) and open a `tmidas_workflow.jsonl`. A list of the
+recorded batch runs appears below, newest first. Pick one, and the widget
+is filled in with that run's function, parameters, Dimension Order, output
+folder and output format. Check them, change what you need, and press
+**Start Batch Processing** as usual.
+
+This is the way to apply the exact settings you tuned on one experiment to
+the next one.
+
+### From the command line
+
+The plugin installs a `napari-tmidas-workflow` command. `<workspace>` is a
+`tmidas_workflow.jsonl` file, or a folder that has one (in it, above it, or
+below it).
+
+```sh
+napari-tmidas-workflow list   <workspace>              # table of runs: id, time, function, status, number of files
+napari-tmidas-workflow show   <workspace> <run_id>     # everything recorded about one run
+napari-tmidas-workflow render <workspace>              # rewrite tmidas_workflow.md
+napari-tmidas-workflow replay <workspace> --run <run_id> [--input-folder P] [--output-folder P] [--dry-run]
+napari-tmidas-workflow replay <workspace> --all [--dry-run]
+```
+
+A run id can be shortened to any prefix that is unique in the log.
+
+`replay` runs a recorded batch run again, without opening napari, with the
+same function, parameters and files. It is recorded in the log like any
+other run, marked as a replay of the original.
+
+- `--dry-run` shows what would run (files, folders, every parameter) and
+  writes nothing. Use it first.
+- `--input-folder` runs the same settings on another folder, for example a
+  new experiment, or the same data after moving it. An output folder that
+  was inside the old input folder moves along with it; `--output-folder`
+  sets it explicitly.
+- `--all` repeats every replayable run of the log in the order they were
+  first run, each in its own recorded folders. For a chained workflow this
+  rebuilds every step from the raw data.
+
+Replay checks the recorded settings against the installed version of
+napari-tmidas: a parameter that no longer exists is skipped with a warning,
+a new parameter takes its default value, and a value that no longer fits
+the parameter stops the replay with an error. Recorded files that are gone
+are skipped with a warning; if none are left, the input folder is scanned
+again with the recorded file suffix.
+
+On a computer without a display (a server or cluster node), set
+`QT_QPA_PLATFORM=offscreen` before running `napari-tmidas-workflow`.
+
 ## What a log cannot reproduce
 
 A log describes **what was done**. Repeating it gives the same method on

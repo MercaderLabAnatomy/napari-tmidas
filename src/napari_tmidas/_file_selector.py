@@ -98,6 +98,7 @@ try:
         QCheckBox,
         QComboBox,
         QDoubleSpinBox,
+        QFileDialog,
         QFormLayout,
         QFrame,
         QHBoxLayout,
@@ -126,6 +127,7 @@ except ImportError:
         QPushButton
     ) = None
     QScrollArea = QSpinBox = QSplitter = QTableWidget = QTableWidgetItem = QVBoxLayout = QWidget = None
+    QFileDialog = None
     _HAS_QTPY = False
 
 try:
@@ -189,7 +191,11 @@ if not _HAS_QTPY:
 # Import registry and processing functions
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
-from napari_tmidas._workflow_log import WorkflowLog, param_schema
+from napari_tmidas._workflow_log import (
+    WorkflowLog,
+    param_schema,
+    relative_path,
+)
 
 sys.path.append("src/napari_tmidas")
 from napari_tmidas._reader import tiff_reader_function
@@ -2407,6 +2413,41 @@ class ProcessedFilesTableWidget(QTableWidget):
         self._load_original_image(filepath)
 
 
+def convert_parameter_value(param_info: Dict[str, Any], value, strict: bool = False):
+    """
+    Convert a raw parameter value (widget text or a recorded value) to the
+    type the registry declares for it.
+
+    A value that does not convert is kept as it is, which is what the batch
+    widget has always passed on. With ``strict`` it raises ``ValueError``
+    instead, unless the value is one of the parameter's listed options.
+    """
+    param_type = param_info.get("type")
+    if param_info.get("widget_type") == "channel_selector":
+        if value == "all":
+            return "all"
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return value
+    if value is None or not callable(param_type) or param_type is str:
+        return value
+    if param_type is bool and isinstance(value, str):
+        if value.strip().lower() in ("true", "1", "yes"):
+            return True
+        if value.strip().lower() in ("false", "0", "no", ""):
+            return False
+    try:
+        return param_type(value)
+    except (ValueError, TypeError) as exc:
+        options = param_info.get("options") or param_info.get("choices") or []
+        if not strict or str(value) in [str(o) for o in options]:
+            return value
+        raise ValueError(
+            f"{value!r} cannot be converted to {getattr(param_type, '__name__', param_type)}"
+        ) from exc
+
+
 class ParameterWidget(QWidget):
     """
     Widget to display and edit processing function parameters
@@ -2554,43 +2595,24 @@ class ParameterWidget(QWidget):
         """
         values = {}
         for param_name, widget in self.param_widgets.items():
-            param_type = self.parameters[param_name]["type"]
-            widget_type = self.parameters[param_name].get("widget_type")
+            param_info = self.parameters[param_name]
 
             if isinstance(widget, QComboBox):
-                # For channel selector, use currentData() to get the actual value
-                if widget_type == "channel_selector":
-                    data = widget.currentData()
-                    if data == "all":
-                        values[param_name] = "all"
-                    else:
-                        # Convert to int if it's a specific channel number
-                        try:
-                            values[param_name] = int(data)
-                        except (ValueError, TypeError):
-                            values[param_name] = data
+                # The channel selector keeps its value in the item data;
+                # other dropdowns show it as text.
+                if param_info.get("widget_type") == "channel_selector":
+                    raw = widget.currentData()
                 else:
-                    # For dropdown, get the selected text and convert to appropriate type
-                    text_value = widget.currentText()
-                    try:
-                        values[param_name] = (
-                            param_type(text_value)
-                            if param_type is not str
-                            else text_value
-                        )
-                    except (ValueError, TypeError):
-                        values[param_name] = text_value
+                    raw = widget.currentText()
+                values[param_name] = convert_parameter_value(param_info, raw)
             elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 values[param_name] = widget.value()
             elif isinstance(widget, QCheckBox):
                 values[param_name] = widget.isChecked()
             else:
-                # For text inputs, try to convert to the appropriate type
-                try:
-                    values[param_name] = param_type(widget.text())
-                except (ValueError, TypeError):
-                    # Fall back to string if conversion fails
-                    values[param_name] = widget.text()
+                values[param_name] = convert_parameter_value(
+                    param_info, widget.text()
+                )
 
         return values
 
@@ -2750,6 +2772,19 @@ class ParameterWidget(QWidget):
             self.update_channel_selector(self.file_list)
 
 
+def find_matching_files(input_folder: str, input_suffix: str) -> List[str]:
+    """Files directly in ``input_folder`` ending in one of the comma-separated
+    suffixes (``.tif`` when none is given)."""
+    suffixes = [s.strip() for s in (input_suffix or "").split(",") if s.strip()]
+    if not suffixes:
+        suffixes = [".tif"]  # Fallback to tif if no valid suffixes
+    return [
+        os.path.join(input_folder, f)
+        for f in os.listdir(input_folder)
+        if any(f.endswith(suffix) for suffix in suffixes)
+    ]
+
+
 @magicgui(
     call_button="Find and Index Image Files",
     input_folder={
@@ -2773,16 +2808,7 @@ def file_selector(
         viewer.status = f"Invalid input folder: {input_folder}"
         return []
 
-    # Parse multiple suffixes
-    suffixes = [s.strip() for s in input_suffix.split(",") if s.strip()]
-    if not suffixes:
-        suffixes = [".tif"]  # Fallback to tif if no valid suffixes
-
-    # Find matching files with multiple suffix support
-    matching_files = []
-    for f in os.listdir(input_folder):
-        if any(f.endswith(suffix) for suffix in suffixes):
-            matching_files.append(os.path.join(input_folder, f))
+    matching_files = find_matching_files(input_folder, input_suffix)
 
     # Create a results widget with batch processing option
     results_widget = FileResultsWidget(
@@ -2808,6 +2834,58 @@ if _HAS_MAGICGUI and _HAS_QTPY:
     file_selector = add_browse_button_to_folder_field(
         file_selector, "input_folder"
     )
+
+
+def resolve_thread_count(processing_func, param_values, requested):
+    """
+    How many files a batch run processes at once, and a status line saying
+    why. Shared by the batch widget and workflow replay.
+    """
+    worker_thread_count = max(1, int(requested or 1))
+
+    # Check if function should run single-threaded
+    if (
+        hasattr(processing_func, "thread_safe")
+        and not processing_func.thread_safe
+    ):
+        return 1, "Processing with a single thread (function is not thread-safe)"
+    # GPU-distributable functions (e.g. Trackastra, HOCT) run one subprocess
+    # per file, each pinned to its own GPU, so run as many concurrently as
+    # there are GPUs to spread the batch across all cards. Each such module
+    # defines its own `_detect_gpu_ids` (honouring its own env var override,
+    # e.g. TRACKASTRA_GPUS vs HOCT_GPUS), so resolve it from the processing
+    # function's own module rather than hardcoding one tracker's module.
+    if getattr(processing_func, "supports_gpu_distribution", False):
+        try:
+            func_module = importlib.import_module(processing_func.__module__)
+            detect_gpu_ids = getattr(func_module, "_detect_gpu_ids", None)
+            if detect_gpu_ids is None:
+                from napari_tmidas.processing_functions.trackastra_tracking import (
+                    _detect_gpu_ids as detect_gpu_ids,
+                )
+            n_gpus = len(detect_gpu_ids(param_values.get("gpus")))
+        except Exception:
+            n_gpus = 0
+        # Functions that expose a `workers_per_gpu` parameter (e.g.
+        # Trackastra, HOCT) let the user run more than one job per card
+        # when VRAM allows it, so the effective worker count is
+        # n_gpus * workers_per_gpu, not just n_gpus.
+        try:
+            workers_per_gpu = max(1, int(param_values.get("workers_per_gpu", 1)))
+        except (TypeError, ValueError):
+            workers_per_gpu = 1
+        worker_thread_count = max(1, n_gpus * workers_per_gpu)
+        if n_gpus > 1 or workers_per_gpu > 1:
+            return worker_thread_count, (
+                f"Distributing across {n_gpus} GPU(s), "
+                f"{workers_per_gpu} worker(s) per GPU "
+                f"({worker_thread_count} total)"
+            )
+        return worker_thread_count, "Processing with a single thread (1 GPU)"
+    # GPU-based processing should use single thread (unless use_cpu=True)
+    if "use_cpu" in param_values and not param_values["use_cpu"]:
+        return 1, "Processing with a single thread (GPU-based processing)"
+    return worker_thread_count, f"Processing with {worker_thread_count} threads"
 
 
 # Processing worker for multithreading
@@ -3949,7 +4027,25 @@ class FileResultsWidget(QWidget):
         self.processing_selector.addItems(
             BatchProcessingRegistry.list_functions()
         )
-        processing_layout.addWidget(self.processing_selector)
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(self.processing_selector, 1)
+        self.load_log_button = QPushButton("Load settings from log…")
+        self.load_log_button.setToolTip(
+            "Fill in the function, parameters, dimension order and output "
+            "settings of a run recorded in a tmidas_workflow.jsonl file"
+        )
+        self.load_log_button.clicked.connect(self.choose_workflow_log)
+        selector_row.addWidget(self.load_log_button)
+        processing_layout.addLayout(selector_row)
+
+        # Runs of the chosen log; hidden until a log is loaded.
+        self.workflow_run_selector = QComboBox()
+        self.workflow_run_selector.setVisible(False)
+        self.workflow_run_selector.activated.connect(
+            self._on_workflow_run_selected
+        )
+        self._workflow_runs = []
+        processing_layout.addWidget(self.workflow_run_selector)
 
         # Add description label
         self.function_description = QLabel("")
@@ -4502,64 +4598,9 @@ class FileResultsWidget(QWidget):
         self.batch_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 
-        # Set thread count based on function properties
-        worker_thread_count = self.thread_count.value()
-
-        # Check if function should run single-threaded
-        if (
-            hasattr(processing_func, "thread_safe")
-            and not processing_func.thread_safe
-        ):
-            worker_thread_count = 1
-            self.viewer.status = (
-                "Processing with a single thread (function is not thread-safe)"
-            )
-        # GPU-distributable functions (e.g. Trackastra, HOCT) run one subprocess
-        # per file, each pinned to its own GPU, so run as many concurrently as
-        # there are GPUs to spread the batch across all cards. Each such module
-        # defines its own `_detect_gpu_ids` (honouring its own env var override,
-        # e.g. TRACKASTRA_GPUS vs HOCT_GPUS), so resolve it from the processing
-        # function's own module rather than hardcoding one tracker's module.
-        elif getattr(processing_func, "supports_gpu_distribution", False):
-            try:
-                import importlib
-
-                func_module = importlib.import_module(processing_func.__module__)
-                detect_gpu_ids = getattr(func_module, "_detect_gpu_ids", None)
-                if detect_gpu_ids is None:
-                    from napari_tmidas.processing_functions.trackastra_tracking import (
-                        _detect_gpu_ids as detect_gpu_ids,
-                    )
-                n_gpus = len(detect_gpu_ids(param_values.get("gpus")))
-            except Exception:
-                n_gpus = 0
-            # Functions that expose a `workers_per_gpu` parameter (e.g.
-            # Trackastra, HOCT) let the user run more than one job per card
-            # when VRAM allows it, so the effective worker count is
-            # n_gpus * workers_per_gpu, not just n_gpus.
-            try:
-                workers_per_gpu = max(1, int(param_values.get("workers_per_gpu", 1)))
-            except (TypeError, ValueError):
-                workers_per_gpu = 1
-            worker_thread_count = max(1, n_gpus * workers_per_gpu)
-            if n_gpus > 1 or workers_per_gpu > 1:
-                self.viewer.status = (
-                    f"Distributing across {n_gpus} GPU(s), "
-                    f"{workers_per_gpu} worker(s) per GPU "
-                    f"({worker_thread_count} total)"
-                )
-            else:
-                self.viewer.status = "Processing with a single thread (1 GPU)"
-        # GPU-based processing should use single thread (unless use_cpu=True)
-        elif "use_cpu" in param_values and not param_values["use_cpu"]:
-            worker_thread_count = 1
-            self.viewer.status = (
-                "Processing with a single thread (GPU-based processing)"
-            )
-        else:
-            self.viewer.status = (
-                f"Processing with {worker_thread_count} threads"
-            )
+        worker_thread_count, self.viewer.status = resolve_thread_count(
+            processing_func, param_values, self.thread_count.value()
+        )
 
         # Get output format
         output_format = self.output_format.currentText().lower()
@@ -4608,6 +4649,110 @@ class FileResultsWidget(QWidget):
     # ------------------------------------------------------------------
     # Workflow log
     # ------------------------------------------------------------------
+    def choose_workflow_log(self):
+        """Pick a workflow log and list its runs in the run selector."""
+        start_dir = self.input_folder or (
+            os.path.dirname(self.file_list[0]) if self.file_list else ""
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load settings from workflow log",
+            start_dir,
+            "Workflow log (*.jsonl);;All files (*)",
+        )
+        if path:
+            self.load_workflow_log(path)
+
+    def load_workflow_log(self, path: str) -> int:
+        """List the batch runs recorded in ``path``; return how many."""
+        from napari_tmidas._workflow_replay import (
+            BATCH_WIDGET,
+            is_replayable,
+            load_runs,
+        )
+
+        try:
+            runs = [
+                r for r in load_runs(path)
+                if is_replayable(r) and r.get("widget") == BATCH_WIDGET
+            ]
+        except Exception as exc:
+            self.viewer.status = f"Could not read workflow log: {exc}"
+            return 0
+        self._workflow_runs = runs
+        self.workflow_run_selector.clear()
+        if not runs:
+            self.workflow_run_selector.setVisible(False)
+            self.viewer.status = f"No batch runs recorded in {path}"
+            return 0
+        self.workflow_run_selector.addItem(
+            f"Choose one of {len(runs)} recorded run(s)…", None
+        )
+        # Newest first: the run to repeat is usually the last one.
+        for index in reversed(range(len(runs))):
+            run = runs[index]
+            self.workflow_run_selector.addItem(
+                f"{str(run.get('time', ''))[:16].replace('T', ' ')} — "
+                f"{run.get('function')} ({run.get('status')}, "
+                f"{len(run.get('files') or [])} files)",
+                index,
+            )
+        self.workflow_run_selector.setVisible(True)
+        self.viewer.status = f"Loaded {len(runs)} run(s) from {path}"
+        return len(runs)
+
+    def _on_workflow_run_selected(self, combo_index: int):
+        index = self.workflow_run_selector.itemData(combo_index)
+        if index is not None:
+            self.apply_workflow_run(self._workflow_runs[index])
+
+    def apply_workflow_run(self, run: Dict[str, Any]) -> bool:
+        """Fill the widget with the settings of a recorded batch run."""
+        name = run.get("function")
+        if self.processing_selector.findText(name or "") < 0:
+            self.viewer.status = (
+                f"Function {name!r} of run {run.get('run_id')} is not available"
+            )
+            return False
+        # Rebuilds the parameter widget when the function changes.
+        self.processing_selector.setCurrentText(name)
+        params = dict(run.get("params") or {})
+        dimension_order = params.pop("dimension_order", None)
+        if hasattr(self.param_widget_instance, "apply_parameter_values"):
+            self.param_widget_instance.apply_parameter_values(params)
+
+        order_index = self.dimension_order.findText(
+            run.get("dimension_order") or dimension_order or "Auto"
+        )
+        if order_index >= 0:
+            self.dimension_order.setCurrentIndex(order_index)
+            self._dimension_order_user_set = True
+            self.update_dimension_order_status()
+
+        # The widget puts its output folder below the input folder, and a
+        # blank field means "next to the input files".
+        output = run.get("output_folder") or ""
+        default = (
+            os.path.dirname(os.path.abspath(self.file_list[0]))
+            if self.file_list else None
+        )
+        if output and os.path.abspath(output) == default:
+            output = ""
+        elif output and self.input_folder:
+            output = relative_path(output, self.input_folder)
+        self.output_folder.setText(output)
+
+        format_index = self.output_format.findText(
+            run.get("output_format") or "tiff", _Qt.MatchFixedString
+        )
+        if format_index >= 0:
+            self.output_format.setCurrentIndex(format_index)
+        if self.thread_count.isEnabled() and run.get("thread_count"):
+            self.thread_count.setValue(int(run["thread_count"]))
+
+        self.viewer.status = f"Loaded the settings of run {run.get('run_id')}"
+        return True
+
     def _record_run_started(
         self,
         function_name,

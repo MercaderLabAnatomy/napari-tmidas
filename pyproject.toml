@@ -80,6 +80,9 @@ dev = [
 [project.entry-points."napari.manifest"]
 napari-tmidas = "napari_tmidas:napari.yaml"
 
+[project.scripts]
+napari-tmidas-workflow = "napari_tmidas._workflow_cli:main"
+
 [project.urls]
 "Bug Tracker" = "https://github.com/macromeer/napari-tmidas/issues"
 "Documentation" = "https://github.com/macromeer/napari-tmidas#README.md"
