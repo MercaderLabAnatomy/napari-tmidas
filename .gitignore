@@ -62,3 +62,6 @@ ultrack_data/
 CLAUDE.md
 # graphify knowledge graph output
 graphify-out/
+
+# Local planning notes, not user docs
+docs/plans/
