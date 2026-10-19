@@ -42,10 +42,15 @@ Convert large microscopy datasets from manufacturer-specific formats to standard
 - When maximum compatibility is needed
 
 **Characteristics:**
-- Standard 16-bit or 8-bit TIFF
-- All metadata embedded in TIFF tags
-- Compatible with most image analysis software
+- OME-TIFF, in the source's bit depth
+- Axis order (for example `ZYX` or `TCZYX`) and X/Y/Z pixel size stored in
+  the OME metadata, so the batch widget and Fiji (Bio-Formats) read the
+  stack and its scale correctly
 - Single file output per series
+
+Earlier versions wrote ImageJ TIFFs instead. Those could label a Z
+stack as channels and did not record the Z spacing; convert them again if
+you need the Z step.
 
 **File Structure:**
 ```
@@ -157,7 +162,22 @@ The conversion process automatically extracts and preserves:
 - **ND2/CZI**: Physical units and scaling information
 
 ### Embedded In Output
-- **TIFF**: Metadata in ImageDescription and other TIFF tags
+- **TIFF**: OME-XML in the ImageDescription tag (axes, PhysicalSizeX/Y/Z)
+
+### Read-Back Check
+
+After each file is written, the converter opens it again and compares it
+with the source:
+
+- the output can be read at all
+- it holds the same number of pixels, with the same Y and X size
+- the bit depth (dtype) is unchanged
+- the X, Y and Z pixel sizes match what the source reported (within 0.1%)
+
+A file that fails is still kept, but the problem is listed in the `qc`
+column of `conversion_report.csv` (`ok` for files that passed) and in one
+warning at the end of the run. A typical cause is a Z step that could not be
+written because the source has axes the output format cannot name.
 - **OME-Zarr**: Complete metadata in embedded `.ome.xml` file (OME-NGFF compliant)
 
 ## Advanced Features

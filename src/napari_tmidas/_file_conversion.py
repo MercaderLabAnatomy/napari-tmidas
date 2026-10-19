@@ -50,6 +50,10 @@ from qtpy.QtWidgets import (
 )
 from readlif.reader import LifFile
 
+from napari_tmidas._output_qc import (
+    check_converted_output,
+    expected_physical_sizes,
+)
 from napari_tmidas._workflow_log import WorkflowLog, relative_path
 
 # Optional import - tiffslide conflicts with zarr v3
@@ -1763,6 +1767,37 @@ def get_file_loader(
     return None
 
 
+# Joins "Conversion successful" and the read-back problems in file_done
+# messages; the widget splits on it to collect them.
+QC_MESSAGE_SEPARATOR = "; QC: "
+
+
+def _ome_tiff_metadata(metadata: dict, ndim: int) -> dict:
+    """
+    tifffile OME metadata for a converted array: axes and physical sizes.
+
+    Axes are passed on only when tifffile can store them as given (one
+    letter per dimension, leading axes from T/Z/C/Q, ending in YX);
+    otherwise tifffile picks its own and only the X/Y sizes are written.
+    """
+    ome = {}
+    axes = str(metadata.get("axes") or "").upper()
+    axes_ok = (
+        len(axes) == ndim
+        and axes.endswith("YX")
+        and len(set(axes)) == ndim
+        and set(axes[:-2]) <= set("TZCQ")
+    )
+    if axes_ok:
+        ome["axes"] = axes
+    for axis, size in expected_physical_sizes(metadata).items():
+        if axis == "Z" and not (axes_ok and "Z" in axes):
+            continue
+        ome[f"PhysicalSize{axis}"] = size
+        ome[f"PhysicalSize{axis}Unit"] = "µm"
+    return ome
+
+
 def conversion_output_path(
     output_folder: str, filepath: str, series_index: int, use_zarr: bool
 ) -> str:
@@ -1933,6 +1968,8 @@ class ConversionWorker(QThread):
         self.use_zarr = use_zarr
         self.get_file_loader = file_loader_func
         self.running = True
+        # Read-back problems of the file converted last (see _output_qc).
+        self.last_qc_problems: List[str] = []
 
     def run(self):
         success_count = 0
@@ -1947,20 +1984,25 @@ class ConversionWorker(QThread):
 
             try:
                 # Load and convert file
+                self.last_qc_problems = []
                 success = self._convert_single_file(filepath, series_index)
                 if success:
                     success_count += 1
+                    message = "Conversion successful"
+                    if self.last_qc_problems:
+                        message += QC_MESSAGE_SEPARATOR + "; ".join(
+                            self.last_qc_problems
+                        )
                     conversion_results.append(
                         {
                             "filepath": filepath,
                             "series_index": series_index,
                             "status": "success",
-                            "message": "Conversion successful",
+                            "message": message,
+                            "qc": "; ".join(self.last_qc_problems) or "ok",
                         }
                     )
-                    self.file_done.emit(
-                        filepath, True, "Conversion successful"
-                    )
+                    self.file_done.emit(filepath, True, message)
                 else:
                     conversion_results.append(
                         {
@@ -2054,6 +2096,7 @@ class ConversionWorker(QThread):
                         "series_index",
                         "status",
                         "message",
+                        "qc",
                     ],
                 )
                 writer.writeheader()
@@ -2067,6 +2110,8 @@ class ConversionWorker(QThread):
                             "series_index": row["series_index"],
                             "status": row["status"],
                             "message": row["message"],
+                            # Only files that were written have been checked.
+                            "qc": row.get("qc", ""),
                         }
                     )
 
@@ -2103,6 +2148,17 @@ class ConversionWorker(QThread):
             else:
                 result = self._save_tif(image_data, output_path, metadata)
 
+            # Read the file back: a conversion that silently changed the
+            # axes or lost the pixel size is worse than one that failed.
+            self.last_qc_problems = (
+                check_converted_output(
+                    output_path, image_data.shape, image_data.dtype, metadata
+                )
+                if result
+                else []
+            )
+            for problem in self.last_qc_problems:
+                print(f"⚠️  QC {Path(output_path).name}: {problem}")
             return result
 
         except (FileFormatError, SeriesIndexError, MemoryError) as e:
@@ -2169,17 +2225,24 @@ class ConversionWorker(QThread):
                 # For large Dask arrays, use chunked writing
                 if len(image_data.shape) > 3:
                     return self._save_tif_chunked_dask(
-                        image_data, output_path, use_bigtiff
+                        image_data, output_path, use_bigtiff, metadata
                     )
                 else:
                     # Compute smaller arrays
                     image_data = image_data.compute()
 
-            # Standard TIF saving
-            save_kwargs = {"bigtiff": use_bigtiff, "compression": "zlib"}
-
-            if len(image_data.shape) > 2:
-                save_kwargs["imagej"] = True
+            # Standard TIF saving. OME-TIFF rather than an ImageJ hyperstack:
+            # ImageJ only knows axes in TZCYX order and, given none, called a
+            # Z stack channels and dropped the Z spacing. OME keeps the
+            # source axis order and every physical size, and it is what the
+            # batch widget reads pixel sizes from downstream.
+            save_kwargs = {
+                "bigtiff": use_bigtiff,
+                "compression": "zlib",
+                "ome": True,
+                "photometric": "minisblack",
+                "metadata": _ome_tiff_metadata(metadata, image_data.ndim),
+            }
 
             if metadata.get("resolution"):
                 try:
@@ -2195,7 +2258,11 @@ class ConversionWorker(QThread):
             raise ConversionError(f"TIF save failed: {str(e)}") from e
 
     def _save_tif_chunked_dask(
-        self, dask_array: da.Array, output_path: str, use_bigtiff: bool
+        self,
+        dask_array: da.Array,
+        output_path: str,
+        use_bigtiff: bool,
+        metadata: Optional[dict] = None,
     ) -> bool:
         """Save large Dask array to TIF using chunked writing"""
         try:
@@ -2227,6 +2294,10 @@ class ConversionWorker(QThread):
                     compression="zlib",
                     photometric="minisblack",
                     maxworkers=1,
+                    ome=True,
+                    metadata=_ome_tiff_metadata(
+                        metadata or {}, dask_array.ndim
+                    ),
                 )
             else:
                 # For 3D or smaller, compute and save normally
@@ -2236,6 +2307,11 @@ class ConversionWorker(QThread):
                     computed_data,
                     bigtiff=use_bigtiff,
                     compression="zlib",
+                    photometric="minisblack",
+                    ome=True,
+                    metadata=_ome_tiff_metadata(
+                        metadata or {}, computed_data.ndim
+                    ),
                 )
 
             return True
@@ -2988,6 +3064,7 @@ class MicroscopyImageConverterWidget(QWidget):
     ):
         """Start the conversion worker thread"""
         use_zarr = self.zarr_radio.isChecked()
+        self._conversion_qc_issues = []
         self.conversion_worker = ConversionWorker(
             files_to_convert=files_to_convert,
             output_folder=output_folder,
@@ -3113,6 +3190,11 @@ class MicroscopyImageConverterWidget(QWidget):
         filename = Path(filepath).name
         if success:
             print(f"Successfully converted: {filename}")
+            if QC_MESSAGE_SEPARATOR in message:
+                issues = message.split(QC_MESSAGE_SEPARATOR, 1)[1]
+                if not hasattr(self, "_conversion_qc_issues"):
+                    self._conversion_qc_issues = []
+                self._conversion_qc_issues.append(f"{filename}: {issues}")
         elif message.startswith("SKIPPED:"):
             print(f"Skipped file: {filename} - {message}")
         else:
@@ -3149,6 +3231,32 @@ class MicroscopyImageConverterWidget(QWidget):
             )
         else:
             self.status_label.setText("No files were converted")
+        self._report_conversion_qc_issues()
+
+    def _report_conversion_qc_issues(self):
+        """One non-modal warning for every file that failed its read-back."""
+        issues = getattr(self, "_conversion_qc_issues", None) or []
+        if not issues:
+            return
+        self.status_label.setText(
+            self.status_label.text()
+            + f" - {len(issues)} file(s) failed the read-back check, "
+            "see the qc column of conversion_report.csv"
+        )
+        shown = "\n".join(issues[:5])
+        if len(issues) > 5:
+            shown += f"\n... and {len(issues) - 5} more"
+        message = (
+            f"{len(issues)} converted file(s) differ from their source:\n"
+            f"{shown}"
+        )
+        print(f"⚠️  {message}")
+        try:
+            from napari.utils.notifications import show_warning
+
+            show_warning(message)
+        except ImportError:
+            pass
 
     def _record_conversion_finished(self, status: str):
         """Write the run's end record once, whichever path comes first."""
