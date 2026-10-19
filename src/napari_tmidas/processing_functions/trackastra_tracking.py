@@ -458,6 +458,10 @@ def create_trackastra_script(
         except (TypeError, ValueError):
             pass
 
+    from napari_tmidas.processing_functions.track_qc import lineage_csv_path
+
+    lineage_path = lineage_csv_path(str(output_path))
+
     # img/mask loads use a single embedded lazy loader (see _LAZY_LOADERS).
     img_load_code = f"img = _lazy_load({str(img_path)!r})"
     mask_load_code = f"mask = _lazy_load({str(mask_path)!r})"
@@ -745,21 +749,23 @@ print(f'Using TIFF compression: {{tiff_compression}}')
 # graph_to_ctc allocates the whole TZYX output in RAM (np.zeros_like stack);
 # replicating only its label assignment lets us write frame-by-frame instead.
 frame_relabel = None
+node_label = {{}}
 try:
     try:
         from trackastra.tracking.utils import ctc_tracklets
     except Exception:
         from trackastra.tracking import ctc_tracklets
 
-    tracklets = ctc_tracklets(track_graph, frame_attribute='time')
+    tracklets = sorted(ctc_tracklets(track_graph, frame_attribute='time'))
     frame_relabel = {{}}
-    for i, _tracklet in enumerate(sorted(tracklets)):
+    for i, _tracklet in enumerate(tracklets):
         label = i + 1
         for _n in _tracklet.nodes:
             node = track_graph.nodes[_n]
             t = int(node['time'])
             lab = int(node['label'])
             frame_relabel.setdefault(t, {{}})[lab] = label
+            node_label[_n] = label
     print(f'Built streaming relabel map for {{len(frame_relabel)}} frames '
           f'({{sum(len(v) for v in frame_relabel.values())}} objects).')
 except Exception as exc:
@@ -767,7 +773,36 @@ except Exception as exc:
     frame_relabel = None
 
 
+def _write_lineage(rows):
+    # One row per track: id, first and last frame, parent id (0 = none);
+    # the labels alone cannot say which track a daughter came from.
+    import csv
+    with open({lineage_path!r}, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['track_id', 'start', 'end', 'parent_track_id'])
+        writer.writerows(rows)
+    print(f'Saved lineage of {{len(rows)}} tracks to: {lineage_path}')
+
+
 if frame_relabel is not None:
+    try:
+        lineage_rows = []
+        for i, _tracklet in enumerate(tracklets):
+            _nodes = list(_tracklet.nodes)
+            _times = [int(track_graph.nodes[_n]['time']) for _n in _nodes]
+            _first = _nodes[int(np.argmin(_times))]
+            _parents = [
+                node_label[_p]
+                for _p in track_graph.predecessors(_first)
+                if _p in node_label
+            ]
+            lineage_rows.append(
+                [i + 1, min(_times), max(_times), _parents[0] if _parents else 0]
+            )
+        _write_lineage(lineage_rows)
+    except Exception as exc:
+        print(f'Lineage not saved ({{exc}})')
+
     def _relabel_frame(t):
         # Relabel one timepoint slab (Z,Y,X) or (Y,X) via a small lookup table.
         frame = np.asarray(mask[t])
@@ -807,7 +842,12 @@ if frame_relabel is not None:
 else:
     # Fallback: original in-memory path (materializes the full mask + output).
     mask_np = np.asarray(mask)
-    _, masks_tracked = graph_to_ctc(track_graph, mask_np, outdir=None)
+    res_track, masks_tracked = graph_to_ctc(track_graph, mask_np, outdir=None)
+    try:
+        # CTC res_track: label, first frame, last frame, parent (0 = none).
+        _write_lineage(np.asarray(res_track)[:, :4].astype(np.int64).tolist())
+    except Exception as exc:
+        print(f'Lineage not saved ({{exc}})')
     in_ids = np.unique(mask_np)
     out_ids = np.unique(masks_tracked)
     print(f'Relabel check: unique_ids_in={{len(in_ids)}}, unique_ids_out={{len(out_ids)}}')

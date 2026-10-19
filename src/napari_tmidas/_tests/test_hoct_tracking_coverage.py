@@ -1072,6 +1072,35 @@ class TestHoctTrackingGuards:
 class TestHoctTrackingRun:
     """The CLI invocation, its environment and the assembled output."""
 
+    def test_lineage_is_kept_next_to_the_output(
+        self, monkeypatch, ready_env, hoct_pair, tmp_path
+    ):
+        from napari_tmidas.processing_functions.track_qc import read_lineage
+
+        out_dir = tmp_path / "results"
+        out_dir.mkdir()
+        run = _RunRecorder(frames=hoct_pair.tracked)
+
+        def run_with_lineage(cmd, **kwargs):
+            completed = run(cmd, **kwargs)
+            ctc = Path(cmd[cmd.index("-o") + 1])
+            (ctc / "res_track.txt").write_text("1 0 3 0\n2 4 9 1\n3 4 9 1\n")
+            return completed
+
+        monkeypatch.setattr(mod.subprocess, "run", run_with_lineage)
+
+        result = mod.hoct_tracking(
+            None,
+            device="cpu",
+            tile="off",
+            _source_filepath=str(hoct_pair.label_path),
+            _output_folder=str(out_dir),
+        )
+
+        assert result == str(out_dir / "movie_hoct_tracked.tif")
+        assert (out_dir / "movie_hoct_tracked_lineage.csv").exists()
+        assert read_lineage(result) == {2: 1, 3: 1}
+
     def test_successful_run_writes_a_stitched_uint32_tiff(
         self, monkeypatch, ready_env, hoct_pair, tmp_path
     ):

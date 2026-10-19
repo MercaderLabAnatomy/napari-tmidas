@@ -1176,6 +1176,15 @@ def hoct_tracking(
 
     try:
         out_shape = _assemble_ctc_output(ctc_dir, output_path)
+        # The CTC masks keep their ids, so HOCT's lineage file matches the
+        # assembled labels as is; keep it before the temp folder goes.
+        from napari_tmidas.processing_functions.track_qc import (
+            ctc_res_track_to_lineage,
+        )
+
+        res_track = ctc_dir / "res_track.txt"
+        if res_track.exists():
+            ctc_res_track_to_lineage(str(res_track), str(output_path))
     except Exception as exc:
         print(f"Failed to assemble HOCT CTC output: {exc}")
         return None

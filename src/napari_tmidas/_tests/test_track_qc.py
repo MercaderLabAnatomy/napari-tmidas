@@ -106,6 +106,8 @@ def test_track_statistics():
         "tracks_with_gaps": 1,
         "tracks_starting_late": 1,
         "tracks_ending_early": 1,
+        "divisions": None,
+        "tracks_appearing": None,
     }
 
 

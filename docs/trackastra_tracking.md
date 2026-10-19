@@ -154,6 +154,10 @@ The function produces tracked label images where:
 - Output dimensions match input dimensions (TYX → TYX, TZYX → TZYX)
 - Background remains 0
 
+Next to each output, `<file>_tracked_lineage.csv` records which track each
+daughter came from (`track_id, start, end, parent_track_id`; parent 0 = no
+parent). See [Track Statistics](track_statistics.md#lineage-files).
+
 ### Tracking Information
 
 TrackAstra assigns consistent IDs such that:
@@ -192,7 +196,9 @@ TrackAstra assigns consistent IDs such that:
    - Double-click a result in the batch results table: the tracks are shown
      as a Tracks layer on top of the labels
    - Run [Track Statistics (QC)](track_statistics.md) on the output folder
-     to compare track counts, lengths and gaps across all files
+     to compare track counts, lengths, gaps and divisions across all files
+   - The lineage (which track each daughter came from) is saved next to the
+     output as `<file>_tracked_lineage.csv`; keep it with the labels
 
 ## Troubleshooting
 

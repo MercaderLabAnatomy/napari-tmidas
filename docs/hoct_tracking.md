@@ -150,6 +150,10 @@ plugin:
 - Output dimensions match input dimensions (TYX → TYX, TZYX → TZYX)
 - Background remains 0
 
+The lineage (`res_track.txt`, which HOCT writes alongside its masks) is kept
+as `<file>_hoct_tracked_lineage.csv` next to the output, so divisions can be
+counted and drawn.
+
 To check the result, double-click it in the batch results table (it is
 shown with a Tracks layer) or run [Track Statistics (QC)](track_statistics.md)
 on the output folder.

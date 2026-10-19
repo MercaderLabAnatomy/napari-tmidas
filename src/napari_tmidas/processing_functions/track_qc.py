@@ -9,8 +9,10 @@ every tracker and for tracked stacks edited by hand afterwards.
 
 What labels alone cannot tell is lineage: a tracker that splits a track at a
 division gives the daughters new ids, and nothing in the image says whose
-daughters they are. Divisions therefore show up here as tracks that start
-after the first frame, not as divisions.
+daughters they are. Trackastra and HOCT therefore save a `<file>_lineage.csv`
+next to their output, and Ultrack its own tracks CSV; with one of those,
+divisions are counted and drawn. Without, they show up only as tracks that
+start after the first frame.
 """
 
 import os
@@ -168,8 +170,18 @@ class _ArrayPlanes:
         pass
 
 
-def track_statistics(table, n_frames: int, min_track_length: int = 3) -> Dict:
-    """Summary numbers that show whether a tracking run went wrong."""
+def track_statistics(
+    table,
+    n_frames: int,
+    min_track_length: int = 3,
+    lineage: Optional[Dict[int, int]] = None,
+) -> Dict:
+    """
+    Summary numbers that show whether a tracking run went wrong.
+
+    ``lineage`` (daughter -> parent track id) adds division counts; without
+    it those columns are left empty rather than reported as zero.
+    """
     stats = {"frames": int(n_frames)}
     per_frame = np.zeros(max(int(n_frames), 1), dtype=np.int64)
     if len(table):
@@ -197,7 +209,76 @@ def track_statistics(table, n_frames: int, min_track_length: int = 3) -> Dict:
     stats["tracks_ending_early"] = int(
         np.count_nonzero(tracks["max"] < n_frames - 1)
     )
+
+    if lineage is None:
+        stats["divisions"] = None
+        stats["tracks_appearing"] = None
+    else:
+        present = set(tracks.index.tolist())
+        children = {}
+        for child, parent in lineage.items():
+            if child in present:
+                children.setdefault(parent, []).append(child)
+        stats["divisions"] = sum(1 for kids in children.values() if len(kids) >= 2)
+        # Late starts that are not daughters: objects entering the field or
+        # tracks that broke and restarted under a new id.
+        late = tracks.index[tracks["min"] > 0]
+        stats["tracks_appearing"] = int(sum(1 for t in late if t not in lineage))
     return stats
+
+
+# Lineage a tracker wrote next to its tracked labels: one row per track,
+# CTC res_track semantics (start/end frame, parent 0 = no parent).
+LINEAGE_CSV_SUFFIX = "_lineage.csv"
+LINEAGE_COLUMNS = ("track_id", "start", "end", "parent_track_id")
+
+
+def lineage_csv_path(label_path: str) -> str:
+    """Where the lineage of the tracked label file ``label_path`` lives."""
+    folder, name = os.path.split(str(label_path).rstrip("/"))
+    return os.path.join(folder, os.path.splitext(name)[0] + LINEAGE_CSV_SUFFIX)
+
+
+def ctc_res_track_to_lineage(res_track_txt: str, label_path: str) -> Optional[str]:
+    """
+    Save a CTC ``res_track.txt`` (``L B E P`` per line) as the lineage CSV of
+    ``label_path``. Returns the path written, or None if there was nothing to
+    convert. Never raises: lineage is extra, the labels are the result.
+    """
+    try:
+        rows = np.loadtxt(res_track_txt, dtype=np.int64, ndmin=2)
+        if rows.size == 0 or rows.shape[1] < 4:
+            return None
+        out = lineage_csv_path(label_path)
+        pd.DataFrame(rows[:, :4], columns=LINEAGE_COLUMNS).to_csv(out, index=False)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        print(f"Lineage not saved ({exc})")
+        return None
+
+
+def read_lineage(label_path: str) -> Optional[Dict[int, int]]:
+    """
+    ``{daughter track id: parent track id}`` for a tracked label file, or
+    None when no lineage was saved for it (as opposed to {}: lineage known,
+    no divisions).
+    """
+    path = lineage_csv_path(label_path)
+    if os.path.exists(path):
+        table = pd.read_csv(path)
+    else:
+        ultrack_csv = _ultrack_tracks_csv(label_path)
+        if not ultrack_csv:
+            return None
+        table = pd.read_csv(ultrack_csv)
+        if "parent_track_id" not in table:
+            return None
+    links = table[["track_id", "parent_track_id"]].drop_duplicates()
+    links = links[links.parent_track_id > 0]
+    return {
+        int(child): int(parent)
+        for child, parent in zip(links.track_id, links.parent_track_id)
+    }
 
 
 # File names the trackers give their output (`_hoct_tracked` contains
@@ -236,24 +317,18 @@ def load_tracks_for_labels(filepath: str, labels_ndim: int):
     """
     Tracks layer data for a tracked label file, from the cheapest source.
 
-    In order: Ultrack's own tracks CSV (the only one with lineage), a table
-    written by Track Statistics, or the label file itself when it is small
-    enough to scan now. Returns ``(data, graph, source)`` with ``data`` as
+    In order: Ultrack's own tracks CSV, a table written by Track Statistics,
+    or the label file itself when it is small enough to scan now. Divisions
+    come from the lineage the tracker saved, when there is one. Returns ``(data, graph, source)`` with ``data`` as
     napari wants it (``track_id, t, [z,] y, x``), or ``(None, None,
     reason)`` when there is nothing to show.
     """
-    graph = {}
+    lineage = read_lineage(filepath) or {}
+    graph = {child: [parent] for child, parent in lineage.items()}
     csv_path = _ultrack_tracks_csv(filepath)
     if csv_path:
         table = pd.read_csv(csv_path)
         source = os.path.basename(csv_path)
-        if "parent_track_id" in table:
-            links = table[["track_id", "parent_track_id"]].drop_duplicates()
-            links = links[links.parent_track_id >= 0]
-            graph = {
-                int(child): [int(parent)]
-                for child, parent in zip(links.track_id, links.parent_track_id)
-            }
     else:
         csv_path = _label_tracks_csv(filepath)
         if csv_path:
@@ -345,7 +420,8 @@ def track_statistics_qc(
     if source is None:
         raise ValueError("No image or file path to compute track statistics for")
     table, n_frames = tracks_from_labels(source, dim_order)
-    stats = track_statistics(table, n_frames, min_track_length)
+    lineage = read_lineage(_source_filepath) if _source_filepath else None
+    stats = track_statistics(table, n_frames, min_track_length, lineage)
 
     if not _output_folder:
         return stats
@@ -366,6 +442,11 @@ def track_statistics_qc(
         f"{stats['tracks_full_length']} full length, "
         f"{stats['tracks_with_gaps']} with gaps, "
         f"{stats['tracks_short']} shorter than {min_track_length} frames"
+        + (
+            f", {stats['divisions']} divisions"
+            if stats["divisions"] is not None
+            else " (no lineage saved, divisions unknown)"
+        )
     )
     return None
 
