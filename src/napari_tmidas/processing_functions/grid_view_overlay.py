@@ -335,8 +335,10 @@ def _create_grid(images: list, grid_cols: int = 4) -> np.ndarray:
     },
 )
 def create_grid_overlay(
-    image: np.ndarray, label_suffix: str = "_labels.tif"
-) -> np.ndarray:
+    image: np.ndarray,
+    label_suffix: str = "_labels.tif",
+    _output_folder: str = None,
+):
     """
     Create a grid view showing intensity images with optional colored label overlay.
 
@@ -355,8 +357,11 @@ def create_grid_overlay(
 
     Returns
     -------
-    np.ndarray
-        Grid image with intensity images and optional overlays (RGB uint8)
+    np.ndarray or str
+        Grid image with intensity images and optional overlays (RGB uint8).
+        From the batch worker (which passes ``_output_folder``), the path of
+        the grid file this function saved instead, so the worker does not
+        save the same grid a second time.
 
     Notes
     -----
@@ -717,6 +722,8 @@ def create_grid_overlay(
 
             traceback.print_exc()
 
+    if _output_folder and _grid_output_path:
+        return _grid_output_path
     return grid
 
 

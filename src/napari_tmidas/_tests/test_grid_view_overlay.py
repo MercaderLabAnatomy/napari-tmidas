@@ -396,6 +396,35 @@ class TestCreateGridOverlay:
         assert isinstance(grid, np.ndarray)
         assert grid.ndim == 3 and grid.shape[-1] == 3
 
+    def test_batch_worker_saves_the_grid_once(self, tmp_path):
+        """The worker used to save the returned grid again as *.tif.tif."""
+        import napari_tmidas._file_selector as fs
+
+        folder = tmp_path / "data"
+        folder.mkdir()
+        for stem in ("a", "b"):
+            self._pair(folder, stem)
+        out = tmp_path / "out"
+        worker = fs.ProcessingWorker(
+            [str(folder / "a_labels.tif"), str(folder / "b_labels.tif")],
+            create_grid_overlay,
+            {"label_suffix": "_labels.tif"},
+            str(out),
+            "_labels.tif",
+            "_grid_overlay.tif",
+        )
+        results = []
+        worker.file_processed.connect(results.append)
+
+        worker.run()
+
+        assert sorted(p.name for p in out.iterdir()) == [
+            "a_labels_grid_overlay.tif"
+        ]
+        assert [r["processed_file"] for r in results] == [
+            str(out / "a_labels_grid_overlay.tif")
+        ]
+
     def test_max_projection_streams_planes(self, tmp_path):
         from napari_tmidas.processing_functions.grid_view_overlay import (
             _max_projection,
