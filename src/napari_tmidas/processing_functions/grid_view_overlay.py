@@ -28,6 +28,29 @@ _grid_saved = False
 _grid_output_path = None
 
 
+def _max_projection(path) -> np.ndarray:
+    """
+    Max-project an image over all of its leading axes down to YX.
+
+    Reads one plane at a time, so a large TZYX stack costs one plane of
+    memory rather than the whole stack.
+    """
+    from napari_tmidas.processing_functions.intensity_label_filter import (
+        _PlaneReader,
+    )
+
+    projection = None
+    with _PlaneReader(Path(path)) as reader:
+        # np.ndindex() of an empty shape yields a single (), so 2D works too.
+        for index in np.ndindex(*reader.leading_shape):
+            plane = reader.plane(index)
+            if projection is None:
+                projection = np.array(plane, copy=True)
+            else:
+                np.maximum(projection, plane, out=projection)
+    return projection
+
+
 def _get_intensity_filename(label_filename: str) -> str:
     """
     Get intensity filename from label filename by removing label suffix.
@@ -504,23 +527,15 @@ def create_grid_overlay(
                 )
 
         try:
-            # Load intensity image
-            intensity_img = tifffile.imread(str(intensity_path))
-
-            # Load label image if in label mode
+            # Load both as YX max projections over every leading axis, so
+            # ZYX, TYX and TZYX stacks all reduce to one plane.
+            intensity_img = _max_projection(intensity_path)
             if label_path is not None:
-                label_img = tifffile.imread(str(label_path))
+                label_img = _max_projection(label_path)
             else:
                 label_img = None
 
-            # Handle 3D data by taking max projection
-            if len(intensity_img.shape) > 2:
-                intensity_img = np.max(intensity_img, axis=0)
-
             if label_img is not None:
-                if len(label_img.shape) > 2:
-                    label_img = np.max(label_img, axis=0)
-
                 # Check for labels
                 unique_labels = np.unique(label_img)
                 n_labels = len(unique_labels[unique_labels > 0])
@@ -551,7 +566,7 @@ def create_grid_overlay(
 
             return (overlay, n_labels), None
 
-        except (FileNotFoundError, OSError) as e:
+        except (FileNotFoundError, OSError, ValueError) as e:
             return None, f"⚠️  Error processing {filename}: {e}"
 
     # Process in parallel with ThreadPoolExecutor

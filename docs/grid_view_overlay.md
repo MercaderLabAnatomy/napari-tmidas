@@ -154,9 +154,14 @@ Output: Grid with custom segmentation overlays
    - Many (17-100): ~5-10 columns
    - Very many (100+): caps at 12 columns max
 
-2. **3D Data**:
-   - Function automatically takes max projection along first axis
-   - Works with TYX, ZYX data
+2. **3D and Time-Lapse Data**:
+   - Every axis except Y and X is max-projected, so ZYX, TYX and TZYX
+     stacks all show as one plane per file
+   - Stacks are read one plane at a time, so large time-lapse files do not
+     need to fit in memory
+   - Labels from different time points or slices overlap in the projection;
+     use it to spot missing or wildly wrong segmentations, not to judge
+     individual objects
 
 3. **Performance** - Optimized for Large Datasets:
    - Parallel processing with multi-threading (up to 8 workers)
@@ -199,7 +204,7 @@ Output: Grid with custom segmentation overlays
 
 ### "Dimension mismatch"
 - Intensity and label images must have same dimensions
-- Function attempts max projection for 3D data
+- Both images are max-projected to YX first, so only Y and X must match
 - Check that pairs are correctly matched
 
 ### "No intensity image found"

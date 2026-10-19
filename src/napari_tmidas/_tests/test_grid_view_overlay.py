@@ -373,6 +373,46 @@ class TestCreateGridOverlay:
         assert isinstance(grid, np.ndarray)
         assert grid.ndim == 3
 
+    @pytest.mark.parametrize("shape", [(3, 32, 32), (3, 4, 32, 32)])
+    def test_time_lapse_stacks_are_projected_over_every_leading_axis(
+        self, tmp_path, shape
+    ):
+        """TYX and TZYX reduce to one YX plane; TZYX used to crash the run."""
+        folder = tmp_path / "data"
+        folder.mkdir()
+        intensity = np.zeros(shape, dtype=np.uint8)
+        labels = np.zeros(shape, dtype=np.uint16)
+        # Put each object in a different leading-axis slice, so only a
+        # projection over all of them keeps both.
+        intensity[(-1,) * (len(shape) - 2)] = 200
+        intensity[(0,) * (len(shape) - 2)] = 100
+        labels[(0,) * (len(shape) - 2) + (slice(2, 6), slice(2, 6))] = 1
+        labels[(-1,) * (len(shape) - 2) + (slice(20, 24), slice(20, 24))] = 2
+        self._write(folder / "a.tif", intensity)
+        self._write(folder / "a_labels.tif", labels)
+
+        grid = self._run(str(folder / "a_labels.tif"))
+
+        assert isinstance(grid, np.ndarray)
+        assert grid.ndim == 3 and grid.shape[-1] == 3
+
+    def test_max_projection_streams_planes(self, tmp_path):
+        from napari_tmidas.processing_functions.grid_view_overlay import (
+            _max_projection,
+        )
+
+        stack = np.zeros((2, 3, 8, 8), dtype=np.uint16)
+        stack[0, 0, 1, 1] = 5
+        stack[1, 2, 6, 6] = 9
+        path = self._write(tmp_path / "s.tif", stack)
+
+        projected = _max_projection(path)
+
+        np.testing.assert_array_equal(projected, stack.max(axis=(0, 1)))
+        plane = np.arange(64, dtype=np.uint8).reshape(8, 8)
+        path2 = self._write(tmp_path / "p.tif", plane)
+        np.testing.assert_array_equal(_max_projection(path2), plane)
+
     def test_no_matching_files_returns_the_input_unchanged(self, tmp_path):
         """Nothing to grid means the batch pipeline gets its image back."""
         folder = tmp_path / "data"
