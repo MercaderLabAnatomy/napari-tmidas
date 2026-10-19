@@ -189,6 +189,7 @@ if not _HAS_QTPY:
 
 
 # Import registry and processing functions
+from napari_tmidas._output_qc import all_zero_outputs, result_output_paths
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas._ui_utils import add_browse_button_to_folder_field
 from napari_tmidas._workflow_log import (
@@ -2954,6 +2955,11 @@ class ProcessingWorker(QThread):
                     result = future.result()
                     # Only process result if it's not None (folder functions may return None)
                     if result is not None:
+                        # An all-zero output almost always means the step
+                        # failed silently (wrong threshold, wrong channel).
+                        empty = all_zero_outputs(result_output_paths(result))
+                        if empty:
+                            result["all_zero_outputs"] = empty
                         processed_files_info.append(result)
                         self.file_processed.emit(result)
                 except (
@@ -4814,6 +4820,31 @@ class FileResultsWidget(QWidget):
         # Update table with this single processed file
         self.table.update_processed_files([result])
 
+    def _warn_about_all_zero_outputs(self):
+        """Say once, without a modal dialog, which outputs came out empty."""
+        empty = [
+            name
+            for result in self.processed_files_info
+            for name in result.get("all_zero_outputs", ())
+        ]
+        if not empty:
+            return
+        shown = ", ".join(empty[:5])
+        if len(empty) > 5:
+            shown += f" and {len(empty) - 5} more"
+        message = (
+            f"{len(empty)} of the outputs contain only zeros (no labels or "
+            f"no signal): {shown}. Check the parameters for these files."
+        )
+        print(f"⚠️  {message}")
+        self.viewer.status = message
+        try:
+            from napari.utils.notifications import show_warning
+
+            show_warning(message)
+        except ImportError:
+            pass
+
     def processing_finished(self):
         """Handle processing completion"""
         # Update UI
@@ -4830,6 +4861,7 @@ class FileResultsWidget(QWidget):
         self.viewer.status = (
             f"Completed processing {len(self.processed_files_info)} files"
         )
+        self._warn_about_all_zero_outputs()
 
         # For grid overlay function, load and display the result
         if hasattr(self, "processing_selector"):

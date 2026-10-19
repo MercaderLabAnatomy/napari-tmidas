@@ -22,6 +22,18 @@ One of the key features of napari-tmidas is the **interactive table interface** 
 - **Efficient Review**: Review entire batches without manually navigating file systems
 - **Direct Comparison**: Original and processed images are always paired, making it easy to assess quality
 
+### Empty Outputs Are Flagged
+
+After every file, the batch run checks whether the output contains only
+zeros: a segmentation with no labels, or a filtered image with no signal.
+That almost always means the step failed quietly, for example a threshold
+set too high or the wrong channel selected. When a run finishes, one
+warning lists the empty outputs; the same list is stored with the run in the
+[workflow log](workflow_log.md) under `all_zero_outputs`.
+
+The check stops at the first plane that has any signal, so it adds almost
+nothing to a normal run. CSV, NPY and other non-image outputs are not checked.
+
 ### Example Workflow
 
 ```
