@@ -161,6 +161,13 @@ def _table_stub(viewer):
             stub, path
         )
     )
+    for name in (
+        "_load_original_layers",
+        "_load_processed_layers",
+        "_add_tracks_layer",
+    ):
+        method = getattr(fs.ProcessedFilesTableWidget, name)
+        setattr(stub, name, method.__get__(stub))
     return stub
 
 

@@ -189,9 +189,10 @@ TrackAstra assigns consistent IDs such that:
    - TrackAstra needs temporal context
 
 ### 6. **Quality Control**
-   - Visualize tracked results in napari
-   - Check ID consistency across timepoints
-   - Verify that divisions are correctly handled
+   - Double-click a result in the batch results table: the tracks are shown
+     as a Tracks layer on top of the labels
+   - Run [Track Statistics (QC)](track_statistics.md) on the output folder
+     to compare track counts, lengths and gaps across all files
 
 ## Troubleshooting
 

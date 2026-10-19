@@ -86,6 +86,7 @@ Functions are grouped by category. AI-based functions that require deep-learning
 |---|---|---|
 | **Extract Regionprops to CSV** | `_regionprops` | Measure region properties (area, centroid, intensity, …) for all labels; saves one CSV per folder. See [regionprops_analysis.md](regionprops_analysis.md) |
 | **Regionprops Summary Statistics** | `_regionprops_summary` | Per-file summary statistics (count, mean, std, …) of regionprops. See [regionprops_summary.md](regionprops_summary.md) |
+| **Track Statistics (QC)** | `track_statistics.csv` | Per-file track counts, lengths, gaps and late/early tracks for tracked TYX/TZYX labels. See [track_statistics.md](track_statistics.md) |
 | **Filter Labels by Intensity (K-medoids)** | `_intensity_filtered` | Remove low-intensity labels using k-medoids clustering on paired intensity images. See [intensity_label_filter.md](intensity_label_filter.md) |
 
 ---

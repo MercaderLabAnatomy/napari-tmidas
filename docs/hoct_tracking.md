@@ -150,6 +150,10 @@ plugin:
 - Output dimensions match input dimensions (TYX → TYX, TZYX → TZYX)
 - Background remains 0
 
+To check the result, double-click it in the batch results table (it is
+shown with a Tracks layer) or run [Track Statistics (QC)](track_statistics.md)
+on the output folder.
+
 ## Technical Details
 
 ### Processing Pipeline
@@ -195,4 +199,5 @@ HOCT is developed by royerlab:
 - [TrackAstra Cell Tracking](trackastra_tracking.md) - An alternative deep learning-based tracker
 - [Ultrack Tracking](ultrack_tracking.md) - Ensemble-based tracking
 - [Regionprops Analysis](regionprops_analysis.md) - Extract properties from tracked objects
+- [Track Statistics (QC)](track_statistics.md) - Check tracking results across a folder
 - [All Processing Functions](all_processing_functions.md) - Label manipulation tools

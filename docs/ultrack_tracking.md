@@ -225,13 +225,18 @@ Recommended**: Set to **1.5× the maximum expected cell movement** between frame
 
 Ultrack tracking produces two output files:
 
-1. **`_ultrack_tracked.tif`**: Tracked label image
+1. **`_ultrack.tif`**: Tracked label image
    - Each cell has a unique ID that persists across time
    - Cell divisions create new IDs
 
-2. **`_tracks.csv`**: Track data in CSV format
-   - Columns: `track_id`, `t`, `z` (if 3D), `y`, `x`, and other properties
+2. **`_ultrack_tracks.csv`**: Track data in CSV format
+   - Columns: `track_id`, `t`, `z` (if 3D), `y`, `x`, and other properties,
+     including `parent_track_id` for divisions
    - Can be imported into analysis software
+
+Double-click the `_ultrack.tif` result in the batch results table to see the
+tracks, with divisions, as a Tracks layer. For per-file numbers (track
+lengths, gaps, short tracks), run [Track Statistics (QC)](track_statistics.md).
 
 ## Tips for Best Results
 Understand Your Data First

@@ -1744,6 +1744,12 @@ class ProcessedFilesTableWidget(QTableWidget):
         """
         Load original image into viewer with proper multi-channel support using napari-ome-zarr
         """
+        self._load_original_layers(filepath)
+        # Tracked files are often the input of a QC run, not only an output.
+        self._add_tracks_layer(filepath, self.current_original_images)
+
+    def _load_original_layers(self, filepath: str):
+        """The image or labels layers of one original file."""
         # Ensure filepath is valid
         if not filepath or not os.path.exists(filepath):
             print(f"Error: File does not exist: {filepath}")
@@ -2003,8 +2009,61 @@ class ProcessedFilesTableWidget(QTableWidget):
     def _load_processed_image(self, filepath: str):
         """
         Load processed image into viewer with multi-channel support and ensure it's always shown on top
-        Also handles points data from spot detection functions.
+        Also handles points data from spot detection functions, and adds a
+        Tracks layer on top of tracked labels.
         """
+        self._load_processed_layers(filepath)
+        self._add_tracks_layer(filepath, self.current_processed_images)
+
+    def _add_tracks_layer(self, filepath: str, layers: list):
+        """
+        Show a tracker's output as tracks, not only as recoloured labels.
+
+        ``layers`` is the list the file's layers were just added to; the
+        Tracks layer joins it, so it is removed with them.
+        """
+        from napari_tmidas.processing_functions.track_qc import (
+            is_tracked_output,
+            load_tracks_for_labels,
+        )
+
+        if not filepath or not is_tracked_output(filepath):
+            return
+        from napari.layers import Labels as _NapariLabels
+
+        labels = next(
+            (
+                layer
+                for layer in layers
+                if isinstance(layer, _NapariLabels) and layer.ndim >= 3
+            ),
+            None,
+        )
+        if labels is None:
+            return
+        name = os.path.basename(str(filepath).rstrip("/"))
+        try:
+            data, graph, source = load_tracks_for_labels(filepath, labels.ndim)
+            if data is None:
+                self.viewer.status = f"No tracks shown for {name}: {source}"
+                return
+            layer = self.viewer.add_tracks(
+                data,
+                graph=graph,
+                name=f"Tracks: {name}",
+                scale=labels.scale,
+                translate=labels.translate,
+                tail_length=10,
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the labels display
+            print(f"Could not add tracks for {name}: {exc}")
+            return
+        layers.append(layer)
+        n_tracks = len(np.unique(data[:, 0]))
+        self.viewer.status = f"Loaded {name} with {n_tracks} tracks ({source})"
+
+    def _load_processed_layers(self, filepath: str):
+        """The image, labels or points layers of one processed file."""
         # Ensure filepath is valid
         if not filepath or not os.path.exists(filepath):
             print(f"Error: File does not exist: {filepath}")

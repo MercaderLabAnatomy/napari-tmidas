@@ -84,6 +84,7 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 - **[Frame Removal](docs/frame_removal.md)** - Interactive human-in-the-loop frame removal from time series
 - **[Label-Based Cropping](docs/label_based_cropping.md)** - Interactive ROI extraction with label expansion
 - **[Quality Control](docs/grid_view_overlay.md)** - Visual QC with grid overlay
+- **[Tracking QC](docs/track_statistics.md)** - Tracks layer for tracking results and per-file track statistics
 - **[Quantification](docs/regionprops_analysis.md)** - Extract measurements from labels
 - **[Workflow Log](docs/workflow_log.md)** - Every batch run is recorded in `tmidas_workflow.jsonl` in your data folder: function, parameters, files, outputs and versions
 
