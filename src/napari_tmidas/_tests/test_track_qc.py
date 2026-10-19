@@ -159,11 +159,15 @@ class TestBatchFunction:
 
     def test_registered_and_streams(self):
         from napari_tmidas._registry import BatchProcessingRegistry
+        from napari_tmidas.processing_functions import track_qc
 
         info = BatchProcessingRegistry.get_function_info("Track Statistics (QC)")
         assert info is not None
-        assert info["func"] is track_statistics_qc
-        assert track_statistics_qc.skip_load is True
+        # Read off the module now, not the name imported at the top: other
+        # tests reload the processing modules, which re-registers a new
+        # function object under the same name.
+        assert info["func"] is track_qc.track_statistics_qc
+        assert info["func"].skip_load is True
 
 
 class TestLoadTracksForLabels:
