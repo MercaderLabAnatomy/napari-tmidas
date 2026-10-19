@@ -1,5 +1,8 @@
 """Tests for the tracking QC: track table, statistics and the batch function."""
 
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -253,6 +256,16 @@ class TestLoadTracksForLabels:
         assert is_tracked_output(f"/x/{name}") is expected
 
 
+# Real napari layers need a viewer, and a viewer needs OpenGL, which
+# segfaults under headless Qt on macOS CI (same guard as
+# test_file_conversion.py and test_frame_removal.py).
+requires_gui = pytest.mark.skipif(
+    sys.platform == "darwin" and os.environ.get("CI") == "true",
+    reason="Qt widget tests cause segfaults on macOS CI (headless)",
+)
+
+
+@requires_gui
 class TestResultsTableShowsTracks:
     def test_tracked_labels_get_a_tracks_layer(self, make_napari_viewer, tmp_path):
         import napari_tmidas._file_selector as fs

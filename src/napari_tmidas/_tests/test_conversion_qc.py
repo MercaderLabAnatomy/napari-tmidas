@@ -1,6 +1,7 @@
 """Read-back check of converted files, and the OME-TIFF metadata it relies on."""
 
 import csv
+from types import SimpleNamespace
 
 import dask.array as da
 import numpy as np
@@ -176,12 +177,14 @@ class TestQcReachesReportAndWidget:
         assert row["qc"] == "ok"
         assert row["message"] == "Conversion successful"
 
-    def test_widget_collects_and_warns_once(self, make_napari_viewer, monkeypatch):
+    def test_widget_collects_and_warns_once(self, qapp, monkeypatch):
         import napari.utils.notifications as notifications
 
         shown = []
         monkeypatch.setattr(notifications, "show_warning", shown.append)
-        widget = fc.MicroscopyImageConverterWidget(make_napari_viewer())
+        # A stub viewer: the widget only stores it, and a real one needs
+        # OpenGL, which segfaults on headless macOS CI.
+        widget = fc.MicroscopyImageConverterWidget(SimpleNamespace(status=""))
         widget.status_label.setText("Successfully converted 2 files to /out")
         widget._conversion_qc_issues = []
 
