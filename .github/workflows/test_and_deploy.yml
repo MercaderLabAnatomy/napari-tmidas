@@ -56,9 +56,6 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # these libraries enable testing on Qt on linux
-      - uses: tlambert03/setup-qt-libs@v1
-
       - name: Free up disk space (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -70,15 +67,35 @@ jobs:
           sudo docker image prune --all --force
           df -h
 
+      # Tests run Qt with QT_QPA_PLATFORM=offscreen, so the xcb libraries
+      # that tlambert03/setup-qt-libs installs are never loaded. The offscreen
+      # plugin needs only the runtime libraries below, which the runner image
+      # already ships -- so apt is touched only if one is actually missing.
+      # Calling apt unconditionally made every Linux job fail whenever the
+      # Ubuntu mirror was unreachable, without a single test having run.
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          missing=""
+          for lib in libGL.so.1 libglib-2.0.so.0 libgthread-2.0.so.0 \
+                     libfontconfig.so.1 libfreetype.so.6 libX11.so.6 \
+                     libXext.so.6 libSM.so.6 libXrender.so.1 libgomp.so.1; do
+            ldconfig -p | grep -q "$lib" || missing="$missing $lib"
+          done
+          if [ -z "$missing" ]; then
+            echo "All required system libraries are present; skipping apt."
+            exit 0
+          fi
+          echo "Missing:$missing -- installing via apt."
           sudo apt-get update
           sudo apt-get install -y \
-            libgl1-mesa-dev \
+            libgl1 \
             libglib2.0-0 \
-            libsm6 \
+            libfontconfig1 \
+            libfreetype6 \
+            libx11-6 \
             libxext6 \
+            libsm6 \
             libxrender1 \
             libgomp1
 
