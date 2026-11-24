@@ -4957,7 +4957,7 @@ class FileResultsWidget(QWidget):
                             f"Saved to:\n{_grid_output_path}"
                         )
                         msg.setStandardButtons(QMessageBox.Ok)
-                        msg.exec_()
+                        msg.exec()
 
                         # Reset the grid cache for next run
                         from napari_tmidas.processing_functions.grid_view_overlay import (

@@ -117,7 +117,7 @@ class _MessageBoxStub:
     def setStandardButtons(self, buttons):
         pass
 
-    def exec_(self):
+    def exec(self):
         self.executed = True
         return self.Ok
 
