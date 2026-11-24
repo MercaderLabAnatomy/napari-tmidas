@@ -77,7 +77,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           missing=""
-          for lib in libGL.so.1 libglib-2.0.so.0 libgthread-2.0.so.0 \
+          # Qt6's QtGui (PyQt6) also links libEGL and libxkbcommon, which
+          # Qt5 did not; the runner image does not ship libEGL.
+          for lib in libGL.so.1 libEGL.so.1 libxkbcommon.so.0 \
+                     libglib-2.0.so.0 libgthread-2.0.so.0 \
                      libfontconfig.so.1 libfreetype.so.6 libX11.so.6 \
                      libXext.so.6 libSM.so.6 libXrender.so.1 libgomp.so.1; do
             ldconfig -p | grep -q "$lib" || missing="$missing $lib"
@@ -90,6 +93,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libgl1 \
+            libegl1 \
+            libxkbcommon0 \
             libglib2.0-0 \
             libfontconfig1 \
             libfreetype6 \
