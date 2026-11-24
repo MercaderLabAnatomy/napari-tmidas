@@ -104,12 +104,21 @@ def read_physical_sizes(path: str) -> Dict[str, float]:
 
     with tifffile.TiffFile(path) as tif:
         page = tif.pages[0]
+        unit = page.tags.get("ResolutionUnit")
+        # ImageJ writes pixels per µm with no unit and the converter with
+        # ResolutionUnit MICROMETER; a centimetre unit means pixels per cm.
+        um_per_unit = (
+            1e4
+            if unit is not None
+            and int(unit.value) == int(tifffile.RESUNIT.CENTIMETER)
+            else 1.0
+        )
         for axis, tag in (("X", "XResolution"), ("Y", "YResolution")):
             value = page.tags.get(tag)
             if value is not None:
                 numerator, denominator = value.value
                 if numerator:
-                    sizes[axis] = denominator / numerator
+                    sizes[axis] = um_per_unit * denominator / numerator
         spacing = (tif.imagej_metadata or {}).get("spacing")
         if spacing:
             sizes["Z"] = float(spacing)

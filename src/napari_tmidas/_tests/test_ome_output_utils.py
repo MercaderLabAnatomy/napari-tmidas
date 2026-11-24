@@ -422,3 +422,100 @@ class TestPhysicalScaleKwargs:
         dataset = doc["attributes"]["ome"]["multiscales"][0]["datasets"][0]
         written = dataset["coordinateTransformations"][0]["scale"]
         assert written == pytest.approx([5.0, 0.5, 0.5])
+
+
+class TestExtractSourceTimeInterval:
+    @pytest.mark.parametrize(
+        ("value", "unit", "seconds"),
+        [(12.5, "s", 12.5), (500, "ms", 0.5), (2, "min", 120.0)],
+    )
+    def test_ome_tiff_time_increment(self, tmp_path, value, unit, seconds):
+        path = tmp_path / "movie.tif"
+        tifffile.imwrite(
+            str(path),
+            np.zeros((3, 8, 8), np.uint8),
+            photometric="minisblack",
+            ome=True,
+            metadata={
+                "axes": "TYX",
+                "TimeIncrement": value,
+                "TimeIncrementUnit": unit,
+            },
+        )
+
+        assert ome_output_utils.extract_source_time_interval(
+            str(path)
+        ) == pytest.approx(seconds)
+
+    def test_tiff_without_time_increment(self, tmp_path):
+        path = tmp_path / "movie.tif"
+        tifffile.imwrite(
+            str(path),
+            np.zeros((3, 8, 8), np.uint8),
+            photometric="minisblack",
+            metadata={"axes": "TYX"},
+        )
+
+        assert ome_output_utils.extract_source_time_interval(str(path)) is None
+
+    def _zarr(self, tmp_path, attributes):
+        store = tmp_path / "movie.zarr"
+        store.mkdir()
+        (store / "zarr.json").write_text(
+            json.dumps(
+                {
+                    "zarr_format": 3,
+                    "node_type": "group",
+                    "attributes": attributes,
+                }
+            )
+        )
+        return str(store)
+
+    def test_zarr_converter_attribute(self, tmp_path):
+        path = self._zarr(
+            tmp_path,
+            {"napari_tmidas": {"time_interval": 11.13, "time_interval_unit": "second"}},
+        )
+
+        assert ome_output_utils.extract_source_time_interval(path) == 11.13
+
+    def test_zarr_t_axis_with_time_unit(self, tmp_path):
+        multiscales = [
+            {
+                "axes": [
+                    {"name": "t", "type": "time", "unit": "millisecond"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"},
+                ],
+                "datasets": [
+                    {
+                        "path": "0",
+                        "coordinateTransformations": [
+                            {"type": "scale", "scale": [250.0, 1.0, 1.0]}
+                        ],
+                    }
+                ],
+            }
+        ]
+        path = self._zarr(tmp_path, {"ome": {"multiscales": multiscales}})
+
+        assert ome_output_utils.extract_source_time_interval(path) == 0.25
+
+    def test_zarr_t_scale_without_unit_is_not_a_time(self, tmp_path):
+        multiscales = [
+            {
+                "axes": [{"name": "t"}, {"name": "y"}, {"name": "x"}],
+                "datasets": [
+                    {
+                        "path": "0",
+                        "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 1.0]}
+                        ],
+                    }
+                ],
+            }
+        ]
+        path = self._zarr(tmp_path, {"ome": {"multiscales": multiscales}})
+
+        assert ome_output_utils.extract_source_time_interval(path) is None

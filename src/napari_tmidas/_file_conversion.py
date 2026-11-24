@@ -13,6 +13,7 @@ import gc
 import os
 import re
 import shutil
+import struct
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,12 @@ from qtpy.QtWidgets import (
 )
 from readlif.reader import LifFile
 
+from napari_tmidas._czi_raw import (
+    CziRawReader,
+    CziRawReadError,
+    is_libczi_not_implemented,
+    measure_frame_interval,
+)
 from napari_tmidas._output_qc import (
     check_converted_output,
     expected_physical_sizes,
@@ -1135,6 +1142,9 @@ class CZILoader(FormatLoader):
 
     """
 
+    # Series larger than this are returned as a lazy dask array.
+    DASK_THRESHOLD_GB = 2.0
+
     @staticmethod
     def can_load(filepath: str) -> bool:
         if not filepath.lower().endswith(".czi"):
@@ -1249,14 +1259,34 @@ class CZILoader(FormatLoader):
                     f"Dimensions: T={T_size}, Z={Z_size}, C={C_size}, Y={Y_size}, X={X_size}"
                 )
 
-                # Read a single plane to get dtype and actual Y, X dimensions
+                # Read a single plane to get dtype and actual Y, X dimensions.
+                # If libCZI cannot decode the subblocks (ZEN camera streaming
+                # tags raw data with compression 1000), read them directly.
                 plane_params = {"T": T_start, "Z": Z_start, "C": C_start}
-                if scene_id is not None:
-                    sample_plane = czidoc.read(
-                        plane=plane_params, scene=scene_id
+                raw_reader = None
+                raw_roi = None
+                try:
+                    sample_plane = CZILoader._read_libczi_plane(
+                        czidoc, plane_params, scene_id
                     )
-                else:
-                    sample_plane = czidoc.read(plane=plane_params)
+                except RuntimeError as e:
+                    if not is_libczi_not_implemented(e):
+                        raise
+                    raw_reader, raw_roi = CZILoader._open_raw_fallback(
+                        filepath, czidoc, scene_id, e
+                    )
+                    sample_plane = raw_reader.read_plane(
+                        plane_params, raw_roi, scene_id
+                    )
+
+                def read_plane(doc, plane_dict):
+                    if raw_reader is not None:
+                        return raw_reader.read_plane(
+                            plane_dict, raw_roi, scene_id
+                        )
+                    return CZILoader._read_libczi_plane(
+                        doc, plane_dict, scene_id
+                    )
 
                 # Remove the trailing singleton dimension from the plane
                 sample_plane = sample_plane.squeeze()
@@ -1283,7 +1313,7 @@ class CZILoader(FormatLoader):
                 full_shape = (T_size, C_size, Z_size, y_dim, x_dim)
 
                 # For large datasets, use Dask for lazy loading
-                if total_size_gb > 2.0:
+                if total_size_gb > CZILoader.DASK_THRESHOLD_GB:
                     _debug_print("Using Dask for lazy loading")
 
                     def load_plane(t, c, z):
@@ -1293,14 +1323,10 @@ class CZILoader(FormatLoader):
                             "Z": Z_start + z,
                             "C": C_start + c,
                         }
+                        if raw_reader is not None:
+                            return read_plane(None, plane_dict)
                         with pyczi.open_czi(filepath) as czidoc_inner:
-                            if scene_id is not None:
-                                plane = czidoc_inner.read(
-                                    plane=plane_dict, scene=scene_id
-                                )
-                            else:
-                                plane = czidoc_inner.read(plane=plane_dict)
-                            return plane.squeeze()
+                            return read_plane(czidoc_inner, plane_dict)
 
                     # Create delayed array
                     import dask.array as da
@@ -1343,14 +1369,9 @@ class CZILoader(FormatLoader):
                                     "Z": Z_start + z,
                                     "C": C_start + c,
                                 }
-                                if scene_id is not None:
-                                    plane = czidoc.read(
-                                        plane=plane_dict, scene=scene_id
-                                    )
-                                else:
-                                    plane = czidoc.read(plane=plane_dict)
-
-                                image_data[t, c, z, :, :] = plane.squeeze()
+                                image_data[t, c, z, :, :] = read_plane(
+                                    czidoc, plane_dict
+                                )
 
                                 plane_count += 1
                                 if (
@@ -1374,6 +1395,42 @@ class CZILoader(FormatLoader):
             raise FileFormatError(
                 f"Failed to load CZI series {series_index}: {str(e)}"
             ) from e
+
+    @staticmethod
+    def _read_libczi_plane(czidoc, plane: Dict[str, int], scene_id):
+        """Read one plane through libCZI, without the trailing sample axis."""
+        if scene_id is not None:
+            return czidoc.read(plane=plane, scene=scene_id).squeeze()
+        return czidoc.read(plane=plane).squeeze()
+
+    @staticmethod
+    def _open_raw_fallback(filepath: str, czidoc, scene_id, libczi_error):
+        """
+        Open ``filepath`` with :class:`CziRawReader` after libCZI failed.
+
+        Returns the reader and the region libCZI would have read (the scene
+        or the whole document). Raises FileFormatError naming both the
+        libCZI error and why the raw reader cannot take over.
+        """
+        try:
+            reader = CziRawReader(filepath)
+        except (CziRawReadError, OSError, struct.error) as e:
+            raise FileFormatError(
+                f"libCZI cannot decode this CZI ({libczi_error}), and it "
+                f"cannot be read as uncompressed subblocks: {e}"
+            ) from e
+
+        if scene_id is not None:
+            rect = czidoc.scenes_bounding_rectangle[scene_id]
+        else:
+            rect = czidoc.total_bounding_rectangle
+        modes = sorted(reader.compression_modes - {0})
+        print(
+            f"CZI {Path(filepath).name}: libCZI cannot decode compression "
+            f"mode {modes} (ZEN camera streaming); reading the uncompressed "
+            "subblocks directly."
+        )
+        return reader, (rect.x, rect.y, rect.w, rect.h)
 
     @staticmethod
     def get_metadata(filepath: str, series_index: int) -> Dict:
@@ -1434,6 +1491,15 @@ class CZILoader(FormatLoader):
                         "Warning: Could not extract scale information from metadata"
                     )
 
+                try:
+                    is_time_series = total_bbox.get("T", (0, 1))[1] > 1
+                except (AttributeError, RuntimeError, TypeError):
+                    is_time_series = False
+                if is_time_series:
+                    metadata.update(
+                        CZILoader._time_interval_metadata(filepath, czidoc)
+                    )
+
                 # Get actual data to determine final dimensions after squeezing
                 try:
                     # Don't actually load data, just use the bounding box info
@@ -1489,6 +1555,89 @@ class CZILoader(FormatLoader):
         except (OSError, ImportError, AttributeError, RuntimeError) as e:
             print(f"Warning: Could not extract metadata from {filepath}: {e}")
             return {}
+
+    # Measured and set frame interval may differ by this fraction before
+    # the conversion warns about it.
+    TIME_INTERVAL_TOLERANCE = 0.05
+
+    @staticmethod
+    def _time_interval_metadata(filepath: str, czidoc) -> Dict[str, float]:
+        """
+        Frame interval in seconds for a time series.
+
+        ``time_interval`` is the interval measured from the subblock
+        acquisition times; ZEN only records the interval that was set, and
+        a Z stack that takes longer than that runs back to back, so the set
+        value can be far off. ``time_interval_set`` is the set value. When
+        no timestamps can be read the set value is used as the interval.
+        """
+        result: Dict[str, float] = {}
+        try:
+            nominal = CZILoader._extract_time_interval_from_xml(
+                czidoc.raw_metadata
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            nominal = None
+        if nominal:
+            result["time_interval_set"] = nominal
+
+        try:
+            timing = measure_frame_interval(filepath)
+        except (CziRawReadError, OSError, struct.error, ValueError) as e:
+            _debug_print(f"Could not measure frame interval: {e}")
+            timing = None
+
+        name = Path(filepath).name
+        if timing is not None:
+            result["time_interval"] = timing.median
+            set_text = f"set {nominal:g} s, " if nominal else ""
+            print(
+                f"Frame interval for {name}: {set_text}measured "
+                f"{timing.median:.3f} s (range {timing.minimum:.3f}-"
+                f"{timing.maximum:.3f} s over {timing.frames} frames)"
+            )
+            if (
+                nominal
+                and abs(timing.median - nominal) / nominal
+                > CZILoader.TIME_INTERVAL_TOLERANCE
+            ):
+                print(
+                    f"⚠️  {name}: frames were acquired every "
+                    f"{timing.median:.3f} s, not every {nominal:g} s as set "
+                    "in ZEN; the measured interval is written to the output."
+                )
+        elif nominal:
+            result["time_interval"] = nominal
+            print(
+                f"Frame interval for {name}: {nominal:g} s as set in ZEN "
+                "(no acquisition timestamps to check it against)"
+            )
+        return result
+
+    @staticmethod
+    def _extract_time_interval_from_xml(raw_xml: str) -> Optional[float]:
+        """Set interval of the ZEN time series experiment, in seconds."""
+        if not isinstance(raw_xml, str):
+            return None
+        match = re.search(
+            r"<TimeSeriesSetup\b.*?<Interval>\s*<TimeSpan>\s*"
+            r"<Value>([^<]+)</Value>\s*"
+            r"(?:<DefaultUnitFormat>([^<]*)</DefaultUnitFormat>)?",
+            raw_xml,
+            re.S,
+        )
+        if not match:
+            return None
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            return None
+        factor = {"ms": 1e-3, "s": 1.0, "min": 60.0, "h": 3600.0}.get(
+            (match.group(2) or "s").strip()
+        )
+        if factor is None or value <= 0:
+            return None
+        return value * factor
 
     @staticmethod
     def _extract_scale_from_xml(
@@ -1795,7 +1944,56 @@ def _ome_tiff_metadata(metadata: dict, ndim: int) -> dict:
             continue
         ome[f"PhysicalSize{axis}"] = size
         ome[f"PhysicalSize{axis}Unit"] = "µm"
+    time_interval = _positive_float(metadata.get("time_interval"))
+    if time_interval and axes_ok and "T" in axes:
+        ome["TimeIncrement"] = time_interval
+        ome["TimeIncrementUnit"] = "s"
     return ome
+
+
+def _positive_float(value) -> Optional[float]:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _zarr_time_interval_attrs(metadata: dict, axes: str) -> dict:
+    """
+    Frame interval for the OME-Zarr root attributes.
+
+    Kept out of the ``t`` scale on purpose: napari-ome-zarr applies that
+    scale, and label layers that downstream steps write as TIFF carry no T
+    scale, so the two would stop lining up in time.
+    """
+    interval = _positive_float(metadata.get("time_interval"))
+    if not interval or "t" not in str(axes).lower():
+        return {}
+    attrs = {"time_interval": interval, "time_interval_unit": "second"}
+    interval_set = _positive_float(metadata.get("time_interval_set"))
+    if interval_set:
+        attrs["time_interval_set"] = interval_set
+    return attrs
+
+
+def _tiff_resolution_kwargs(metadata: dict) -> dict:
+    """
+    Baseline TIFF resolution tags for the loader's pixel size.
+
+    Pixels per µm, with ResolutionUnit MICROMETER (5). That unit is a
+    tifffile extension beyond baseline TIFF's inch/centimetre, so readers
+    that only know baseline TIFF ignore it; the OME-XML holds the pixel
+    size for everyone else. Without a unit, tifffile labels the tags as
+    pixels per *inch*.
+    """
+    sizes = expected_physical_sizes(metadata)
+    if "X" not in sizes or "Y" not in sizes:
+        return {}
+    return {
+        "resolution": (1.0 / sizes["X"], 1.0 / sizes["Y"]),
+        "resolutionunit": "MICROMETER",
+    }
 
 
 def conversion_output_path(
@@ -2242,14 +2440,8 @@ class ConversionWorker(QThread):
                 "ome": True,
                 "photometric": "minisblack",
                 "metadata": _ome_tiff_metadata(metadata, image_data.ndim),
+                **_tiff_resolution_kwargs(metadata),
             }
-
-            if metadata.get("resolution"):
-                try:
-                    res_x, res_y = metadata["resolution"]
-                    save_kwargs["resolution"] = (float(res_x), float(res_y))
-                except (ValueError, TypeError):
-                    pass
 
             tifffile.imwrite(output_path, image_data, **save_kwargs)
             return os.path.exists(output_path)
@@ -2298,6 +2490,7 @@ class ConversionWorker(QThread):
                     metadata=_ome_tiff_metadata(
                         metadata or {}, dask_array.ndim
                     ),
+                    **_tiff_resolution_kwargs(metadata or {}),
                 )
             else:
                 # For 3D or smaller, compute and save normally
@@ -2312,6 +2505,7 @@ class ConversionWorker(QThread):
                     metadata=_ome_tiff_metadata(
                         metadata or {}, computed_data.ndim
                     ),
+                    **_tiff_resolution_kwargs(metadata or {}),
                 )
 
             return True
@@ -2419,6 +2613,7 @@ class ConversionWorker(QThread):
             )
 
             from napari_tmidas.processing_functions.ome_output_utils import (
+                axes_units_kwargs,
                 physical_scale_kwargs,
             )
 
@@ -2430,6 +2625,18 @@ class ConversionWorker(QThread):
             # so write a single-level OME-Zarr (no multiscale pyramid).
             zarr_axes = axes or "zyx"
             scale_kwargs = physical_scale_kwargs(scale_transform, zarr_axes)
+            if scale_kwargs:
+                # Only axes whose physical size the loader reported are in
+                # micrometres; the others are in pixels and get no unit.
+                scale_kwargs.update(
+                    axes_units_kwargs(
+                        {
+                            axis.lower(): "micrometer"
+                            for axis in expected_physical_sizes(metadata)
+                        },
+                        zarr_axes,
+                    )
+                )
 
             # Save with OME-ZARR including physical metadata
             with ProgressBar():
@@ -2437,6 +2644,9 @@ class ConversionWorker(QThread):
 
                 # Set layer name for napari compatibility
                 root.attrs["name"] = layer_name
+                time_attrs = _zarr_time_interval_attrs(metadata, zarr_axes)
+                if time_attrs:
+                    root.attrs["napari_tmidas"] = time_attrs
 
                 # Write a single-level OME-Zarr with physical metadata.
                 write_image(

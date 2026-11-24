@@ -757,6 +757,67 @@ def _stage_raw_to_zarr(
     return str(dest), str(dest)
 
 
+_PIXEL_SCALE_KEYWORDS = ("pixels", "pixel", "none", "off")
+
+
+def _resolve_scale(scale: str, raw_path: str, movie_shape, tag: str):
+    """
+    ``--scale`` values for HOCT: as given, or from the raw image metadata.
+
+    HOCT multiplies every node coordinate by this scale and builds its
+    candidate edges (``--max-distance``, ``--neighbors``) on the result, so
+    the anisotropy of the voxels matters; its model features use the
+    unscaled pixel coordinates. Empty ``scale`` reads the voxel size from
+    the raw image (OME PhysicalSize / OME-Zarr scale) and the frame
+    interval (OME TimeIncrement / converter attribute). One of the
+    ``_PIXEL_SCALE_KEYWORDS`` tracks in pixel and frame units.
+    """
+    spec = (scale or "").strip()
+    if spec.lower() in _PIXEL_SCALE_KEYWORDS:
+        print(f"[{tag}] Tracking in pixel and frame units (scale={spec!r}).")
+        return []
+    if spec:
+        return [v for v in spec.replace(",", " ").split() if v.strip()]
+    return _scale_from_raw_metadata(raw_path, movie_shape, tag)
+
+
+def _scale_from_raw_metadata(raw_path: str, movie_shape, tag: str):
+    """'t [z] y x' scale strings from the raw image's metadata, or []."""
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        _extract_source_physical_scale,
+        extract_source_time_interval,
+    )
+
+    if movie_shape is None or len(movie_shape) not in (3, 4):
+        return []
+    spatial_axes = "ZYX" if len(movie_shape) == 4 else "YX"
+    sizes = _extract_source_physical_scale(raw_path, spatial_axes)
+    missing = [axis for axis in spatial_axes if axis not in sizes]
+    if missing:
+        print(
+            f"[{tag}] Raw image has no pixel size for {', '.join(missing)}; "
+            "tracking in pixel units (--max-distance is in pixels). Set "
+            "'scale' to give the voxel size."
+        )
+        return []
+
+    interval = extract_source_time_interval(raw_path)
+    values = [interval or 1.0] + [float(sizes[axis]) for axis in spatial_axes]
+    spatial_text = ", ".join(
+        f"{axis.lower()}={sizes[axis]:g}" for axis in spatial_axes
+    )
+    time_text = (
+        f"t={interval:.6g} s"
+        if interval
+        else "t=1 (no frame interval in the raw image)"
+    )
+    print(
+        f"[{tag}] HOCT scale from raw image metadata: {time_text}, "
+        f"{spatial_text} µm; --max-distance is in µm."
+    )
+    return [f"{value:.6g}" for value in values]
+
+
 @BatchProcessingRegistry.register(
     name="Track Cells with HOCT",
     suffix="_hoct_tracked",
@@ -801,7 +862,7 @@ def _stage_raw_to_zarr(
             "min": 1.0,
             "max": 5000.0,
             "step": 1.0,
-            "description": "Maximum spatial distance (pixels) for candidate tracking edges (HOCT --max-distance).",
+            "description": "Maximum distance for candidate tracking edges (HOCT --max-distance): in µm when a voxel size is known (from 'scale' or the raw image), otherwise in pixels.",
         },
         "neighbors": {
             "type": int,
@@ -826,7 +887,7 @@ def _stage_raw_to_zarr(
         "scale": {
             "type": str,
             "default": "",
-            "description": "Optional physical voxel size as space-separated 't y x' or 't z y x' (e.g. '1 0.5 0.2 0.2'). Leave empty to track in pixel units.",
+            "description": "Voxel size as space-separated 't y x' or 't z y x' (seconds, µm; e.g. '12 3.84 1.3 1.3'). Leave empty to read it from the raw image's metadata (pixel size and frame interval); type 'pixels' to track in pixel and frame units.",
         },
         "gurobi_license": {
             "type": str,
@@ -922,7 +983,8 @@ def hoct_tracking(
     window : int
         Temporal window size for the frame dataset
     max_distance : float
-        Maximum spatial distance (pixels) for candidate tracking edges
+        Maximum distance for candidate tracking edges; in µm when a voxel
+        size is known (from ``scale`` or the raw image), else in pixels
     neighbors : int
         Maximum number of candidate neighbors per node
     max_dt : int
@@ -930,7 +992,9 @@ def hoct_tracking(
     tile : str
         Tiled inference mode: 'auto', 'on', or 'off'
     scale : str
-        Optional physical voxel size, space-separated 't y x' or 't z y x'
+        Voxel size, space-separated 't y x' or 't z y x' (seconds, µm).
+        Empty reads it from the raw image's metadata (OME pixel size and
+        frame interval); 'pixels' tracks in pixel and frame units.
     gurobi_license : str
         Optional path to a Gurobi license file (.lic) used by HOCT's ILP
         solver. Leave empty to auto-detect ~/gurobi.lic (or an
@@ -1070,6 +1134,9 @@ def hoct_tracking(
     # is either passed through (already lazily readable and channel-free) or
     # streamed into a Zarr store with the requested channel selected.
     staged_paths = []
+    # Staged copies carry no metadata: read pixel size and frame interval
+    # from the raw image as given.
+    source_raw_path = str(raw_path)
     try:
         mask_path, staged_mask = _stage_label_input(
             str(mask_path), temp_dir, stage_inputs, label_tag
@@ -1120,7 +1187,9 @@ def hoct_tracking(
     if model.strip():
         cmd += ["-m", model.strip()]
 
-    scale_values = [v for v in scale.replace(",", " ").split() if v.strip()]
+    scale_values = _resolve_scale(
+        scale, source_raw_path, _movie_shape(label_shape), label_tag
+    )
     for value in scale_values:
         cmd += ["--scale", value]
 
