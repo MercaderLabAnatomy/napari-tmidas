@@ -63,6 +63,36 @@ def physical_scale_kwargs(scale_transform: Optional[dict], axes: Any) -> dict:
     return {"scale": dict(zip(axis_names, (float(s) for s in scales)))}
 
 
+def _write_image_accepts_axes_units() -> bool:
+    """Whether the installed ome-zarr takes axis units via ``axes_units``."""
+    try:
+        from ome_zarr.writer import write_image
+
+        return "axes_units" in inspect.signature(write_image).parameters
+    except (ImportError, TypeError, ValueError):
+        return False
+
+
+def axes_units_kwargs(units: Optional[dict], axes: Any) -> dict:
+    """
+    Build the ``write_image()`` keyword that labels axes with their unit.
+
+    ``units`` maps axis names to OME-NGFF unit names ("micrometer",
+    "second"); axes not in ``axes`` are dropped. Returns {} on ome-zarr
+    releases without ``axes_units``, which then write axes without units
+    as before.
+    """
+    if not units or not _write_image_accepts_axes_units():
+        return {}
+    axis_names = {str(axis).lower() for axis in (axes or "")}
+    selected = {
+        str(axis).lower(): unit
+        for axis, unit in units.items()
+        if str(axis).lower() in axis_names and unit
+    }
+    return {"axes_units": selected} if selected else {}
+
+
 def _read_root_attrs(source_path: str) -> dict:
     attrs = {}
     zattrs_path = os.path.join(source_path, ".zattrs")

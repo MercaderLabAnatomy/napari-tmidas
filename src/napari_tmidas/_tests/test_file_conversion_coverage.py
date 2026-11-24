@@ -1793,10 +1793,16 @@ class TestSaveTifBranches:
             is True
         )
 
+        # Pixels per µm are stored as pixels per centimetre, a unit TIFF
+        # defines; without one, readers take the tags as pixels per inch.
         with tifffile.TiffFile(out) as handle:
             page = handle.pages[0]
-            assert page.tags["XResolution"].value == (4, 1)
-            assert page.tags["YResolution"].value == (2, 1)
+            assert page.tags["XResolution"].value == (40000, 1)
+            assert page.tags["YResolution"].value == (20000, 1)
+            assert (
+                page.tags["ResolutionUnit"].value
+                == tifffile.RESUNIT.CENTIMETER
+            )
 
     def test_unparsable_resolution_is_dropped_not_fatal(
         self, conv_worker, tmp_path

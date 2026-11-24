@@ -538,18 +538,62 @@ class TestSaveTif:
         np.testing.assert_array_equal(tifffile.imread(out), data)
 
     def test_resolution_metadata_is_written(self, worker, tmp_path):
+        """Pixels per µm from the loader land in the tags as pixels per cm."""
+        from napari_tmidas._output_qc import read_physical_sizes
+
         data = np.zeros((8, 8), dtype=np.uint8)
         out = str(tmp_path / "out.tif")
         worker._save_tif(data, out, {"resolution": (3.0, 4.0)})
 
         with tifffile.TiffFile(out) as tif:
             tags = tif.pages[0].tags
+            assert tags["ResolutionUnit"].value == tifffile.RESUNIT.CENTIMETER
             assert tags["XResolution"].value[0] / tags["XResolution"].value[
                 1
-            ] == pytest.approx(3.0)
+            ] == pytest.approx(3.0e4)
             assert tags["YResolution"].value[0] / tags["YResolution"].value[
                 1
-            ] == pytest.approx(4.0)
+            ] == pytest.approx(4.0e4)
+        assert read_physical_sizes(out) == pytest.approx(
+            {"X": 1 / 3.0, "Y": 1 / 4.0}
+        )
+
+    @pytest.mark.parametrize("lazy", [False, True])
+    def test_time_interval_becomes_ome_time_increment(
+        self, worker, tmp_path, lazy
+    ):
+        data = np.zeros((3, 2, 8, 8), dtype=np.uint16)
+        if lazy:
+            data = da.from_array(data, chunks=(1, 2, 8, 8))
+        out = str(tmp_path / "timelapse.tif")
+        metadata = {
+            "axes": "TZYX",
+            "resolution": (0.5, 0.5),
+            "time_interval": 11.13,
+        }
+
+        assert worker._save_tif(data, out, metadata) is True
+
+        with tifffile.TiffFile(out) as tif:
+            pixels = tifffile.xml2dict(tif.ome_metadata)["OME"]["Image"][
+                "Pixels"
+            ]
+            unit = tif.pages[0].tags["ResolutionUnit"].value
+        assert pixels["TimeIncrement"] == pytest.approx(11.13)
+        assert pixels["TimeIncrementUnit"] == "s"
+        assert pixels["PhysicalSizeX"] == pytest.approx(2.0)
+        assert unit == tifffile.RESUNIT.CENTIMETER
+
+    def test_no_time_increment_without_a_time_axis(self, worker, tmp_path):
+        out = str(tmp_path / "stack.tif")
+        worker._save_tif(
+            np.zeros((2, 8, 8), dtype=np.uint8),
+            out,
+            {"axes": "ZYX", "time_interval": 5.0},
+        )
+
+        with tifffile.TiffFile(out) as tif:
+            assert "TimeIncrement" not in tif.ome_metadata
 
     def test_unusable_resolution_metadata_is_ignored(self, worker, tmp_path):
         data = np.zeros((8, 8), dtype=np.uint8)
@@ -645,6 +689,78 @@ class TestSaveZarr:
         dataset = attrs["ome"]["multiscales"][0]["datasets"][0]
         scale = dataset["coordinateTransformations"][0]["scale"]
         assert scale == pytest.approx([5.0, 0.5, 0.5])
+
+    def test_axes_with_a_physical_size_carry_micrometer(
+        self, worker, tmp_path
+    ):
+        data = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+        out = str(tmp_path / "units.zarr")
+        metadata = {"axes": "tzyx", "resolution": (2.0, 2.0), "spacing": 5.0}
+
+        assert worker._save_zarr(data, out, metadata, "units", 0) is True
+
+        axes = json.loads((tmp_path / "units.zarr" / "zarr.json").read_text())[
+            "attributes"
+        ]["ome"]["multiscales"][0]["axes"]
+        units = {ax["name"]: ax.get("unit") for ax in axes}
+        assert units["z"] == units["y"] == units["x"] == "micrometer"
+        assert units["t"] is None
+
+    def test_time_interval_is_kept_out_of_the_t_scale(self, worker, tmp_path):
+        """
+        The interval goes into the root attributes, not the t scale: a T
+        scale would misalign the image with TIFF label layers in napari.
+        """
+        data = np.zeros((3, 2, 8, 8), dtype=np.uint8)
+        out = str(tmp_path / "timed.zarr")
+        metadata = {
+            "axes": "tzyx",
+            "resolution": (2.0, 2.0),
+            "spacing": 5.0,
+            "time_interval": 12.0,
+            "time_interval_set": 10.0,
+        }
+
+        assert worker._save_zarr(data, out, metadata, "timed", 0) is True
+
+        attrs = json.loads(
+            (tmp_path / "timed.zarr" / "zarr.json").read_text()
+        )["attributes"]
+        assert attrs["napari_tmidas"] == {
+            "time_interval": 12.0,
+            "time_interval_unit": "second",
+            "time_interval_set": 10.0,
+        }
+        multiscale = attrs["ome"]["multiscales"][0]
+        t = [ax["name"] for ax in multiscale["axes"]].index("t")
+        scale = multiscale["datasets"][0]["coordinateTransformations"][0]
+        assert scale["scale"][t] == 1.0
+
+    def test_no_time_interval_attribute_without_a_time_axis(
+        self, worker, tmp_path
+    ):
+        out = str(tmp_path / "stack.zarr")
+        metadata = {"axes": "zyx", "time_interval": 12.0}
+
+        worker._save_zarr(np.zeros((2, 8, 8), np.uint8), out, metadata, "s", 0)
+
+        attrs = json.loads(
+            (tmp_path / "stack.zarr" / "zarr.json").read_text()
+        )["attributes"]
+        assert "napari_tmidas" not in attrs
+
+    def test_axes_without_a_physical_size_get_no_unit(
+        self, worker, tmp_path
+    ):
+        data = np.zeros((3, 8, 8), dtype=np.uint8)
+        out = str(tmp_path / "pixels.zarr")
+
+        assert worker._save_zarr(data, out, {"axes": "zyx"}, "px", 0) is True
+
+        axes = json.loads(
+            (tmp_path / "pixels.zarr" / "zarr.json").read_text()
+        )["attributes"]["ome"]["multiscales"][0]["axes"]
+        assert all("unit" not in ax for ax in axes)
 
     def test_series_index_is_reflected_in_layer_name(self, worker, tmp_path):
         data = np.zeros((4, 8, 8), dtype=np.uint8)
