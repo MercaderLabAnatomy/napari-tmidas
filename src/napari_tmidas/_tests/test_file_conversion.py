@@ -538,7 +538,7 @@ class TestSaveTif:
         np.testing.assert_array_equal(tifffile.imread(out), data)
 
     def test_resolution_metadata_is_written(self, worker, tmp_path):
-        """Pixels per µm from the loader land in the tags as pixels per cm."""
+        """Pixels per µm from the loader land in the tags, unit MICROMETER."""
         from napari_tmidas._output_qc import read_physical_sizes
 
         data = np.zeros((8, 8), dtype=np.uint8)
@@ -547,13 +547,13 @@ class TestSaveTif:
 
         with tifffile.TiffFile(out) as tif:
             tags = tif.pages[0].tags
-            assert tags["ResolutionUnit"].value == tifffile.RESUNIT.CENTIMETER
+            assert tags["ResolutionUnit"].value == tifffile.RESUNIT.MICROMETER
             assert tags["XResolution"].value[0] / tags["XResolution"].value[
                 1
-            ] == pytest.approx(3.0e4)
+            ] == pytest.approx(3.0)
             assert tags["YResolution"].value[0] / tags["YResolution"].value[
                 1
-            ] == pytest.approx(4.0e4)
+            ] == pytest.approx(4.0)
         assert read_physical_sizes(out) == pytest.approx(
             {"X": 1 / 3.0, "Y": 1 / 4.0}
         )
@@ -582,7 +582,7 @@ class TestSaveTif:
         assert pixels["TimeIncrement"] == pytest.approx(11.13)
         assert pixels["TimeIncrementUnit"] == "s"
         assert pixels["PhysicalSizeX"] == pytest.approx(2.0)
-        assert unit == tifffile.RESUNIT.CENTIMETER
+        assert unit == tifffile.RESUNIT.MICROMETER
 
     def test_no_time_increment_without_a_time_axis(self, worker, tmp_path):
         out = str(tmp_path / "stack.tif")

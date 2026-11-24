@@ -1162,6 +1162,103 @@ class TestHoctTrackingRun:
         scales = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--scale"]
         assert scales == ["1", "0.5", "0.5"]
 
+    @staticmethod
+    def _scales(cmd):
+        return [cmd[i + 1] for i, v in enumerate(cmd) if v == "--scale"]
+
+    @staticmethod
+    def _write_ome_raw(hoct_pair, **metadata):
+        tifffile.imwrite(
+            str(hoct_pair.raw_path),
+            hoct_pair.raw,
+            photometric="minisblack",
+            ome=True,
+            metadata={"axes": "TYX", **metadata},
+        )
+
+    def test_empty_scale_is_read_from_the_raw_image(
+        self, monkeypatch, ready_env, hoct_pair
+    ):
+        """Pixel size and frame interval of the intensity image reach HOCT."""
+        self._write_ome_raw(
+            hoct_pair,
+            PhysicalSizeX=1.3,
+            PhysicalSizeY=1.3,
+            TimeIncrement=12.0077,
+            TimeIncrementUnit="s",
+        )
+        run = _RunRecorder(frames=hoct_pair.tracked)
+        monkeypatch.setattr(mod.subprocess, "run", run)
+
+        mod.hoct_tracking(
+            None, device="cpu", _source_filepath=str(hoct_pair.label_path)
+        )
+
+        assert self._scales(run.cmds[0]) == ["12.0077", "1.3", "1.3"]
+
+    def test_raw_image_without_frame_interval_keeps_t_in_frames(
+        self, monkeypatch, ready_env, hoct_pair
+    ):
+        self._write_ome_raw(hoct_pair, PhysicalSizeX=0.5, PhysicalSizeY=0.5)
+        run = _RunRecorder(frames=hoct_pair.tracked)
+        monkeypatch.setattr(mod.subprocess, "run", run)
+
+        mod.hoct_tracking(
+            None, device="cpu", _source_filepath=str(hoct_pair.label_path)
+        )
+
+        assert self._scales(run.cmds[0]) == ["1", "0.5", "0.5"]
+
+    def test_raw_image_without_pixel_size_tracks_in_pixels(
+        self, monkeypatch, ready_env, hoct_pair, capsys
+    ):
+        run = _RunRecorder(frames=hoct_pair.tracked)
+        monkeypatch.setattr(mod.subprocess, "run", run)
+
+        mod.hoct_tracking(
+            None, device="cpu", _source_filepath=str(hoct_pair.label_path)
+        )
+
+        assert self._scales(run.cmds[0]) == []
+        assert "tracking in pixel units" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("keyword", ["pixels", "None", " off "])
+    def test_pixels_keyword_ignores_the_raw_metadata(
+        self, monkeypatch, ready_env, hoct_pair, keyword
+    ):
+        self._write_ome_raw(
+            hoct_pair, PhysicalSizeX=1.3, PhysicalSizeY=1.3, TimeIncrement=12
+        )
+        run = _RunRecorder(frames=hoct_pair.tracked)
+        monkeypatch.setattr(mod.subprocess, "run", run)
+
+        mod.hoct_tracking(
+            None,
+            device="cpu",
+            scale=keyword,
+            _source_filepath=str(hoct_pair.label_path),
+        )
+
+        assert self._scales(run.cmds[0]) == []
+
+    def test_explicit_scale_overrides_the_raw_metadata(
+        self, monkeypatch, ready_env, hoct_pair
+    ):
+        self._write_ome_raw(
+            hoct_pair, PhysicalSizeX=1.3, PhysicalSizeY=1.3, TimeIncrement=12
+        )
+        run = _RunRecorder(frames=hoct_pair.tracked)
+        monkeypatch.setattr(mod.subprocess, "run", run)
+
+        mod.hoct_tracking(
+            None,
+            device="cpu",
+            scale="10 2 2",
+            _source_filepath=str(hoct_pair.label_path),
+        )
+
+        assert self._scales(run.cmds[0]) == ["10", "2", "2"]
+
     def test_output_lands_next_to_the_input_without_an_output_folder(
         self, monkeypatch, ready_env, hoct_pair, tmp_path
     ):
@@ -1460,3 +1557,63 @@ class TestRegistration:
         assert mod.hoct_tracking.skip_load is True
         assert mod.hoct_tracking._loads_from_path is True
         assert mod.hoct_tracking.supports_gpu_distribution is True
+
+
+class TestScaleFromRawMetadata:
+    """``_scale_from_raw_metadata`` for 3D+t and for converter Zarr output."""
+
+    def test_tzyx_tiff_gives_t_z_y_x(self, tmp_path):
+        path = tmp_path / "raw.tif"
+        tifffile.imwrite(
+            str(path),
+            np.zeros((2, 3, 4, 5), np.uint16),
+            ome=True,
+            metadata={
+                "axes": "TZYX",
+                "PhysicalSizeX": 1.3,
+                "PhysicalSizeY": 1.3,
+                "PhysicalSizeZ": 3.84,
+                "TimeIncrement": 14.4578,
+            },
+        )
+
+        assert mod._scale_from_raw_metadata(str(path), (2, 3, 4, 5), "t") == [
+            "14.4578",
+            "3.84",
+            "1.3",
+            "1.3",
+        ]
+
+    def test_missing_z_size_falls_back_to_pixels(self, tmp_path):
+        """Scaling X/Y but not Z would distort the voxel anisotropy."""
+        path = tmp_path / "raw.tif"
+        tifffile.imwrite(
+            str(path),
+            np.zeros((2, 3, 4, 5), np.uint16),
+            ome=True,
+            metadata={"axes": "TZYX", "PhysicalSizeX": 1.3, "PhysicalSizeY": 1.3},
+        )
+
+        assert mod._scale_from_raw_metadata(str(path), (2, 3, 4, 5), "t") == []
+
+    def test_converter_zarr_output_gives_its_interval(self, tmp_path):
+        from napari_tmidas._file_conversion import ConversionWorker
+
+        out = str(tmp_path / "movie.zarr")
+        metadata = {
+            "axes": "TZYX",
+            "resolution": (1 / 1.3, 1 / 1.3),
+            "spacing": 3.84,
+            "time_interval": 12.0077,
+        }
+        worker = ConversionWorker([], str(tmp_path), True, None)
+        assert worker._save_zarr(
+            np.zeros((2, 3, 8, 8), np.uint16), out, metadata, "movie", 0
+        )
+
+        assert mod._scale_from_raw_metadata(out, (2, 3, 8, 8), "t") == [
+            "12.0077",
+            "3.84",
+            "1.3",
+            "1.3",
+        ]

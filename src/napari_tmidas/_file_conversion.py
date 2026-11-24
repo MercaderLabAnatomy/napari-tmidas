@@ -1981,17 +1981,18 @@ def _tiff_resolution_kwargs(metadata: dict) -> dict:
     """
     Baseline TIFF resolution tags for the loader's pixel size.
 
-    The OME-XML already holds the pixel size; the tags are for readers that
-    only look at them (e.g. ImageJ's plain TIFF opener). Loaders report
-    pixels per µm, and without a unit tifffile writes the tags in pixels
-    per *inch*, so store pixels per centimetre, which TIFF defines.
+    Pixels per µm, with ResolutionUnit MICROMETER (5). That unit is a
+    tifffile extension beyond baseline TIFF's inch/centimetre, so readers
+    that only know baseline TIFF ignore it; the OME-XML holds the pixel
+    size for everyone else. Without a unit, tifffile labels the tags as
+    pixels per *inch*.
     """
     sizes = expected_physical_sizes(metadata)
     if "X" not in sizes or "Y" not in sizes:
         return {}
     return {
-        "resolution": (1e4 / sizes["X"], 1e4 / sizes["Y"]),
-        "resolutionunit": "CENTIMETER",
+        "resolution": (1.0 / sizes["X"], 1.0 / sizes["Y"]),
+        "resolutionunit": "MICROMETER",
     }
 
 

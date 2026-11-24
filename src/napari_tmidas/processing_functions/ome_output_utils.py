@@ -63,26 +63,15 @@ def physical_scale_kwargs(scale_transform: Optional[dict], axes: Any) -> dict:
     return {"scale": dict(zip(axis_names, (float(s) for s in scales)))}
 
 
-def _write_image_accepts_axes_units() -> bool:
-    """Whether the installed ome-zarr takes axis units via ``axes_units``."""
-    try:
-        from ome_zarr.writer import write_image
-
-        return "axes_units" in inspect.signature(write_image).parameters
-    except (ImportError, TypeError, ValueError):
-        return False
-
-
 def axes_units_kwargs(units: Optional[dict], axes: Any) -> dict:
     """
     Build the ``write_image()`` keyword that labels axes with their unit.
 
     ``units`` maps axis names to OME-NGFF unit names ("micrometer",
-    "second"); axes not in ``axes`` are dropped. Returns {} on ome-zarr
-    releases without ``axes_units``, which then write axes without units
-    as before.
+    "second"); axes not in ``axes`` are dropped. ``axes_units`` exists
+    since ome-zarr 0.17, the minimum this package requires.
     """
-    if not units or not _write_image_accepts_axes_units():
+    if not units:
         return {}
     axis_names = {str(axis).lower() for axis in (axes or "")}
     selected = {
@@ -191,6 +180,94 @@ def _extract_tiff_physical_scale(source_path: str, axes: str) -> dict:
                 with suppress(TypeError, ValueError):
                     result[ax_upper] = float(val)
     return result
+
+
+# Seconds per time unit, for OME-XML (TimeIncrementUnit) and OME-NGFF axis
+# unit names.
+_SECONDS_PER_TIME_UNIT = {
+    "s": 1.0,
+    "second": 1.0,
+    "ms": 1e-3,
+    "millisecond": 1e-3,
+    "µs": 1e-6,
+    "us": 1e-6,
+    "microsecond": 1e-6,
+    "min": 60.0,
+    "minute": 60.0,
+    "h": 3600.0,
+    "hour": 3600.0,
+}
+
+
+def _seconds(value, unit) -> Optional[float]:
+    factor = _SECONDS_PER_TIME_UNIT.get(str(unit or "s").strip().lower())
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if factor is None or value <= 0:
+        return None
+    return value * factor
+
+
+def extract_source_time_interval(source_path: Optional[str]) -> Optional[float]:
+    """
+    Frame interval in seconds stored in an image file, or None.
+
+    OME-TIFF: ``Pixels/@TimeIncrement`` (+ ``TimeIncrementUnit``, default
+    seconds per the OME schema). OME-Zarr: the ``napari_tmidas`` root
+    attribute the converter writes, else the ``t`` scale when the ``t``
+    axis carries a time unit (as other writers store it).
+    """
+    if not source_path:
+        return None
+    if source_path.lower().endswith((".tif", ".tiff")):
+        try:
+            with tifffile.TiffFile(source_path) as tf:
+                if not getattr(tf, "is_ome", False) or not tf.ome_metadata:
+                    return None
+                pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"][
+                    "Pixels"
+                ]
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            tifffile.TiffFileError,
+        ):
+            return None
+        if isinstance(pixels, list):
+            pixels = pixels[0]
+        if not isinstance(pixels, dict) or "TimeIncrement" not in pixels:
+            return None
+        return _seconds(
+            pixels["TimeIncrement"], pixels.get("TimeIncrementUnit", "s")
+        )
+
+    attrs = _read_root_attrs(source_path)
+    tmidas = attrs.get("napari_tmidas")
+    if isinstance(tmidas, dict) and "time_interval" in tmidas:
+        return _seconds(
+            tmidas["time_interval"], tmidas.get("time_interval_unit", "second")
+        )
+    multiscales = _get_multiscales(attrs)
+    if not multiscales or not isinstance(multiscales[0], dict):
+        return None
+    axes = multiscales[0].get("axes", [])
+    names = [str(a.get("name") if isinstance(a, dict) else a).lower() for a in axes]
+    if "t" not in names:
+        return None
+    t_axis = axes[names.index("t")]
+    unit = t_axis.get("unit") if isinstance(t_axis, dict) else None
+    if not unit:
+        return None
+    datasets = multiscales[0].get("datasets", [])
+    for ctf in (datasets[0].get("coordinateTransformations", []) if datasets else []):
+        scale = ctf.get("scale") if isinstance(ctf, dict) else None
+        if ctf.get("type") == "scale" and isinstance(scale, list) and len(scale) == len(names):
+            return _seconds(scale[names.index("t")], unit)
+    return None
 
 
 def _extract_source_physical_scale(source_path: Optional[str], axes: str) -> dict:

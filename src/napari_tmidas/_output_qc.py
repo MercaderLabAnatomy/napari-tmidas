@@ -105,8 +105,8 @@ def read_physical_sizes(path: str) -> Dict[str, float]:
     with tifffile.TiffFile(path) as tif:
         page = tif.pages[0]
         unit = page.tags.get("ResolutionUnit")
-        # ImageJ writes pixels per µm with no unit; a centimetre unit means
-        # pixels per cm, as the converter writes.
+        # ImageJ writes pixels per µm with no unit and the converter with
+        # ResolutionUnit MICROMETER; a centimetre unit means pixels per cm.
         um_per_unit = (
             1e4
             if unit is not None

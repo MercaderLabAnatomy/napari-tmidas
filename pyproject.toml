@@ -22,7 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
-requires-python = ">=3.11"
+# ome-zarr>=0.17 requires Python > 3.11, i.e. 3.11.1 or later.
+requires-python = ">=3.11.1"
 dependencies = [
     "numpy>=1.23.0",
     "magicgui",
@@ -31,7 +32,8 @@ dependencies = [
     "scikit-image>=0.19.0",
     "pyqt5",
     "zarr>=3",
-    "ome-zarr",
+    # 0.17 is the first release with write_image(axes_units=...).
+    "ome-zarr>=0.17",
     "napari-ome-zarr",
     "nd2",
     "pylibCZIrw",
@@ -40,7 +42,6 @@ dependencies = [
     "tiffslide",
     "acquifer-napari",
     "psygnal>=0.9.0",
-    "ome-zarr>=0.8.0",
     # Creates and fills the AI methods' dedicated environments.
     "uv",
 ]
