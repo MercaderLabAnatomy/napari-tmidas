@@ -155,9 +155,9 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
         )
 
         # Install Qt bindings required by napari-convpaint
-        print("Installing Qt bindings (PyQt5) for napari-convpaint...")
+        print("Installing Qt bindings (PyQt6) for napari-convpaint...")
         subprocess.check_call(
-            pip_command(env_python, "install", "PyQt5")
+            pip_command(env_python, "install", "PyQt6")
         )
 
         # Install tifffile and other dependencies for image handling
@@ -222,7 +222,7 @@ class ConvpaintEnvironmentManager(BaseEnvironmentManager):
     def _repair_environment(self, env_python: str) -> None:
         """Install runtime dependencies required for the convpaint environment."""
         print("Repairing napari-convpaint environment dependencies...")
-        subprocess.check_call(pip_command(env_python, "install", "PyQt5"))
+        subprocess.check_call(pip_command(env_python, "install", "PyQt6"))
 
     def ensure_env_ready(self) -> str:
         """Ensure the dedicated convpaint environment exists and passes a smoke test."""

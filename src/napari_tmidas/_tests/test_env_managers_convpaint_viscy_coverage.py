@@ -306,7 +306,7 @@ class TestConvpaintInstallDependencies:
 
         packages = [argv[4:] for argv in stub.check_call_argvs]
         assert ["napari-convpaint"] in packages
-        assert ["PyQt5"] in packages
+        assert ["PyQt6"] in packages
         assert ["tifffile", "numpy", "scikit-image"] in packages
         for argv in stub.check_call_argvs:
             assert argv[:4] == [
@@ -400,14 +400,14 @@ class TestConvpaintVerification:
         assert "SUCCESS: napari-convpaint" in scripts[0]
         assert list(temp_root.iterdir()) == []
 
-    def test_repair_environment_installs_pyqt5(
+    def test_repair_environment_installs_pyqt6(
         self, cp_manager, monkeypatch, capsys
     ):
         stub = SubprocessStub()
         monkeypatch.setattr(cpm, "subprocess", stub)
         cp_manager._repair_environment("/fake/py")
         assert stub.check_call_argvs == [
-            ["/fake/py", "-m", "pip", "install", "PyQt5"]
+            ["/fake/py", "-m", "pip", "install", "PyQt6"]
         ]
         assert "Repairing napari-convpaint" in capsys.readouterr().out
 
