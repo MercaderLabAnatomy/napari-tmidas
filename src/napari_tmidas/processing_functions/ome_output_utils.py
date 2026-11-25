@@ -367,7 +367,7 @@ def iter_planes_blockwise(array, dtype, budget_bytes, max_workers=None):
         )
 
 
-def iter_planes_for_write(array, dtype, budget_bytes=STREAM_BLOCK_BYTES):
+def iter_planes_for_write(array, dtype, budget_bytes=None):
     """
     Yield `array` as YX planes, traversing it the way its backend wants.
 
@@ -377,7 +377,14 @@ def iter_planes_for_write(array, dtype, budget_bytes=STREAM_BLOCK_BYTES):
     slice.  A store-backed array (zarr) has no such recompute -- reading a
     plane is just reading its chunks -- so it stays plane by plane, which
     bounds peak by a single plane instead of by the block budget.
+
+    `budget_bytes` defaults to STREAM_BLOCK_BYTES looked up at call time, not
+    bound as a default argument: a bound default froze the value at import,
+    so rebinding the module budget (as the streaming tests do) silently left
+    the label writer, its only default-relying caller, on 256 MB blocks.
     """
+    if budget_bytes is None:
+        budget_bytes = STREAM_BLOCK_BYTES
     if hasattr(array, "compute"):
         yield from iter_planes_blockwise(array, dtype, budget_bytes)
         return

@@ -379,3 +379,275 @@ class TestChunkedFallbacks:
 
         lazy = da.from_array(np.ones((4, 8, 8), dtype=np.uint8), chunks=1)
         assert not hasattr(identity(lazy, _source_filepath="x"), "compute")
+
+
+class TestWholeStackRemaps:
+    """
+    Functions that need one whole-stack quantity (per-slice areas, a max
+    label) and are otherwise an index remap or mask.  They stay lazy by
+    computing those few numbers in one pass and expressing the rest as Dask
+    ops, so the cost of getting it wrong is an off-by-one slice -- which
+    byte-identity against the dense path catches.
+    """
+
+    @staticmethod
+    def _labels(shape, dtype=np.uint32, seed=0):
+        rng = np.random.default_rng(seed)
+        labels = np.zeros(shape, dtype=dtype)
+        # Objects of different sizes in different slices along every axis, so
+        # the largest-area slice is unique and off-centre.
+        for label in range(1, 7):
+            starts = [int(rng.integers(0, s - 2)) for s in shape]
+            sizes = [int(rng.integers(1, max(2, s // 2))) for s in shape]
+            index = tuple(slice(a, a + b) for a, b in zip(starts, sizes))
+            labels[index] = label
+        return labels
+
+    @staticmethod
+    def _run(name, dense, **params):
+        expected = _func(name)(dense, **params)
+        lazy = da.from_array(
+            dense, chunks=(1,) * (dense.ndim - 2) + (-1, -1)
+        )
+        result = _func(name)(lazy, _source_filepath="x.zarr", **params)
+        assert hasattr(result, "compute"), "lazy input must stay lazy"
+        assert result.shape == expected.shape
+        assert result.dtype == expected.dtype
+        computed = np.asarray(result.compute())
+        assert computed.dtype == expected.dtype
+        np.testing.assert_array_equal(computed, expected)
+        return lazy, result
+
+    @pytest.mark.parametrize("axis", [0, 1, 2, -1])
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_mirror_matches_dense(self, axis, seed):
+        self._run(
+            "Mirror Labels",
+            self._labels((7, 5, 24, 20), seed=seed),
+            axis=axis,
+        )
+
+    @pytest.mark.parametrize("k", [0, 1, 4, 8, 9])
+    def test_mirror_at_every_pivot(self, k):
+        """The pivot slice decides how much of the output is zero padding on
+        each side; the edges (k=0, k=n-1) leave padding on one side only."""
+        labels = np.zeros((10, 16, 16), dtype=np.uint16)
+        labels[k, 2:14, 2:14] = 1
+        labels[(k + 3) % 10, 4:6, 4:6] = 2
+        self._run("Mirror Labels", labels, axis=0)
+
+    def test_mirror_offset_wraps_like_dense(self):
+        """The label offset is added in the label dtype; uint8 overflow must
+        wrap the same way on both paths rather than promote."""
+        labels = np.zeros((6, 8, 8), dtype=np.uint8)
+        labels[2, :, :] = 200
+        labels[3, :2, :2] = 100
+        self._run("Mirror Labels", labels, axis=0)
+
+    def test_mirror_of_empty_labels(self):
+        self._run("Mirror Labels", np.zeros((4, 8, 8), np.uint32), axis=0)
+
+    def test_mirror_keeps_input_chunking(self):
+        """
+        A reversed slice keeps one block per input block; da.take with an
+        out-of-order index would not, and zero padding built as one block
+        would materialise every padded slice at once when written.
+        """
+        labels = np.zeros((40, 16, 16), dtype=np.uint32)
+        labels[5, 2:14, 2:14] = 1  # pivot near the start: 30 padded slices
+        lazy, result = self._run("Mirror Labels", labels, axis=0)
+        assert max(result.chunks[0]) <= max(lazy.chunks[0])
+        assert result.numblocks[-2:] == (1, 1)
+
+    @pytest.mark.parametrize("axis", [0, 1, -3])
+    @pytest.mark.parametrize("seed", [0, 3])
+    def test_keep_slice_range_matches_dense(self, axis, seed):
+        self._run(
+            "Keep Slice Range by Area",
+            self._labels((8, 6, 20, 20), seed=seed),
+            axis=axis,
+        )
+
+    @pytest.mark.parametrize(
+        "areas",
+        [
+            [3, 1, 4, 9, 2, 5],  # min before max: keep slices 1..3
+            [3, 9, 4, 1, 2, 5],  # max before min: same range, other way
+        ],
+    )
+    def test_keep_slice_range_edges(self, areas):
+        """Content on both sides of the kept range, so an off-by-one at
+        either end changes the result.  Random fixtures rarely do this."""
+        labels = np.zeros((len(areas), 4, 4), dtype=np.uint32)
+        for z, area in enumerate(areas):
+            labels[z].flat[:area] = z + 1
+        self._run("Keep Slice Range by Area", labels, axis=0)
+
+    def test_keep_slice_range_with_uniform_areas(self):
+        labels = np.ones((5, 8, 8), dtype=np.uint32)
+        self._run("Keep Slice Range by Area", labels, axis=0)
+
+    @pytest.mark.parametrize("rgb_chunk", [-1, 1])
+    def test_rgb_to_labels_matches_dense(self, rgb_chunk):
+        """rgb_chunk=1 splits the colour axis, so the per-pixel all() has
+        to combine blocks rather than see each pixel whole."""
+        rng = np.random.default_rng(0)
+        palette = np.array(
+            [[0, 0, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 255, 0]],
+            dtype=np.uint8,
+        )
+        image = palette[rng.integers(0, len(palette), (4, 3, 24, 24))]
+        params = {"blue_label": 5, "green_label": 0, "red_label": 255}
+
+        expected = _func("RGB to Labels")(image, **params)
+        lazy = da.from_array(image, chunks=(1, 1, -1, -1, rgb_chunk))
+        result = _func("RGB to Labels")(
+            lazy, _source_filepath="x.zarr", **params
+        )
+        assert hasattr(result, "compute")
+        assert result.numblocks[0] > 1
+        assert result.dtype == expected.dtype
+        computed = np.asarray(result.compute())
+        assert computed.dtype == expected.dtype
+        np.testing.assert_array_equal(computed, expected)
+
+    def test_rgb_to_labels_still_rejects_non_rgb(self):
+        lazy = da.zeros((4, 8, 8, 4), dtype=np.uint8, chunks=1)
+        with pytest.raises(ValueError, match="RGB"):
+            _func("RGB to Labels")(lazy, _source_filepath="x.zarr")
+
+    def test_compression_passes_a_lazy_image_through(self):
+        lazy = da.zeros((4, 8, 8), dtype=np.uint16, chunks=1)
+        func = _func("Compress with Zstandard")
+        assert func(lazy, _source_filepath="x.zarr") is lazy
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Mirror Labels",
+            "Keep Slice Range by Area",
+            "RGB to Labels",
+            "Compress with Zstandard",
+        ],
+    )
+    def test_worker_sees_it_as_lazy_capable(self, name):
+        assert "_source_filepath" in inspect.signature(_func(name)).parameters
+
+
+class TestWorkerStreamsRemaps:
+    """
+    End to end through ProcessingWorker: a large TIFF must be opened
+    lazily, stay lazy through the function, and be streamed to disk.  A
+    function that is lazy in isolation can still be densified by the worker
+    (a name it mistakes for a folder function, a signature it cannot read),
+    so the unit tests above do not prove this on their own.
+
+    Sizing matters for the memory check to mean anything.  The lazy TIFF is
+    one Dask task per page at ~28 KB of graph each, so with tiny pages that
+    per-task overhead dominates and grows with page count.  256x256 uint32
+    pages (256 KB) keep the measurement on pixel data, and Dask is held to
+    two threads so pages in flight -- roughly one or two per thread -- do
+    not depend on the machine's core count.
+    """
+
+    @staticmethod
+    def _process(tmp_path, name, data, axes, params):
+        import gc
+        import tracemalloc
+
+        import dask
+        import tifffile
+
+        import napari_tmidas._file_selector as fs
+        import napari_tmidas.processing_functions.ome_output_utils as ou
+        from napari_tmidas._file_selector import ProcessingWorker
+
+        src = tmp_path / "stack.tif"
+        tifffile.imwrite(
+            str(src),
+            data,
+            ome=True,
+            photometric="rgb" if axes.endswith("S") else "minisblack",
+            compression="zlib",
+            metadata={"axes": axes},
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+
+        # Label results are written by ome_output_utils, not the worker, so
+        # its budget has to shrink too or a stack this small is one block.
+        budget, threshold = fs._STREAM_BLOCK_BYTES, fs._LAZY_TIFF_MIN_BYTES
+        label_budget = ou.STREAM_BLOCK_BYTES
+        fs._STREAM_BLOCK_BYTES = ou.STREAM_BLOCK_BYTES = 2 * 1024 * 1024
+        fs._LAZY_TIFF_MIN_BYTES = 1024 * 1024
+        try:
+            worker = ProcessingWorker(
+                file_list=[str(src)],
+                processing_func=_func(name),
+                param_values=params,
+                output_folder=str(out),
+                input_suffix=".tif",
+                output_suffix="_out",
+                output_format="tiff",
+            )
+            with dask.config.set(num_workers=2):
+                tracemalloc.start()
+                try:
+                    gc.collect()
+                    tracemalloc.reset_peak()
+                    baseline, _ = tracemalloc.get_traced_memory()
+                    result = worker.process_file(str(src))
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+        finally:
+            fs._STREAM_BLOCK_BYTES = budget
+            fs._LAZY_TIFF_MIN_BYTES = threshold
+            ou.STREAM_BLOCK_BYTES = label_budget
+
+        return tifffile.imread(result["processed_file"]), peak - baseline
+
+    @pytest.mark.parametrize(
+        "name,params",
+        [
+            ("Mirror Labels", {"axis": 1}),
+            ("Mirror Labels", {"axis": 0}),
+            ("Keep Slice Range by Area", {"axis": 1}),
+        ],
+    )
+    def test_label_remaps_stream(self, tmp_path, name, params):
+        rng = np.random.default_rng(7)
+        data = np.zeros((24, 8, 256, 256), dtype=np.uint32)
+        for t in range(24):
+            for z in range(8):
+                side = int(rng.integers(8, 250))
+                data[t, z, :side, :side] = z + 1
+
+        got, peak = self._process(tmp_path, name, data, "TZYX", params)
+
+        np.testing.assert_array_equal(got, _func(name)(data, **params))
+        # Dense would be >= 1x (the input alone); streaming measures ~0.1x.
+        assert (
+            peak < data.nbytes * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs dense {data.nbytes/1e6:.1f} MB"
+
+    def test_rgb_to_labels_streams(self, tmp_path):
+        """Also pins the lazy TIFF loader on RGB pages: it used to assume
+        every page was one YX plane and read RGB stacks densely."""
+        rng = np.random.default_rng(8)
+        palette = np.array(
+            [[0, 0, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]], np.uint8
+        )
+        data = palette[rng.integers(0, 4, (120, 256, 256))]
+
+        got, peak = self._process(
+            tmp_path, "RGB to Labels", data, "TYXS", {}
+        )
+
+        np.testing.assert_array_equal(got, _func("RGB to Labels")(data))
+        # The uint32 result is 4/3 the size of the RGB input, so budget
+        # against the larger of the two.
+        dense = max(data.nbytes, got.nbytes)
+        assert (
+            peak < dense * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs {dense/1e6:.1f} MB"
