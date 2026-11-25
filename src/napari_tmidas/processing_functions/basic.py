@@ -341,7 +341,9 @@ def _nonzero_bounds(arr: np.ndarray) -> list[tuple[int, int]]:
 
 
 def _match_ndim(reference: np.ndarray, candidate: np.ndarray) -> np.ndarray:
-    result = np.asarray(candidate)
+    # np.squeeze and indexing dispatch to Dask, so a lazy candidate stays
+    # lazy; np.asarray would read it whole.
+    result = candidate if _is_lazy(candidate) else np.asarray(candidate)
     if result.ndim > reference.ndim:
         axes = [idx for idx, size in enumerate(result.shape) if size == 1]
         while axes and result.ndim > reference.ndim:
@@ -604,6 +606,30 @@ def _mirror_labels_lazy(arr, axis: int):
     return da.concatenate(parts, axis=axis) if len(parts) > 1 else mirrored
 
 
+def _open_paired_labels(path: str, like):
+    """
+    Open the paired label file of `intersect_label_images` without reading
+    it whole where the format allows: ``.npy`` memory-mapped, TIFF page-wise
+    (above the worker's lazy-TIFF threshold, as for the primary).  Anything
+    else, and small TIFFs, are read densely -- the same rule the worker
+    applies to the primary input.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".npy":
+        mapped = np.load(path, mmap_mode="r")
+        chunks = like.chunks if mapped.shape == like.shape else "auto"
+        return da.from_array(mapped, chunks=chunks)
+    if _HAS_TIFFFILE and ext in {".tif", ".tiff"}:
+        from napari_tmidas._file_selector import _lazy_load_tiff
+
+        lazy = _lazy_load_tiff(path)
+        return lazy if lazy is not None else tifffile.imread(path)
+
+    from skimage.io import imread
+
+    return imread(path)
+
+
 @BatchProcessingRegistry.register(
     name="Intersect Label Images",
     suffix="_intersected",
@@ -625,6 +651,7 @@ def intersect_label_images(
     image: np.ndarray,
     primary_suffix: str = "_a.tif",
     secondary_suffix: str = "_b.tif",
+    _source_filepath: Optional[str] = None,
 ) -> np.ndarray:
     """Return the intersection of two paired label images.
 
@@ -633,6 +660,12 @@ def intersect_label_images(
     volumes contain non-zero voxels. Each pair is processed exactly once by treating the
     file with ``primary_suffix`` as the active entry point; secondary label files are
     skipped and left unchanged.
+
+    ``_source_filepath`` is passed by the batch worker.  It names the current
+    file directly, and declaring it is also what lets the worker hand over a
+    lazy input: a lazy primary is intersected with a lazily opened pair voxel
+    by voxel, so neither stack is read whole.  It is a plain parameter rather
+    than ``@lazy_capable``, which would strip it before the body sees it.
     """
 
     if not primary_suffix or not secondary_suffix:
@@ -658,12 +691,15 @@ def intersect_label_images(
 
         return imread(path)
 
-    current_file = None
-    for frame_info in inspect.stack():
-        frame_locals = frame_info.frame.f_locals
-        if "filepath" in frame_locals:
-            current_file = frame_locals["filepath"]
-            break
+    current_file = _source_filepath
+    if current_file is None:
+        # Direct calls (outside the worker) name the file in a caller's
+        # local `filepath`.
+        for frame_info in inspect.stack():
+            frame_locals = frame_info.frame.f_locals
+            if "filepath" in frame_locals:
+                current_file = frame_locals["filepath"]
+                break
 
     if current_file is None:
         raise ValueError(
@@ -697,8 +733,27 @@ def intersect_label_images(
     if not os.path.exists(paired_path):
         raise FileNotFoundError(f"Paired label image not found: {paired_path}")
 
-    current_array = _to_array(image)
-    paired_array = _to_array(_load_label_file(paired_path))
+    if _is_lazy(image):
+        if image.ndim == 0:
+            raise ValueError("Label images must have at least one dimension")
+        paired = _match_ndim(image, _open_paired_labels(paired_path, image))
+        if paired.shape == image.shape:
+            # The usual case, and purely per voxel.  Same values and dtype as
+            # the dense copyto below: primary IDs where both are non-zero.
+            result_dtype = np.promote_types(image.dtype, paired.dtype)
+            overlap = (image != 0) & (paired != 0)
+            return da.where(
+                overlap,
+                image.astype(result_dtype, copy=False),
+                np.zeros((), dtype=result_dtype),
+            )
+        # Differing shapes are aligned by object centres (_align_candidate),
+        # which needs both arrays whole.  Rare enough to stay dense.
+        current_array = _to_array(image)
+        paired_array = _to_array(paired)
+    else:
+        current_array = _to_array(image)
+        paired_array = _to_array(_load_label_file(paired_path))
 
     paired_aligned = _align_candidate(current_array, paired_array)
 
