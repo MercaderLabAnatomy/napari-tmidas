@@ -110,11 +110,101 @@ def find_timepoint_images(
     return image_files
 
 
+def _resolve_merge_order(
+    first_shape: Tuple[int, ...], dimension_order: str = "auto"
+) -> Tuple[str, str, bool]:
+    """
+    How files of `first_shape` merge: (input order, output order, joins_time).
+
+    ``joins_time`` means the files already carry a T axis and are
+    concatenated along it (TZYX); otherwise each file becomes one timepoint
+    on a new leading T axis.  "Auto" is matched case-insensitively: the batch
+    widget's dropdown sends "Auto", and comparing it against "auto" made the
+    default setting fail every 3D series as a 4-letter order "AUTO".
+    """
+    ndim = len(first_shape)
+    if str(dimension_order or "auto").lower() == "auto":
+        if ndim == 2:
+            return "YX", "TYX", False
+        if ndim == 3:
+            print("⚠️  3D images detected - assuming ZYX (Z-stack)")
+            print(
+                "   If this is CYX (color channels), set dimension_order='CYX'"
+            )
+            return "ZYX", "TZYX", False
+        if ndim == 4:
+            print("⚠️  4D images detected - assuming TZYX (time series)")
+            print(
+                "   If this is CZYX (color Z-stack), set dimension_order='CZYX'"
+            )
+            return "TZYX", "TZYX", True
+        raise ValueError(f"Unsupported image dimensionality: {first_shape}")
+
+    detected_order = dimension_order.upper()
+    print(f"Using specified dimension order: {detected_order}")
+    if ndim != len(detected_order):
+        raise ValueError(
+            f"Dimension order '{detected_order}' expects {len(detected_order)}D data, "
+            f"but images have shape {first_shape} ({ndim}D)"
+        )
+    if detected_order == "YX":
+        return detected_order, "TYX", False
+    if detected_order in ("ZYX", "CYX"):
+        return detected_order, "T" + detected_order, False  # TZYX or TCYX
+    if detected_order == "TZYX":
+        # Files are joined along the T axis they already have, so the result
+        # is still 4D TZYX.  Prefixing another "T" labelled a 4-axis array as
+        # 5-axis ("TTZYX"), which every consumer of this string mis-parsed.
+        return detected_order, "TZYX", True
+    if detected_order == "CZYX":
+        return detected_order, "TCZYX", False  # one timepoint per file
+    raise ValueError(f"Unsupported dimension order: {detected_order}")
+
+
+def _merged_shape(
+    first_shape: Tuple[int, ...], n_files: int, joins_time: bool
+) -> Tuple[int, ...]:
+    if joins_time:
+        return (n_files * first_shape[0],) + tuple(first_shape[1:])
+    return (n_files,) + tuple(first_shape)
+
+
+def _iter_validated_images(image_files: List[str], first_image: np.ndarray):
+    """
+    Yield each file's array in order, `first_image` standing in for the
+    first: same shape as it or ValueError, cast to its dtype with a warning.
+    Only one file is held at a time.
+    """
+    yield first_image
+    for i, image_file in enumerate(image_files[1:], 1):
+        try:
+            image = imread(image_file)
+            if image.shape != first_image.shape:
+                raise ValueError(
+                    f"Image {os.path.basename(image_file)} has shape {image.shape}, "
+                    f"expected {first_image.shape}. All images must have the same dimensions."
+                )
+            if image.dtype != first_image.dtype:
+                print(
+                    f"Warning: Converting {os.path.basename(image_file)} from {image.dtype} to {first_image.dtype}"
+                )
+                image = image.astype(first_image.dtype)
+        except Exception as e:
+            raise ValueError(f"Error loading {image_file}: {str(e)}") from e
+        if (i + 1) % 10 == 0 or i == len(image_files) - 1:
+            print(f"Loaded {i + 1}/{len(image_files)} files")
+        yield image
+
+
 def load_and_validate_images(
     image_files: List[str], dimension_order: str = "auto"
 ) -> Tuple[np.ndarray, str]:
     """
     Load all images and validate they have consistent dimensions.
+
+    Holds the whole series in memory; the batch function streams it to disk
+    instead (see `_write_time_series`).  Kept for the CLI and for callers
+    that want the array.
 
     Parameters:
     -----------
@@ -129,218 +219,98 @@ def load_and_validate_images(
         Tuple of (stacked images array, dimension order string)
     """
     print(f"Loading {len(image_files)} timepoint images...")
-
-    # Load first image to determine dimensions and data type
     first_image = imread(image_files[0])
     print(
         f"First image shape: {first_image.shape}, dtype: {first_image.dtype}"
     )
+    _, output_order, joins_time = _resolve_merge_order(
+        first_image.shape, dimension_order
+    )
+    stack_shape = _merged_shape(first_image.shape, len(image_files), joins_time)
+    print(f"Creating time series with shape: {stack_shape} ({output_order})")
 
-    # Determine dimension order
-    is_4d_input = False
-    ndim = len(first_image.shape)
-
-    # Case-insensitive: the batch widget's dropdown sends "Auto", and
-    # comparing it against "auto" read the default setting as the 4-letter
-    # order "AUTO", failing every 3D series.
-    if str(dimension_order or "auto").lower() == "auto":
-        # Auto-detect based on shape
-        if ndim == 2:
-            # 2D image (YX)
-            detected_order = "YX"
-            output_order = "TYX"
-        elif ndim == 3:
-            # 3D image - assume ZYX (could also be CYX but we can't tell)
-            detected_order = "ZYX"
-            output_order = "TZYX"
-            print("⚠️  3D images detected - assuming ZYX (Z-stack)")
-            print(
-                "   If this is CYX (color channels), set dimension_order='CYX'"
-            )
-        elif ndim == 4:
-            # 4D image - assume TZYX
-            detected_order = "TZYX"
-            output_order = "TZYX"
-            is_4d_input = True
-            print("⚠️  4D images detected - assuming TZYX (time series)")
-            print(
-                "   If this is CZYX (color Z-stack), set dimension_order='CZYX'"
-            )
+    time_series = np.zeros(stack_shape, dtype=first_image.dtype)
+    step = first_image.shape[0] if joins_time else 1
+    for i, image in enumerate(_iter_validated_images(image_files, first_image)):
+        if joins_time:
+            time_series[i * step : (i + 1) * step] = image
         else:
-            raise ValueError(
-                f"Unsupported image dimensionality: {first_image.shape}"
-            )
-    else:
-        # User specified the dimension order
-        detected_order = dimension_order.upper()
-        print(f"Using specified dimension order: {detected_order}")
-
-        # Validate the specified order matches the image shape
-        expected_ndim = len(detected_order)
-        if ndim != expected_ndim:
-            raise ValueError(
-                f"Dimension order '{detected_order}' expects {expected_ndim}D data, "
-                f"but images have shape {first_image.shape} ({ndim}D)"
-            )
-
-        # Determine output order based on input
-        if detected_order == "YX":
-            output_order = "TYX"
-        elif detected_order in ["ZYX", "CYX"]:
-            output_order = "T" + detected_order  # TZYX or TCYX
-        elif detected_order == "TZYX":
-            # Files are joined along the T axis they already have, so the
-            # result is still 4D TZYX.  Prefixing another "T" labelled a
-            # 4-axis array as 5-axis ("TTZYX"), which every consumer of this
-            # order string then mis-parsed.
-            output_order = "TZYX"
-            is_4d_input = True
-        elif detected_order == "CZYX":
-            output_order = "TCZYX"  # one timepoint per file, channels kept
-            is_4d_input = True
-        else:
-            raise ValueError(f"Unsupported dimension order: {detected_order}")
-
-    expected_shape = first_image.shape
-
-    # Pre-allocate array for all timepoints
-    if is_4d_input:
-        # For 4D input, we concatenate along time axis
-        if detected_order == "TZYX":
-            # Total timepoints = number of files × timepoints per file
-            total_timepoints = len(image_files) * first_image.shape[0]
-            stack_shape = (total_timepoints,) + first_image.shape[1:]
-            print(f"Concatenating {len(image_files)} files along time axis")
-            print(
-                f"  {len(image_files)} files × {first_image.shape[0]} timepoints = {total_timepoints} total"
-            )
-        elif detected_order == "CZYX":
-            # Treat as single timepoint with color channels
-            stack_shape = (len(image_files),) + first_image.shape
-            output_order = "TCZYX"
-            print("Creating time series of color Z-stacks")
-        else:
-            raise ValueError(f"Unexpected 4D order: {detected_order}")
-
-        print(
-            f"Creating time series with shape: {stack_shape} ({output_order})"
-        )
-
-        # Use the same dtype as the first image
-        time_series = np.zeros(stack_shape, dtype=first_image.dtype)
-
-        # Load all images and concatenate
-        if detected_order == "TZYX":
-            # Concatenating time series along T axis
-            current_t = 0
-            time_series[0 : first_image.shape[0]] = first_image
-            current_t += first_image.shape[0]
-
-            for i, image_file in enumerate(image_files[1:], 1):
-                try:
-                    image = imread(image_file)
-
-                    # Validate shape consistency
-                    if image.shape != expected_shape:
-                        raise ValueError(
-                            f"Image {os.path.basename(image_file)} has shape {image.shape}, "
-                            f"expected {expected_shape}. All images must have the same dimensions."
-                        )
-
-                    # Validate dtype consistency
-                    if image.dtype != first_image.dtype:
-                        print(
-                            f"Warning: Converting {os.path.basename(image_file)} from {image.dtype} to {first_image.dtype}"
-                        )
-                        image = image.astype(first_image.dtype)
-
-                    # Insert timepoints
-                    total_timepoints = len(image_files) * first_image.shape[0]
-                    next_t = current_t + image.shape[0]
-                    time_series[current_t:next_t] = image
-                    current_t = next_t
-
-                    if (i + 1) % 10 == 0 or i == len(image_files) - 1:
-                        print(
-                            f"Loaded {i + 1}/{len(image_files)} files ({current_t}/{total_timepoints} timepoints)"
-                        )
-
-                except Exception as e:
-                    raise ValueError(
-                        f"Error loading {image_file}: {str(e)}"
-                    ) from e
-        else:
-            # CZYX - just stack normally
-            time_series[0] = first_image
-
-            for i, image_file in enumerate(image_files[1:], 1):
-                try:
-                    image = imread(image_file)
-
-                    if image.shape != expected_shape:
-                        raise ValueError(
-                            f"Image {os.path.basename(image_file)} has shape {image.shape}, "
-                            f"expected {expected_shape}. All images must have the same dimensions."
-                        )
-
-                    if image.dtype != first_image.dtype:
-                        print(
-                            f"Warning: Converting {os.path.basename(image_file)} from {image.dtype} to {first_image.dtype}"
-                        )
-                        image = image.astype(first_image.dtype)
-
-                    time_series[i] = image
-
-                    if (i + 1) % 10 == 0 or i == len(image_files) - 1:
-                        print(f"Loaded {i + 1}/{len(image_files)} files")
-
-                except Exception as e:
-                    raise ValueError(
-                        f"Error loading {image_file}: {str(e)}"
-                    ) from e
-    else:
-        # For 2D/3D input, add a new time dimension
-        stack_shape = (len(image_files),) + expected_shape
-        print(
-            f"Creating time series with shape: {stack_shape} ({output_order})"
-        )
-
-        # Use the same dtype as the first image
-        time_series = np.zeros(stack_shape, dtype=first_image.dtype)
-
-        # Load all images
-        time_series[0] = first_image
-
-        for i, image_file in enumerate(image_files[1:], 1):
-            try:
-                image = imread(image_file)
-
-                # Validate shape consistency
-                if image.shape != expected_shape:
-                    raise ValueError(
-                        f"Image {os.path.basename(image_file)} has shape {image.shape}, "
-                        f"expected {expected_shape}. All images must have the same dimensions."
-                    )
-
-                # Validate dtype consistency
-                if image.dtype != first_image.dtype:
-                    print(
-                        f"Warning: Converting {os.path.basename(image_file)} from {image.dtype} to {first_image.dtype}"
-                    )
-                    image = image.astype(first_image.dtype)
-
-                time_series[i] = image
-
-                if (i + 1) % 10 == 0 or i == len(image_files) - 1:
-                    print(f"Loaded {i + 1}/{len(image_files)} images")
-
-            except Exception as e:
-                raise ValueError(
-                    f"Error loading {image_file}: {str(e)}"
-                ) from e
+            time_series[i] = image
 
     print(f"Successfully loaded all {len(image_files)} timepoints")
     return time_series, output_order
+
+
+def _write_time_series(
+    image_files: List[str], dimension_order: str, output_path: str
+) -> Tuple[Tuple[int, ...], str, float]:
+    """
+    Merge `image_files` into an OME-TIFF at `output_path`, one YX plane at a
+    time: only one input file is in memory at once, never the series.
+
+    The previous path allocated the whole series before writing it -- and
+    its "memory efficient" variant filled a memmap, then copied it back into
+    RAM with np.array() before saving.  The file is written beside the
+    target and renamed into place, so a failure partway (a shape mismatch in
+    file 900 of 1000) leaves no partial output.
+
+    Returns (shape, axes, size in GB).
+    """
+    from napari_tmidas.processing_functions.ome_output_utils import (
+        stream_planes_to_tiff,
+    )
+
+    first_image = imread(image_files[0])
+    print(
+        f"First image shape: {first_image.shape}, dtype: {first_image.dtype}"
+    )
+    _, output_order, joins_time = _resolve_merge_order(
+        first_image.shape, dimension_order
+    )
+    stack_shape = _merged_shape(first_image.shape, len(image_files), joins_time)
+    print(f"Creating time series with shape: {stack_shape} ({output_order})")
+
+    # The axes are the merge's own output order: deriving them from ndim
+    # alone labelled a merged CYX series (TCYX) as TZYX.
+    ome_metadata = {"axes": output_order}
+    # Timepoint files in a series share a physical scale; the first file is
+    # representative.  Without this the merged output reset to isotropic.
+    for ax_name, ax_scale in _extract_source_physical_scale(
+        image_files[0], output_order
+    ).items():
+        ome_metadata[f"PhysicalSize{ax_name}"] = ax_scale
+        ome_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
+
+    def planes():
+        for image in _iter_validated_images(image_files, first_image):
+            for index in np.ndindex(*image.shape[:-2]):
+                yield image[index]
+
+    size_gb = (
+        int(np.prod(stack_shape, dtype=np.int64))
+        * first_image.dtype.itemsize
+        / (1024**3)
+    )
+    tmp_path = os.path.join(
+        os.path.dirname(os.path.abspath(output_path)),
+        f".{os.path.basename(output_path)}.tmp-{os.getpid()}",
+    )
+    try:
+        stream_planes_to_tiff(
+            tmp_path,
+            planes(),
+            stack_shape,
+            first_image.dtype,
+            metadata=ome_metadata,
+            bigtiff=size_gb > 2.0,
+        )
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    print(f"Successfully merged all {len(image_files)} timepoints")
+    return stack_shape, output_order, size_gb
 
 
 @BatchProcessingRegistry.register(
@@ -372,7 +342,7 @@ def load_and_validate_images(
         "memory_efficient": {
             "type": bool,
             "default": False,
-            "description": "Use memory-efficient loading for very large datasets",
+            "description": "No longer needed: every merge streams to disk one timepoint at a time. Kept so saved workflows still load.",
         },
         "overwrite_existing": {
             "type": bool,
@@ -565,147 +535,19 @@ def merge_timepoint_folder_advanced(
             for i, file_path in enumerate(image_files):
                 print(f"  {i:2d}: {os.path.basename(file_path)}")
 
-        # Load images based on memory efficiency setting
-        if memory_efficient and len(image_files) > 100:
-            print("Using memory-efficient loading...")
-
-            # Load first image to determine shape and dtype
-            first_image = imread(image_files[0])
-
-            # Determine dimension handling based on user specification
-            auto_order = str(dimension_order or "auto").lower() == "auto"
-            if auto_order:
-                # Auto-detect: 4D assumed to be TZYX
-                is_concatenate_time = len(first_image.shape) == 4
-            else:
-                # User-specified: only TZYX needs time concatenation
-                is_concatenate_time = dimension_order.upper() == "TZYX"
-
-            # The merged series' axes, as load_and_validate_images reports
-            # them for the standard path.
-            if is_concatenate_time:
-                output_order = "TZYX"
-            elif auto_order:
-                output_order = {2: "TYX", 3: "TZYX"}.get(first_image.ndim)
-            else:
-                output_order = "T" + dimension_order.upper()
-
-            if is_concatenate_time:
-                # 4D TZYX input - concatenate along time axis
-                total_timepoints = len(image_files) * first_image.shape[0]
-                stack_shape = (total_timepoints,) + first_image.shape[1:]
-                print(
-                    f"4D TZYX input detected: {len(image_files)} files × {first_image.shape[0]} timepoints = {total_timepoints} total"
-                )
-            else:
-                # 2D/3D input or 4D CZYX - add time dimension
-                stack_shape = (len(image_files),) + first_image.shape
-
-            # Create memory-mapped array if possible, otherwise regular array
-            try:
-                import tempfile
-
-                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                    time_series = np.memmap(
-                        temp_file.name,
-                        dtype=first_image.dtype,
-                        mode="w+",
-                        shape=stack_shape,
-                    )
-                    print(f"Created memory-mapped array: {stack_shape}")
-            except (OSError, ValueError):
-                time_series = np.zeros(stack_shape, dtype=first_image.dtype)
-                print(f"Created regular array: {stack_shape}")
-
-            # Handle 4D TZYX vs other formats differently
-            if is_concatenate_time:
-                # 4D TZYX: concatenate along time axis
-                current_t = 0
-                time_series[0 : first_image.shape[0]] = first_image
-                current_t += first_image.shape[0]
-
-                # Load remaining images one by one
-                for i, image_file in enumerate(image_files[1:], 1):
-                    if i % 50 == 0:
-                        print(
-                            f"Loading file {i+1}/{len(image_files)} ({current_t}/{total_timepoints} timepoints)"
-                        )
-
-                    img = imread(image_file)
-                    if img.shape != first_image.shape:
-                        raise ValueError(
-                            f"Shape mismatch at file {i}: {img.shape} vs {first_image.shape}"
-                        )
-
-                    next_t = current_t + img.shape[0]
-                    time_series[current_t:next_t] = img
-                    current_t = next_t
-            else:
-                # 2D/3D: simple stacking
-                time_series[0] = first_image
-
-                # Load remaining images one by one
-                for i, image_file in enumerate(image_files[1:], 1):
-                    if i % 50 == 0:
-                        print(f"Loading timepoint {i+1}/{len(image_files)}")
-
-                    img = imread(image_file)
-                    if img.shape != first_image.shape:
-                        raise ValueError(
-                            f"Shape mismatch at timepoint {i}: {img.shape} vs {first_image.shape}"
-                        )
-
-                    time_series[i] = img
-
-            # Convert back to regular array if using memmap
-            if isinstance(time_series, np.memmap):
-                result = np.array(time_series)
-                del time_series  # Clean up memmap
-                time_series = result
-        else:
-            # Use standard loading
-            time_series, output_order = load_and_validate_images(
-                image_files, dimension_order
-            )
-
-        # Save the advanced time series
+        # Stream the series to disk one plane at a time.  This used to load
+        # it whole (and `memory_efficient` copied its memmap back into RAM
+        # before saving), so the parameter is now a no-op: every merge is
+        # memory efficient.
         print(f"💾 Saving time series to: {output_path}")
-
-        size_gb = time_series.nbytes / (1024**3)
-        use_bigtiff = size_gb > 2.0
-
-        # The merge's own output order: deriving the axes from ndim alone
-        # labelled a merged CYX series (TCYX) as TZYX, so its channels
-        # opened as Z slices.  ndim is only the fallback.
-        merged_axes = output_order or {3: "TYX", 4: "TZYX", 5: "TCZYX"}.get(
-            time_series.ndim, "TYX"
-        )
-        ome_metadata = {"axes": merged_axes}
-        if image_files:
-            # Individual timepoint files in a series normally share the same
-            # physical scale; the first file is representative. Without
-            # this, the merged output silently reset to isotropic scale
-            # (same bug class as the per-file processing save path).
-            for ax_name, ax_scale in _extract_source_physical_scale(
-                image_files[0], merged_axes
-            ).items():
-                ome_metadata[f"PhysicalSize{ax_name}"] = ax_scale
-                ome_metadata[f"PhysicalSize{ax_name}Unit"] = "um"
-
-        tifffile.imwrite(
-            output_path,
-            time_series,
-            ome=True,
-            photometric="minisblack",
-            metadata=ome_metadata,
-            compression="zlib",
-            bigtiff=use_bigtiff,
+        stack_shape, _, size_gb = _write_time_series(
+            image_files, dimension_order, output_path
         )
 
         print("✅ Successfully saved time series!")
         print(f"📁 Output file: {output_filename}")
         print(f"📊 File size: {size_gb:.2f} GB")
-        print(f"📐 Final shape: {time_series.shape}")
+        print(f"📐 Final shape: {stack_shape}")
 
         # Mark this folder as processed to avoid redundant processing
         _PROCESSED_FOLDERS.add(processing_key)
@@ -719,6 +561,14 @@ def merge_timepoint_folder_advanced(
 
 
 # Command-line utility function
+# skip_load: the worker must not load the input for this function.  It reads
+# the files it needs itself and only ever returns the input as a "nothing to
+# save" signal -- so every call (one per file in the folder) loaded a file
+# just to discard it.  With skip_load it gets image=None, and returning None
+# skips the save the same way.
+merge_timepoint_folder_advanced.skip_load = True
+
+
 def merge_timepoints_cli():
     """Command-line interface for merging timepoint folders."""
     import argparse

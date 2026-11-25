@@ -751,12 +751,13 @@ class TestLazyTiffLoading:
             np.testing.assert_array_equal(
                 tifffile.imread(path), data[:, channel]
             )
-        # The dense read alone was 1.9x the stack before this path
-        # existed; the streaming path lands near 0.5x.  Budget 0.6x so a
-        # regression to dense loading (3x this) still fails loudly
-        # without the assertion sitting on the measured value itself.
+        # Forcing the dense path measures 2.0x.  Streaming measures 0.44-
+        # 0.67x: alone it is ~0.5x, but what ran earlier in the session
+        # moves it by +-25%, so the old 0.6x budget failed whole-suite runs
+        # (0.665x) while passing alone.  1.0x keeps ~50% headroom over the
+        # worst streaming figure and still fails a dense regression by 2x.
         assert (
-            peak < dense_bytes * 0.6
+            peak < dense_bytes * 1.0
         ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
 
 

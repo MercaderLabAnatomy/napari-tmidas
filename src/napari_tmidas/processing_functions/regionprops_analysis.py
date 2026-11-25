@@ -18,6 +18,7 @@ import numpy as np
 from skimage import measure
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import _is_lazy
 
 # Lazy import for pandas (optional dependency)
 try:  # noqa: SIM105
@@ -89,6 +90,21 @@ def load_label_image(filepath: str) -> np.ndarray:
         from skimage.io import imread
 
         return imread(filepath)
+
+
+def _open_intensity_image(filepath: str, lazy: bool):
+    """
+    The intensity image paired with a label image.  Opened page-wise when
+    the label image is lazy and the file is a large TIFF, so a big pair is
+    read one spatial block at a time like its labels; otherwise as before.
+    """
+    if lazy and filepath.lower().endswith((".tif", ".tiff")):
+        from napari_tmidas._file_selector import _lazy_load_tiff
+
+        opened = _lazy_load_tiff(filepath)
+        if opened is not None:
+            return opened
+    return load_label_image(filepath)
 
 
 def find_label_images(
@@ -254,6 +270,12 @@ def extract_regionprops_recursive(
 
     # If we have 2 or 3 dimensions left, treat as spatial and extract regionprops
     if ndim <= max_spatial_dims:
+        # A lazy stack is read here and only here: one plane or one volume,
+        # whatever the recursion above has sliced down to.
+        if _is_lazy(image):
+            image = np.asarray(image)
+        if intensity_image is not None and _is_lazy(intensity_image):
+            intensity_image = np.asarray(intensity_image)
         # Skip empty images (huge performance boost)
         if image.max() == 0:
             return results
@@ -817,6 +839,7 @@ def extract_regionprops_folder(
     max_intensity: bool = False,
     min_intensity: bool = False,
     dimension_order: str = "Auto",
+    _source_filepath: Optional[str] = None,
 ) -> None:
     """
     Extract region properties from a label image and append to CSV file.
@@ -861,7 +884,10 @@ def extract_regionprops_folder(
     global _REGIONPROPS_CSV_FILES
 
     # Get the current file path from the call stack
-    current_file = get_current_filepath()
+    # The worker passes _source_filepath; declaring it is also what lets it
+    # hand over a lazy label image, which the recursion below reads one
+    # spatial block at a time.  The stack lookup serves direct calls.
+    current_file = _source_filepath or get_current_filepath()
 
     if current_file is None:
         print("⚠️  Could not determine current file path")
@@ -955,7 +981,9 @@ def extract_regionprops_folder(
             )
             intensity_path = Path(intensity_path_str)
             if intensity_path.exists():
-                intensity_image = load_label_image(str(intensity_path))
+                intensity_image = _open_intensity_image(
+                    str(intensity_path), lazy=_is_lazy(image)
+                )
                 print(f"📊 Loaded intensity image: {intensity_path.name}")
             else:
                 print(f"⚠️  Intensity image not found: {intensity_path.name}")
@@ -1070,6 +1098,7 @@ def extract_regionprops_summary_folder(
     max_intensity: bool = False,
     min_intensity: bool = False,
     dimension_order: str = "Auto",
+    _source_filepath: Optional[str] = None,
 ) -> None:
     """
     Extract summary statistics of region properties from label images.
@@ -1117,7 +1146,10 @@ def extract_regionprops_summary_folder(
     global _REGIONPROPS_CSV_FILES
 
     # Get the current file path from the call stack
-    current_file = get_current_filepath()
+    # The worker passes _source_filepath; declaring it is also what lets it
+    # hand over a lazy label image, which the recursion below reads one
+    # spatial block at a time.  The stack lookup serves direct calls.
+    current_file = _source_filepath or get_current_filepath()
 
     if current_file is None:
         print("⚠️  Could not determine current file path")
@@ -1175,7 +1207,9 @@ def extract_regionprops_summary_folder(
             )
             intensity_path = Path(intensity_path_str)
             if intensity_path.exists():
-                intensity_image = load_label_image(str(intensity_path))
+                intensity_image = _open_intensity_image(
+                    str(intensity_path), lazy=_is_lazy(image)
+                )
                 print(f"📊 Loaded intensity image: {intensity_path.name}")
             else:
                 print(f"⚠️  Intensity image not found: {intensity_path.name}")

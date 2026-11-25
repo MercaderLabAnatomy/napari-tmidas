@@ -165,16 +165,38 @@ class TestDimensionOrderSensitive:
         assert got.dtype == expected.dtype
         np.testing.assert_array_equal(got, expected)
 
-    def test_hint_of_the_wrong_rank_falls_back(self):
-        """A stale 5D hint on a 4D array must not be trusted."""
+    def test_a_stale_channel_in_the_hint_splits_like_the_body(self):
+        """
+        Picking one channel extracts it upstream but leaves the hint at
+        TCZYX on what is now a TZYX array.  The body (_iter_dimension_blocks)
+        strips that C and labels per timepoint, so the resolver must split
+        exactly there too: lazy, and identical to dense.  Falling back to
+        dense here made every single-channel run of these functions
+        materialise the stack.
+        """
         rng = np.random.default_rng(2)
         image = rng.integers(0, 255, (4, 2, 32, 32), dtype=np.uint32)
         lazy = da.from_array(image, chunks=(1, 1, -1, -1))
 
+        expected = _func("Binary to Labels")(image, dimension_order="TCZYX")
         result = _func("Binary to Labels")(
             lazy, _source_filepath="x.zarr", dimension_order="TCZYX"
         )
-        assert not hasattr(result, "compute")
+        assert hasattr(result, "compute")
+        assert result.numblocks[0] > 1 and result.numblocks[1] == 1
+        np.testing.assert_array_equal(result.compute(), expected)
+
+    def test_hint_of_the_wrong_rank_is_not_trusted(self):
+        """A hint that stripping C cannot reconcile is not split on: it
+        reaches the body, which refuses it rather than guess."""
+        rng = np.random.default_rng(2)
+        image = rng.integers(0, 255, (4, 32, 32), dtype=np.uint32)
+        lazy = da.from_array(image, chunks=(1, -1, -1))
+
+        with pytest.raises(ValueError, match="dimension_order='TZYX'"):
+            _func("Binary to Labels")(
+                lazy, _source_filepath="x.zarr", dimension_order="TZYX"
+            )
 
 
 class TestShapeChangingFunctions:
@@ -272,6 +294,9 @@ class TestIndependentLeading:
             ("ZYX", 3, 3),  # Z is not independent -> dense
             ("ZCYX", 4, 4),  # C is independent but not leading -> dense
             ("Auto", 4, 4),
+            ("TCZYX", 4, 3),  # stale C after extraction: TZYX, split T
+            ("TCYX", 3, 2),  # likewise TYX
+            ("TZYX", 3, 3),  # no C to strip: wrong rank, dense
         ],
     )
     def test_resolves(self, order, ndim, expected):
@@ -614,6 +639,9 @@ class TestWorkerStreamsRemaps:
             fs._LAZY_TIFF_MIN_BYTES = threshold
             ou.STREAM_BLOCK_BYTES = label_budget
 
+        if result is None:
+            # A folder function wrote its own output and saved nothing here.
+            return None, peak - baseline
         return tifffile.imread(result["processed_file"]), peak - baseline
 
     @pytest.mark.parametrize(
@@ -1114,3 +1142,339 @@ class TestPairedFileFunctions:
         assert (
             peak < image.nbytes * 0.3
         ), f"peak {peak/1e6:.1f} MB vs dense {image.nbytes/1e6:.1f} MB"
+
+
+class TestFolderFunctions:
+    """
+    Functions that read a whole folder themselves.  The worker calls them
+    once per file, so loading the input for them -- which they never use --
+    cost one full read per file in the folder.  And Merge Timepoints, whose
+    output is the folder's size, must not build that output in memory.
+    """
+
+    @staticmethod
+    def _series(folder, shape, n, dtype=np.uint16):
+        import tifffile
+
+        folder.mkdir()
+        for t in range(n):
+            tifffile.imwrite(
+                str(folder / f"img_t{t:03d}.tif"),
+                np.full(shape, t + 1, dtype=dtype),
+            )
+        return sorted(str(p) for p in folder.iterdir())
+
+    @staticmethod
+    def _worker(files, name, params, out):
+        from napari_tmidas._file_selector import ProcessingWorker
+        from napari_tmidas.processing_functions.timepoint_merger import (
+            reset_timepoint_merger_cache,
+        )
+
+        reset_timepoint_merger_cache()
+        return ProcessingWorker(
+            file_list=files,
+            processing_func=_func(name),
+            param_values=params,
+            output_folder=str(out),
+            input_suffix=".tif",
+            output_suffix="_merged",
+            output_format="tiff",
+        )
+
+    def test_merge_streams_the_series(self, tmp_path):
+        """Peak is one input file plus a plane, not the merged series."""
+        import gc
+        import tracemalloc
+
+        import tifffile
+
+        files = self._series(tmp_path / "series", (8, 256, 256), 40)
+        series_bytes = 40 * 8 * 256 * 256 * 2
+        out = tmp_path / "out"
+        out.mkdir()
+        worker = self._worker(
+            files, "Merge Timepoints", {"dimension_order": "ZYX"}, out
+        )
+
+        gc.collect()
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            baseline, _ = tracemalloc.get_traced_memory()
+            worker.process_file(files[0])
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        (merged,) = out.iterdir()
+        data = tifffile.imread(str(merged))
+        assert data.shape == (40, 8, 256, 256)
+        np.testing.assert_array_equal(data[:, 0, 0, 0], np.arange(1, 41))
+        assert (
+            peak - baseline < series_bytes * 0.2
+        ), f"peak {(peak - baseline)/1e6:.1f} MB vs series {series_bytes/1e6:.1f} MB"
+
+    @pytest.mark.parametrize(
+        "name,params",
+        [
+            ("Merge Timepoints", {"dimension_order": "ZYX"}),
+            ("Grid View: Intensity + Labels Overlay", {"label_suffix": ""}),
+        ],
+    )
+    def test_the_worker_never_loads_their_input(
+        self, tmp_path, monkeypatch, name, params
+    ):
+        import napari_tmidas._file_selector as fs
+
+        files = self._series(tmp_path / "series", (3, 16, 16), 3)
+        out = tmp_path / "out"
+        out.mkdir()
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the worker loaded the input")
+
+        from napari_tmidas.processing_functions.grid_view_overlay import (
+            reset_grid_cache,
+        )
+
+        monkeypatch.setattr(fs, "load_image_file", refuse)
+        worker = self._worker(files, name, params, out)
+        # Grid View remembers "already created" module-wide.
+        reset_grid_cache()
+        try:
+            for path in files:
+                worker.process_file(path)
+        finally:
+            reset_grid_cache()
+
+        assert any(out.iterdir()), "the folder function produced nothing"
+
+
+class TestRegionpropsStreaming:
+    """
+    Both Regionprops functions recurse over the leading axes and measure
+    one plane (or one volume) at a time, so a lazy label image -- and its
+    lazily opened intensity image -- need only be read at the leaf.  The CSV
+    a streamed run writes must be the dense run's, byte for byte.
+    """
+
+    @pytest.mark.parametrize(
+        "name,csv_suffix",
+        [
+            ("Extract Regionprops to CSV", "_regionprops.csv"),
+            ("Regionprops Summary Statistics", "_regionprops_summary.csv"),
+        ],
+    )
+    @pytest.mark.parametrize("max_spatial_dims", [2, 3])
+    def test_streamed_csv_matches_dense(
+        self, tmp_path, name, csv_suffix, max_spatial_dims
+    ):
+        from napari_tmidas.processing_functions.regionprops_analysis import (
+            reset_regionprops_cache,
+        )
+
+        rng = np.random.default_rng(13)
+        labels = TestPairedFileFunctions._labels((12, 8, 256, 256), seed=13)
+        intensity = rng.integers(0, 4000, labels.shape, dtype=np.uint16)
+        folder = tmp_path / "plate"
+        folder.mkdir()
+        params = {
+            "label_suffix": "_labels.tif",
+            "dimension_order": "TZYX",
+            "max_spatial_dims": max_spatial_dims,
+        }
+        csv = tmp_path / f"plate{csv_suffix}"
+
+        # Dense reference: the same files, called directly with arrays.
+        import tifffile
+
+        tifffile.imwrite(str(folder / "cell_labels.tif"), labels)
+        tifffile.imwrite(str(folder / "cell.tif"), intensity)
+        reset_regionprops_cache()
+        # Named the way direct callers always have -- a `filepath` local
+        # found by the stack lookup -- so the reference does not depend on
+        # the _source_filepath this change adds.
+        filepath = str(folder / "cell_labels.tif")  # noqa: F841
+        _func(name)(labels, **params)
+        expected = csv.read_text()
+        csv.unlink()
+        for path in folder.iterdir():
+            path.unlink()
+        folder.rmdir()
+
+        reset_regionprops_cache()
+        folder.mkdir()
+        _, peak = TestWorkerStreamsRemaps._process(
+            folder,
+            name,
+            labels,
+            "TZYX",
+            params,
+            src_name="cell_labels.tif",
+            extras=[("cell.tif", intensity, "TZYX")],
+        )
+        reset_regionprops_cache()
+
+        assert csv.read_text() == expected
+        # One row per region, or one summary row per file.
+        rows = expected.count("\n") - 1
+        assert rows > (10 if csv_suffix == "_regionprops.csv" else 0), rows
+        assert (
+            peak < labels.nbytes * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs dense labels {labels.nbytes/1e6:.1f} MB"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Extract Regionprops to CSV", "Regionprops Summary Statistics"],
+    )
+    def test_worker_sees_it_as_lazy_capable(self, name):
+        assert "_source_filepath" in inspect.signature(_func(name)).parameters
+
+
+class TestPerVolumeLabelZoom:
+    """
+    Resize Labels and Subdivide Labels zoom each (Z)YX volume on its own,
+    split along the leading T/C axes exactly as _iter_dimension_blocks
+    splits them -- so a lazy stack maps over those blocks.  Subdivide's
+    layer IDs and dtype come from the whole stack's maximum label, taken in
+    one pass first; a block holding only empty frames must still produce
+    that dtype.
+    """
+
+    @staticmethod
+    def _stack(shape, seed=0, empty=()):
+        labels = TestPairedFileFunctions._labels(shape, seed=seed)
+        for t in empty:
+            labels[t] = 0
+        return labels
+
+    @pytest.mark.parametrize(
+        "order,shape",
+        [
+            ("TZYX", (6, 8, 32, 32)),
+            ("TYX", (6, 32, 32)),
+            ("TCZYX", (6, 8, 32, 32)),  # stale C after extraction
+        ],
+    )
+    @pytest.mark.parametrize("scale", [0.5, 2.0])
+    def test_resize_matches_dense(self, order, shape, scale):
+        labels = self._stack(shape, seed=1)
+        func = _func("Resize Labels (Nearest, SciPy)")
+        params = {"scale_factor": scale, "dimension_order": order}
+
+        expected = func(labels, **params)
+        lazy = da.from_array(labels, chunks=(1,) * (len(shape) - 2) + (-1, -1))
+        result = func(lazy, _source_filepath="x.zarr", **params)
+
+        assert hasattr(result, "compute"), "lazy input must stay lazy"
+        assert result.numblocks[0] > 1
+        assert result.dtype == expected.dtype
+        np.testing.assert_array_equal(np.asarray(result.compute()), expected)
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"is_half_body": True, "cut_axis": 0},
+        ],
+        ids=["full", "half-body"],
+    )
+    def test_subdivide_matches_dense_with_empty_frames(self, params):
+        """Frames 0 and 3 are empty; with one frame per block, each is a
+        Dask block on its own, and must come back in the stack's dtype."""
+        labels = self._stack((6, 8, 32, 32), seed=2, empty=(0, 3))
+        func = _func("Subdivide Labels into 3 Layers")
+        params = {**params, "dimension_order": "TZYX"}
+
+        expected = func(labels, **params)
+        lazy = da.from_array(labels, chunks=(1, -1, -1, -1))
+        result = func(lazy, _source_filepath="x.zarr", **params)
+
+        assert hasattr(result, "compute")
+        assert result.numblocks[0] == 6
+        assert result.dtype == expected.dtype
+        computed = np.asarray(result.compute())
+        assert computed.dtype == expected.dtype
+        np.testing.assert_array_equal(computed, expected)
+
+    def test_subdivide_offset_is_the_stacks_on_a_lazy_input(self):
+        """A block holding only small labels must still offset its shells
+        by the stack's maximum, not its own."""
+        labels = np.zeros((4, 6, 24, 24), dtype=np.uint16)
+        labels[0, 1:5, 4:20, 4:20] = 1
+        labels[3, 1:5, 4:20, 4:20] = 9
+        lazy = da.from_array(labels, chunks=(1, -1, -1, -1))
+
+        result = _func("Subdivide Labels into 3 Layers")(
+            lazy, _source_filepath="x.zarr", dimension_order="TZYX"
+        ).compute()
+
+        assert set(np.unique(result[0]).tolist()) == {0, 1, 1 + 9, 1 + 18}
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Resize Labels (Nearest, SciPy)", "Subdivide Labels into 3 Layers"],
+    )
+    def test_an_unresolvable_order_is_refused_before_reading(self, name):
+        """Refusing "Auto" after reading the stack would mean reading a
+        52 GB stack only to report a setting."""
+
+        def unreadable(block):
+            raise AssertionError("pixels were read")
+
+        lazy = da.map_blocks(
+            unreadable,
+            da.zeros((4, 6, 16, 16), dtype=np.uint16, chunks=1),
+            dtype=np.uint16,
+            meta=np.empty((0, 0, 0, 0), dtype=np.uint16),
+        )
+        params = {"scale_factor": 0.5} if name.startswith("Resize") else {}
+        with pytest.raises(ValueError, match="dimension order"):
+            _func(name)(
+                lazy, _source_filepath="x.zarr", dimension_order="Auto", **params
+            )
+
+    def test_a_non_leading_channel_stays_correct(self):
+        """ZCYX: C is independent but not leading, so blocks cannot be cut
+        on it -- the dense path runs, and must still match."""
+        labels = self._stack((6, 3, 32, 32), seed=3)
+        func = _func("Resize Labels (Nearest, SciPy)")
+        params = {"scale_factor": 0.5, "dimension_order": "ZCYX"}
+        lazy = da.from_array(labels, chunks=(1, 1, -1, -1))
+        result = func(lazy, _source_filepath="x.zarr", **params)
+        np.testing.assert_array_equal(
+            np.asarray(result), func(labels, **params)
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Resize Labels (Nearest, SciPy)", "Subdivide Labels into 3 Layers"],
+    )
+    def test_worker_sees_it_as_lazy_capable(self, name):
+        assert "_source_filepath" in inspect.signature(_func(name)).parameters
+
+    @pytest.mark.parametrize(
+        "name,params",
+        [
+            ("Resize Labels (Nearest, SciPy)", {"scale_factor": 0.5}),
+            ("Subdivide Labels into 3 Layers", {}),
+        ],
+    )
+    def test_worker_streams_it(self, tmp_path, name, params):
+        labels = self._stack((24, 8, 256, 256), seed=4)
+        params = {**params, "dimension_order": "TZYX"}
+
+        got, peak = TestWorkerStreamsRemaps._process(
+            tmp_path, name, labels, "TZYX", params
+        )
+
+        np.testing.assert_array_equal(got, _func(name)(labels, **params))
+        # Looser than the 0.3x elsewhere, for a measured reason: below the
+        # 64 MB cap _block_chunks sizes a block at total/8, and a zoom holds
+        # ~3 block-sized temporaries, so at test size the peak is ~0.5x and
+        # scales with the stack until the cap.  Dense is >= 2x (input +
+        # output + temporaries), which this still fails loudly.
+        assert (
+            peak < labels.nbytes * 0.75
+        ), f"peak {peak/1e6:.1f} MB vs dense {labels.nbytes/1e6:.1f} MB"

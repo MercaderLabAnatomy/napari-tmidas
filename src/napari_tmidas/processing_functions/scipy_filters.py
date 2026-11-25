@@ -38,6 +38,14 @@ def _spatial_blocks(label_image, dimension_order, function_name):
             "guessing could scale the time or channel axis as well."
         ) from None
 
+from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import (
+    _is_lazy,
+    chunked,
+    independent_leading,
+    lazy_capable,
+    plane_wise_only,
+)
 
 
 def _is_whole(blocks, label_image) -> bool:
@@ -52,11 +60,15 @@ def _is_whole(blocks, label_image) -> bool:
     return len(blocks) == 1 and blocks[0][1].ndim == label_image.ndim
 
 
-from napari_tmidas._registry import BatchProcessingRegistry
-from napari_tmidas.processing_functions._chunked import (
-    chunked,
-    plane_wise_only,
-)
+def _check_spatial_order(ndim, dimension_order, function_name):
+    """
+    Raise `_spatial_blocks`' error for a hint that cannot be resolved, and
+    return the spatial block's rank -- without touching any pixels.  Run on
+    a one-element stand-in, so a lazy stack is refused before it is read
+    rather than after.
+    """
+    probe = np.empty((1,) * ndim, dtype=np.uint8)
+    return _spatial_blocks(probe, dimension_order, function_name)[0][1].ndim
 
 if SCIPY_AVAILABLE:
 
@@ -74,6 +86,7 @@ if SCIPY_AVAILABLE:
             },
         },
     )
+    @lazy_capable
     def resize_labels(
         label_image: np.ndarray,
         scale_factor: float = 1.0,
@@ -110,6 +123,24 @@ if SCIPY_AVAILABLE:
         if scale_factor == 1.0:
             return label_image.copy()
 
+        if _is_lazy(label_image):
+            # Each (Z)YX volume is resized on its own, so a lazy stack maps
+            # over blocks cut along the leading T/C axes.
+            _check_spatial_order(
+                label_image.ndim, dimension_order, "Resize Labels"
+            )
+            return _resize_label_stack_chunked(
+                label_image,
+                scale_factor=scale_factor,
+                dimension_order=dimension_order,
+            )
+        return _resize_label_stack(label_image, scale_factor, dimension_order)
+
+    def _resize_label_stack(
+        label_image: np.ndarray, scale_factor: float, dimension_order: str
+    ) -> np.ndarray:
+        """Resize every spatial block of `label_image` (or of one Dask
+        block of it -- the T/C split is the same either way)."""
         blocks = _spatial_blocks(label_image, dimension_order, "Resize Labels")
         if _is_whole(blocks, label_image):
             return _resize_label_block(label_image, scale_factor)
@@ -117,6 +148,12 @@ if SCIPY_AVAILABLE:
         for index, block in blocks:
             result[index] = _resize_label_block(block, scale_factor)
         return result
+
+    # independent_leading splits exactly where _iter_dimension_blocks does:
+    # the leading run of T/C axes, Z kept with YX.
+    _resize_label_stack_chunked = chunked(
+        trailing_whole=independent_leading()
+    )(_resize_label_stack)
 
     def _resize_label_block(
         label_image: np.ndarray, scale_factor: float
@@ -176,6 +213,7 @@ if SCIPY_AVAILABLE:
             },
         },
     )
+    @lazy_capable
     def subdivide_labels_3layers(
         label_image: np.ndarray,
         is_half_body: bool = False,
@@ -209,16 +247,19 @@ if SCIPY_AVAILABLE:
         numpy.ndarray
             Single label image containing all three layers with unique label IDs.
         """
-        blocks = _spatial_blocks(
-            label_image, dimension_order, "Subdivide Labels into 3 Layers"
+        name = "Subdivide Labels into 3 Layers"
+        block_ndim = _check_spatial_order(
+            label_image.ndim, dimension_order, name
         )
-        block_ndim = blocks[0][1].ndim
         if is_half_body and (cut_axis < 0 or cut_axis >= block_ndim):
             raise ValueError(
                 f"cut_axis must be between 0 and {block_ndim - 1}, got {cut_axis}"
             )
 
-        # Bail out before the expensive zooms if there is nothing to do
+        # Bail out before the expensive zooms if there is nothing to do.  On
+        # a lazy stack this is the one whole-stack pass: the layer-ID offset
+        # and result dtype must be the stack's, not each block's.
+        lazy = _is_lazy(label_image)
         max_label = int(label_image.max()) if label_image.size else 0
         if max_label == 0:
             return np.zeros_like(label_image)
@@ -240,15 +281,47 @@ if SCIPY_AVAILABLE:
             is_half_body=is_half_body,
             cut_axis=cut_axis,
             max_label=max_label,
+            result_dtype=np.dtype(result_dtype),
+            dimension_order=dimension_order,
+        )
+        if lazy:
+            return _subdivide_label_stack_chunked(label_image, **layer)
+        return _subdivide_label_stack(label_image, **layer)
+
+    def _subdivide_label_stack(
+        label_image: np.ndarray,
+        is_half_body: bool,
+        cut_axis: int,
+        max_label: int,
+        result_dtype,
+        dimension_order: str,
+    ) -> np.ndarray:
+        """Subdivide every spatial block of `label_image` (or of one Dask
+        block of it), with the stack-wide `max_label` and `result_dtype`.
+
+        An empty block -- a frame with no objects, which a Dask block can
+        be on its own -- is zeros of `result_dtype`, so every block agrees
+        on the dtype the chunked map declares."""
+        blocks = _spatial_blocks(
+            label_image, dimension_order, "Subdivide Labels into 3 Layers"
+        )
+        layer = dict(
+            is_half_body=is_half_body,
+            cut_axis=cut_axis,
+            max_label=max_label,
             result_dtype=result_dtype,
         )
-        if _is_whole(blocks, label_image):
+        if _is_whole(blocks, label_image) and label_image.any():
             return _subdivide_label_block(label_image, **layer)
         result = np.zeros(label_image.shape, dtype=result_dtype)
         for index, block in blocks:
             if block.any():
                 result[index] = _subdivide_label_block(block, **layer)
         return result
+
+    _subdivide_label_stack_chunked = chunked(
+        trailing_whole=independent_leading()
+    )(_subdivide_label_stack)
 
     def _subdivide_label_block(
         label_image: np.ndarray,

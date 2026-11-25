@@ -170,6 +170,11 @@ def independent_leading(independent="TC"):
 
     def resolve(dimension_order, ndim):
         order = str(dimension_order or "").upper()
+        if len(order) != ndim and len(order.replace("C", "")) == ndim:
+            # A "TCZYX" hint survives upstream channel extraction; strip the
+            # C as _iter_dimension_blocks does, or a stack that function
+            # accepts would silently take the dense path here.
+            order = order.replace("C", "")
         if len(order) != ndim or not order.endswith("YX"):
             return ndim
         if set(order) - set("TCZYX"):
