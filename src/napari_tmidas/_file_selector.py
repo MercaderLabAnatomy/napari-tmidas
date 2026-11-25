@@ -1402,24 +1402,29 @@ def _lazy_load_tiff(filepath: str):
                 int(getattr(page, "index", i))
                 for i, page in enumerate(series.pages)
             ]
+            # What one page decodes to: (Y, X) for grayscale, (Y, X, S) for
+            # contiguous RGB, (S, Y, X) for planar.  Taken from the page
+            # itself rather than assumed to be YX, so RGB stacks -- the input
+            # RGB to Labels exists for -- load lazily too.
+            plane_shape = tuple(int(s) for s in series.keyframe.shape)
     except Exception as exc:
         print(f"Lazy TIFF open failed ({exc}); reading densely instead")
         return None
 
-    n_planes = (
-        int(np.prod(shape[:-2], dtype=np.int64)) if len(shape) > 2 else 0
-    )
+    lead = len(shape) - len(plane_shape)
+    if lead < 1 or shape[lead:] != plane_shape:
+        # 2D, or pages that are not whole trailing slabs of the series.
+        return None
+    n_planes = int(np.prod(shape[:lead], dtype=np.int64))
     if n_planes <= 1 or len(page_index) != n_planes:
-        # 2D, single-page, or a layout whose pages are not whole YX planes
-        # (tiled RGB, samples-per-pixel > 1): not addressable page-wise.
+        # Single-page, or a layout whose pages do not map one-to-one onto
+        # the leading axes: not addressable page-wise.
         return None
     if (
         int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
         < _LAZY_TIFF_MIN_BYTES
     ):
         return None
-
-    plane_shape = shape[-2:]
 
     def read_page(index: int) -> np.ndarray:
         # Reopened per read: a TiffFile handle is not safe to share across the

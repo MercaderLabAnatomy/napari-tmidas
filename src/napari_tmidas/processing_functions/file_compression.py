@@ -14,6 +14,7 @@ import numpy as np
 
 from napari_tmidas._file_selector import ProcessingWorker
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import lazy_capable
 
 
 def check_pzstd_installed():
@@ -84,6 +85,11 @@ def compress_file(file_path, remove_source=False, compression_level=3):
         },
     },
 )
+# The image passes through untouched, so a lazy input can stay lazy and be
+# streamed to disk by the worker; compression acts on the saved file.  The
+# flags below are set on `compress_with_zstandard`, which after decoration
+# names this wrapper -- the same object the registry hands the worker.
+@lazy_capable
 def compress_with_zstandard(
     image: np.ndarray, remove_source: bool = False, compression_level: int = 3
 ) -> np.ndarray:

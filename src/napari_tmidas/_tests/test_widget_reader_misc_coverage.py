@@ -1359,7 +1359,7 @@ class TestScipyFilterBranches:
         empty = np.zeros((6, 6, 6), dtype=np.uint16)
 
         out = scipy_mod.subdivide_labels_3layers(
-            empty, is_half_body=True, cut_axis=0
+            empty, is_half_body=True, cut_axis=0, dimension_order="ZYX"
         )
 
         assert out.shape == empty.shape
@@ -1377,7 +1377,7 @@ class TestScipyFilterBranches:
             volume[2 + i, 6 - half : 6 + half, 6 - half : 6 + half] = 1
 
         out = scipy_mod.subdivide_labels_3layers(
-            volume, is_half_body=True, cut_axis=0
+            volume, is_half_body=True, cut_axis=0, dimension_order="ZYX"
         )
 
         assert out.shape == volume.shape
@@ -1397,7 +1397,10 @@ class TestScipyFilterBranches:
 
         with pytest.raises(ValueError, match="cut_axis must be between"):
             scipy_mod.subdivide_labels_3layers(
-                volume, is_half_body=True, cut_axis=3
+                volume,
+                is_half_body=True,
+                cut_axis=3,
+                dimension_order="ZYX",
             )
 
     @pytest.mark.parametrize(

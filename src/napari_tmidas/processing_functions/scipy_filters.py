@@ -12,6 +12,32 @@ except ImportError:
     SCIPY_AVAILABLE = False
     print("SciPy not available, some processing functions will be disabled")
 
+
+def _spatial_blocks(label_image, dimension_order, function_name):
+    """
+    Split `label_image` into its spatial (Z)YX blocks, one per T/C index.
+
+    For the label functions here that rescale objects with ``ndimage.zoom``:
+    zoom scales every axis it is given, so handing it a whole TZYX stack
+    scales time like space -- dropping timepoints and moving each object
+    into another frame, with no error.  Blocks are views, cut exactly as
+    ``_iter_dimension_blocks`` cuts them for labelling (Z kept with YX).
+    """
+    from napari_tmidas.processing_functions.skimage_filters import (
+        _iter_dimension_blocks,
+    )
+
+    try:
+        return list(_iter_dimension_blocks(label_image, dimension_order))
+    except ValueError:
+        raise ValueError(
+            f"Cannot tell which axes of a {label_image.ndim}D label image "
+            f"are spatial from dimension_order={dimension_order!r}. Select "
+            "the dimension order (e.g. ZYX, TYX, TZYX) from the dimension "
+            f"order dropdown: {function_name} scales Z, Y and X only, and "
+            "guessing could scale the time or channel axis as well."
+        ) from None
+
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions._chunked import (
     chunked,
@@ -35,32 +61,55 @@ if SCIPY_AVAILABLE:
         },
     )
     def resize_labels(
-        label_image: np.ndarray, scale_factor: float = 1.0
+        label_image: np.ndarray,
+        scale_factor: float = 1.0,
+        dimension_order: str = "Auto",
     ) -> np.ndarray:
         """
         Resize labeled objects while maintaining original array dimensions.
 
-        Objects are scaled isotropically and centered within the original
-        coordinate system, preserving spatial relationships with other data.
+        Objects are scaled isotropically in their spatial axes (Z, Y, X) and
+        centered within the original coordinate system, preserving spatial
+        relationships with other data.  Time and channel axes are never
+        scaled: each timepoint/channel is resized on its own.
 
         Parameters
         ----------
         label_image : np.ndarray
-            3D label image where each unique value represents a distinct object
+            2D (YX) or higher label image where each unique value represents
+            a distinct object
         scale_factor : float
             Scaling factor (e.g., 0.8 = 80% size, 1.2 = 120% size)
+        dimension_order : str
+            Axis order from the batch widget's dropdown (e.g. "ZYX", "TYX",
+            "TZYX").  Required for anything above 2D: a 3D stack may be a
+            volume or a time series, and treating T as spatial zooms it like
+            one -- dropping timepoints and moving each object into a
+            different frame.
 
         Returns
         -------
         np.ndarray
             Resized label image with same dimensions as input
         """
-        import numpy as np
-        from scipy.ndimage import zoom
-
         scale_factor = float(scale_factor)
         if scale_factor == 1.0:
             return label_image.copy()
+
+        blocks = _spatial_blocks(label_image, dimension_order, "Resize Labels")
+        if len(blocks) == 1:
+            return _resize_label_block(blocks[0][1], scale_factor)
+        result = np.empty_like(label_image)
+        for index, block in blocks:
+            result[index] = _resize_label_block(block, scale_factor)
+        return result
+
+    def _resize_label_block(
+        label_image: np.ndarray, scale_factor: float
+    ) -> np.ndarray:
+        """Zoom every axis of `label_image` -- all of which must be spatial
+        -- about its centre, keeping its shape."""
+        from scipy.ndimage import zoom
 
         original_shape = np.array(label_image.shape)
 
@@ -114,9 +163,90 @@ if SCIPY_AVAILABLE:
         },
     )
     def subdivide_labels_3layers(
-        label_image: np.ndarray, is_half_body: bool = False, cut_axis: int = 0
+        label_image: np.ndarray,
+        is_half_body: bool = False,
+        cut_axis: int = 0,
+        dimension_order: str = "Auto",
     ) -> np.ndarray:
         """Subdivide labeled objects into three concentric layers.
+
+        Each object is partitioned into inner, middle, and outer shells of
+        approximately equal thickness, per timepoint/channel: only Z, Y and X
+        are scaled.  Object ``n`` becomes ``n`` (core), ``n + max`` (middle)
+        and ``n + 2*max`` (outer), where ``max`` is the largest label in the
+        whole stack -- so a tracked object keeps the same layer IDs in every
+        frame.
+
+        Parameters
+        ----------
+        label_image : np.ndarray
+            Label image where each unique value represents a distinct object.
+        is_half_body : bool, optional
+            See ``_subdivide_label_block``.
+        cut_axis : int, optional
+            For half-bodies: the cut axis *within the spatial block* (0=Z,
+            1=Y, 2=X for a ZYX volume).
+        dimension_order : str
+            Axis order from the batch widget's dropdown (e.g. "ZYX", "TZYX").
+            Required above 2D, for the same reason as in ``resize_labels``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Single label image containing all three layers with unique label IDs.
+        """
+        blocks = _spatial_blocks(
+            label_image, dimension_order, "Subdivide Labels into 3 Layers"
+        )
+        block_ndim = blocks[0][1].ndim
+        if is_half_body and (cut_axis < 0 or cut_axis >= block_ndim):
+            raise ValueError(
+                f"cut_axis must be between 0 and {block_ndim - 1}, got {cut_axis}"
+            )
+
+        # Bail out before the expensive zooms if there is nothing to do
+        max_label = int(label_image.max()) if label_image.size else 0
+        if max_label == 0:
+            return np.zeros_like(label_image)
+
+        # Layer IDs reach 3 * max_label; pick the narrowest dtype that holds
+        # them, once for the whole stack so every block agrees.
+        if np.issubdtype(label_image.dtype, np.integer):
+            max_needed = max_label * 3
+            for dtype in (label_image.dtype, np.uint32, np.uint64):
+                if max_needed <= np.iinfo(dtype).max:
+                    result_dtype = dtype
+                    break
+            else:
+                result_dtype = np.uint64
+        else:
+            result_dtype = np.uint32
+
+        layer = dict(
+            is_half_body=is_half_body,
+            cut_axis=cut_axis,
+            max_label=max_label,
+            result_dtype=result_dtype,
+        )
+        if len(blocks) == 1:
+            return _subdivide_label_block(blocks[0][1], **layer)
+        result = np.zeros(label_image.shape, dtype=result_dtype)
+        for index, block in blocks:
+            if block.any():
+                result[index] = _subdivide_label_block(block, **layer)
+        return result
+
+    def _subdivide_label_block(
+        label_image: np.ndarray,
+        is_half_body: bool,
+        cut_axis: int,
+        max_label: int,
+        result_dtype,
+    ) -> np.ndarray:
+        """Subdivide the objects of one spatial block into three layers.
+
+        Every axis of `label_image` is treated as spatial.  `max_label` and
+        `result_dtype` come from the whole stack (see the caller).
 
         Each object is partitioned into inner, middle, and outer shells of approximately
         equal thickness. The layers are combined into a single label image using
@@ -239,11 +369,6 @@ if SCIPY_AVAILABLE:
 
             return result
 
-        # Bail out before the two expensive zooms if there is nothing to do
-        max_label = int(label_image.max()) if label_image.size else 0
-        if max_label == 0:
-            return np.zeros_like(label_image)
-
         # Create the two scaled versions.  The outer boundary is `work_image`
         # itself — copying it into `full_labels` and again into `layer3`, as
         # well as materialising separate layer1/layer2/layer3 arrays, held
@@ -255,22 +380,6 @@ if SCIPY_AVAILABLE:
         inner_labels = create_scaled_labels(
             scale_inner
         )  # Inner boundary (~33%)
-
-        if np.issubdtype(label_image.dtype, np.integer):
-            max_needed = max_label * 3
-            dtype_choices = [label_image.dtype, np.uint32, np.uint64]
-            for dtype in dtype_choices:
-                try:
-                    info = np.iinfo(dtype)
-                except ValueError:
-                    continue
-                if max_needed <= info.max:
-                    result_dtype = dtype
-                    break
-            else:
-                result_dtype = np.uint64
-        else:
-            result_dtype = np.uint32
 
         result = np.zeros(work_shape, dtype=result_dtype)
 

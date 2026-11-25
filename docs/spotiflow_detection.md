@@ -441,7 +441,7 @@ If you use Spotiflow in your research, please cite:
 
 - **Spotiflow GitHub**: https://github.com/weigertlab/spotiflow
 - **Documentation**: https://weigertlab.github.io/spotiflow/
-- **Paper**: https://doi.org/10.1101/2022.XXX
+- **Paper**: Dominguez Mantes et al., *Nature Methods* (2025), https://doi.org/10.1038/s41592-025-02662-x (preprint: https://doi.org/10.1101/2024.02.01.578426)
 - **Forum**: https://forum.image.sc/ (tag: spotiflow)
 
 ## See Also

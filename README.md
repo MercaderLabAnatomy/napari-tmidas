@@ -203,18 +203,18 @@ Interactive object selection and cropping with SAM2.
 
 ### Memory-Efficient Streaming
 
-Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 13 functions map their existing body over blocks via the `@chunked` decorator, and 7 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. The mechanism is documented in [`_chunked.py`](src/napari_tmidas/processing_functions/_chunked.py), and the behaviour is pinned by `TestZarrOutputStreaming`, `TestSplitChannelsStreaming`, `TestLazyTiffLoading`, `TestCLAHEDaskMemory` and `TestRollingBallPerPlane`.
+Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 13 functions map their existing body over blocks via the `@chunked` decorator, and 7 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. `Mirror Labels`, `Keep Slice Range by Area`, `RGB to Labels` and `Compress with Zstandard` stay lazy too: the first two need only per-slice areas from the whole stack, computed in one pass, and are otherwise an index remap or mask. Large TIFFs are opened page-wise, RGB stacks included. The mechanism is documented in [`_chunked.py`](src/napari_tmidas/processing_functions/_chunked.py), and the behaviour is pinned by `TestZarrOutputStreaming`, `TestSplitChannelsStreaming`, `TestLazyTiffLoading`, `TestCLAHEDaskMemory`, `TestRollingBallPerPlane`, `TestWholeStackRemaps` and `TestWorkerStreamsRemaps`.
 
 What is left:
 
 - **Four AI methods still run dense.** CAREamics denoising, Spotiflow spot detection and Ultrack tracking have no streaming path. VisCy virtual staining accepts `_source_filepath` but does not use it, and stacks every timepoint in memory before returning. CAREamics and VisCy have not been audited for real, which needs their dedicated virtualenvs installed.
-- **14 other registered functions still scale linearly with input size.** None of them is `@chunked`, sets `skip_load` or accepts `_source_filepath`:
-  - Image operations: `Convert to 8-bit (uint8)`, `Percentile Threshold (Keep Brightest)`, `Compress with Zstandard`
-  - Label operations: `Mirror Labels`, `Intersect Label Images`, `Resize Labels (Nearest, SciPy)`, `RGB to Labels`, `Subdivide Labels into 3 Layers`, `Keep Slice Range by Area`, `Label-Based Cropping`
+- **10 other registered functions still scale linearly with input size.** None of them is `@chunked`, sets `skip_load` or accepts `_source_filepath`:
+  - Image operations: `Convert to 8-bit (uint8)`, `Percentile Threshold (Keep Brightest)`
+  - Label operations: `Intersect Label Images`, `Resize Labels (Nearest, SciPy)`, `Subdivide Labels into 3 Layers`, `Label-Based Cropping`
   - Measurements and QC: `Extract Regionprops to CSV`, `Regionprops Summary Statistics`, `Grid View: Intensity + Labels Overlay`
   - Time series: `Merge Timepoints`
 
-  Each needs either a `@chunked` conversion or a check that it cannot take one: functions using global statistics (`Convert to 8-bit` rescales by the whole-stack min/max) and functions with cross-block topology (`Mirror Labels`) both resist it.
+  A whole-stack statistic does not by itself rule streaming out: `Convert to 8-bit` needs only the min and max, which Dask reduces in one pass before mapping the per-plane conversion; `Percentile Threshold` is harder, since `da.percentile` is approximate and an exact answer needs a histogram. `Subdivide Labels into 3 Layers` does resist it — its layers depend on each object's whole shape. `Grid View` and `Merge Timepoints` read their folder themselves and only fall back to returning the input, so they want `skip_load` rather than a lazy body.
 - **The structural decision.** Dense functions opt into laziness one at a time, by accepting `_source_filepath`. Whether to keep converting them individually or change the worker's contract for all of them at once is still open.
 
 ### Other Known Issues

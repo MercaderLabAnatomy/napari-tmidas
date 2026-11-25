@@ -635,6 +635,62 @@ class TestLazyTiffLoading:
         assert lazy.shape == data.shape
         np.testing.assert_array_equal(np.asarray(lazy), data)
 
+    @pytest.mark.parametrize(
+        "shape,dtype,kwargs",
+        [
+            ((5, 32, 32, 3), np.uint8, {"photometric": "rgb", "axes": "TYXS"}),
+            (
+                (5, 64, 64, 3),
+                np.uint8,
+                {"photometric": "rgb", "tile": (32, 32), "axes": "TYXS"},
+            ),
+            (
+                (5, 3, 32, 32),
+                np.uint8,
+                {
+                    "photometric": "rgb",
+                    "planarconfig": "separate",
+                    "axes": "TSYX",
+                },
+            ),
+            ((4, 3, 32, 32), np.uint16, {"imagej": True, "axes": "TZYX"}),
+        ],
+        ids=["rgb", "rgb-tiled", "rgb-planar", "imagej"],
+    )
+    def test_multi_sample_pages_load_lazily(
+        self, tmp_path, shape, dtype, kwargs
+    ):
+        """
+        A page is not always one YX plane: an RGB page decodes to (Y, X, 3)
+        or, planar, (3, Y, X).  The loader used to assume YX and read every
+        RGB stack densely, which made RGB to Labels lazy only on Zarr.
+        """
+        pytest.importorskip("dask")
+        import tifffile
+
+        import napari_tmidas._file_selector as fs
+
+        kwargs = dict(kwargs)
+        metadata = {"axes": kwargs.pop("axes")}
+        if not kwargs.get("imagej"):
+            kwargs["ome"] = True
+        rng = np.random.default_rng(9)
+        data = rng.integers(0, 255, size=shape).astype(dtype)
+        src = tmp_path / "pages.tif"
+        tifffile.imwrite(str(src), data, metadata=metadata, **kwargs)
+
+        original = fs._LAZY_TIFF_MIN_BYTES
+        fs._LAZY_TIFF_MIN_BYTES = 1024
+        try:
+            lazy = fs._lazy_load_tiff(str(src))
+        finally:
+            fs._LAZY_TIFF_MIN_BYTES = original
+
+        assert lazy is not None and hasattr(lazy, "compute")
+        np.testing.assert_array_equal(
+            np.asarray(lazy), tifffile.imread(str(src))
+        )
+
     def test_split_streams_a_large_tiff(self, tmp_path):
         """End to end: TIFF in, one channel per file out, nothing dense."""
         pytest.importorskip("dask")

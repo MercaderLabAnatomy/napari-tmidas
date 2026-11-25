@@ -16,7 +16,11 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from napari_tmidas._registry import BatchProcessingRegistry
-from napari_tmidas.processing_functions._chunked import chunked, lazy_capable
+from napari_tmidas.processing_functions._chunked import (
+    _is_lazy,
+    chunked,
+    lazy_capable,
+)
 from napari_tmidas.processing_functions.ome_output_utils import (
     _extract_source_physical_scale,
 )
@@ -466,7 +470,11 @@ def filter_label_by_id(image: np.ndarray, label_id: int = 1) -> np.ndarray:
         }
     },
 )
+@lazy_capable
 def mirror_labels(image: np.ndarray, axis: int = 0) -> np.ndarray:
+    if _is_lazy(image):
+        return _mirror_labels_lazy(image, axis)
+
     arr = _to_array(image)
     if arr.ndim == 0:
         raise ValueError("Cannot mirror a scalar")
@@ -519,6 +527,81 @@ def mirror_labels(image: np.ndarray, axis: int = 0) -> np.ndarray:
             )
 
     return result.astype(arr.dtype, copy=False)
+
+
+def _mirror_labels_lazy(arr, axis: int):
+    """
+    `mirror_labels` for a Dask input, without materialising the stack.
+
+    Mirroring looks global but is not: output slice ``i`` is input slice
+    ``2k - i`` (``k`` being the largest-area slice) with every label offset
+    by the global maximum.  So the only whole-stack quantities are the
+    per-slice areas and that maximum -- two reductions computed in one pass
+    -- and the output itself is an index remap along a single axis.
+
+    The remap is assembled as zeros + reversed slice + zeros rather than
+    with ``da.take``: an out-of-order index makes Dask emit one chunk per
+    index, while a ``[::-1]`` slice keeps the input's chunking.
+    """
+    if arr.ndim == 0:
+        raise ValueError("Cannot mirror a scalar")
+    if not isinstance(axis, int):
+        raise TypeError("axis must be an integer")
+    if axis >= arr.ndim or axis < -arr.ndim:
+        raise ValueError(
+            f"Axis {axis} is out of bounds for an image with {arr.ndim} dimensions"
+        )
+    axis = axis % arr.ndim
+
+    if arr.size == 0:
+        return arr
+
+    reduction_axes = tuple(i for i in range(arr.ndim) if i != axis)
+    slice_areas, max_label = da.compute(
+        (arr != 0).sum(axis=reduction_axes, dtype=np.int64), arr.max()
+    )
+    if slice_areas.max() == 0:
+        # Nothing to mirror.  A Dask array is never written through, so the
+        # dense path's defensive copy has no counterpart here.
+        return arr
+
+    n = arr.shape[axis]
+    k = int(np.argmax(slice_areas))
+    # Output positions whose mirror 2k - i lands inside the array.
+    lo, hi = max(0, 2 * k - n + 1), min(n - 1, 2 * k)
+
+    def take(start, stop):
+        index = [slice(None)] * arr.ndim
+        index[axis] = slice(start, stop)
+        return arr[tuple(index)]
+
+    # Input slices 2k-hi .. 2k-lo, reversed, fill output positions lo .. hi.
+    mirrored = take(2 * k - hi, 2 * k - lo + 1)
+    index = [slice(None)] * arr.ndim
+    index[axis] = slice(None, None, -1)
+    mirrored = mirrored[tuple(index)]
+
+    # Same arithmetic as the dense path: the offset is added in the label
+    # dtype, so an overflow wraps identically.
+    zero = np.zeros((), dtype=arr.dtype)
+    mirrored = da.where(
+        mirrored != 0, mirrored + arr.dtype.type(max_label), zero
+    ).astype(arr.dtype, copy=False)
+
+    def zeros(length):
+        shape = list(arr.shape)
+        shape[axis] = length
+        chunks = list(arr.chunks)
+        # Chunked like the input along `axis` too: one (length,) block would
+        # materialise every zero slice at once when it is written.
+        chunks[axis] = min(length, arr.chunksize[axis])
+        return da.zeros(tuple(shape), dtype=arr.dtype, chunks=tuple(chunks))
+
+    parts = [zeros(lo)] if lo > 0 else []
+    parts.append(mirrored)
+    if hi < n - 1:
+        parts.append(zeros(n - 1 - hi))
+    return da.concatenate(parts, axis=axis) if len(parts) > 1 else mirrored
 
 
 @BatchProcessingRegistry.register(
@@ -649,6 +732,7 @@ def intersect_label_images(
         }
     },
 )
+@lazy_capable
 def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
     """Keep label content only between the minimum-area and maximum-area slices (inclusive).
 
@@ -689,21 +773,32 @@ def keep_slice_range_by_area(image: np.ndarray, axis: int = 0) -> np.ndarray:
             "Cannot determine slice range on an axis with zero length"
         )
 
+    lazy = _is_lazy(image)
     reduction_axes = tuple(i for i in range(image.ndim) if i != axis)
-    # Count non-zero pixels per slice to determine occupied area per slice
-    slice_areas = np.sum(image != 0, axis=reduction_axes, dtype=np.int64)
+    # Count non-zero pixels per slice to determine occupied area per slice.
+    # On a Dask input this is the only whole-stack pass: the areas are one
+    # number per slice, and everything after them is a per-slice mask.
+    slice_areas = (image != 0).sum(axis=reduction_axes, dtype=np.int64)
+    if lazy:
+        slice_areas = slice_areas.compute()
 
-    if slice_areas.size == 0:
-        return image.copy()
-
-    if slice_areas.min() == slice_areas.max():
-        return image.copy()
+    if slice_areas.size == 0 or slice_areas.min() == slice_areas.max():
+        # A Dask array is never written through, so it needs no copy.
+        return image if lazy else image.copy()
 
     min_idx = int(np.argmin(slice_areas))
     max_idx = int(np.argmax(slice_areas))
 
     start = min(min_idx, max_idx)
     end = max(min_idx, max_idx)
+
+    if lazy:
+        keep = np.zeros(image.shape[axis], dtype=bool)
+        keep[start : end + 1] = True
+        keep = keep.reshape(
+            [-1 if i == axis else 1 for i in range(image.ndim)]
+        )
+        return da.where(keep, image, np.zeros((), dtype=image.dtype))
 
     # Create a copy of the full image to preserve shape
     result = image.copy()
@@ -1542,6 +1637,7 @@ merge_channels.skip_load = True
         },
     },
 )
+@lazy_capable
 def rgb_to_labels(
     image: np.ndarray,
     blue_label: int = 1,
@@ -1577,6 +1673,20 @@ def rgb_to_labels(
         (0, 255, 0): green_label,  # Green
         (255, 0, 0): red_label,  # Red
     }
+
+    if _is_lazy(image):
+        # Per pixel, so it maps straight onto Dask -- but not through
+        # @chunked, whose probe treats the vanished RGB axis as a projection
+        # and falls back to dense.  The three colours are mutually exclusive,
+        # so chaining `where` matches the dense masked assignment exactly.
+        label_image = da.zeros(
+            image.shape[:-1], dtype=np.uint32, chunks=image.chunks[:-1]
+        )
+        for color, label in color_mapping.items():
+            mask = (image == np.asarray(color)).all(axis=-1)
+            label_image = da.where(mask, np.uint32(label), label_image)
+        return label_image
+
     # Create an empty label image
     label_image = np.zeros(image.shape[:-1], dtype=np.uint32)
     # Iterate through the color mapping and assign labels
