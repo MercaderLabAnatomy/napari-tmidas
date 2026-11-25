@@ -38,6 +38,20 @@ def _spatial_blocks(label_image, dimension_order, function_name):
             "guessing could scale the time or channel axis as well."
         ) from None
 
+
+
+def _is_whole(blocks, label_image) -> bool:
+    """
+    Whether `_spatial_blocks` returned the whole array as its only block.
+
+    One block is not enough: a stack with a single timepoint or channel also
+    yields one, but it is ``stack[0]`` -- integer-indexed, with that axis
+    gone.  Returning its result as the whole answer turned a (1, Z, Y, X)
+    stack into (Z, Y, X).
+    """
+    return len(blocks) == 1 and blocks[0][1].ndim == label_image.ndim
+
+
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions._chunked import (
     chunked,
@@ -97,8 +111,8 @@ if SCIPY_AVAILABLE:
             return label_image.copy()
 
         blocks = _spatial_blocks(label_image, dimension_order, "Resize Labels")
-        if len(blocks) == 1:
-            return _resize_label_block(blocks[0][1], scale_factor)
+        if _is_whole(blocks, label_image):
+            return _resize_label_block(label_image, scale_factor)
         result = np.empty_like(label_image)
         for index, block in blocks:
             result[index] = _resize_label_block(block, scale_factor)
@@ -228,8 +242,8 @@ if SCIPY_AVAILABLE:
             max_label=max_label,
             result_dtype=result_dtype,
         )
-        if len(blocks) == 1:
-            return _subdivide_label_block(blocks[0][1], **layer)
+        if _is_whole(blocks, label_image):
+            return _subdivide_label_block(label_image, **layer)
         result = np.zeros(label_image.shape, dtype=result_dtype)
         for index, block in blocks:
             if block.any():

@@ -429,6 +429,30 @@ class TestZoomScalesSpatialAxesOnly:
 
         assert set(DIMENSION_ORDER_OPTIONS) - {"Auto"} == _DIMENSION_ORDER_AXES
 
+    @pytest.mark.parametrize(
+        "order,shape",
+        [("TZYX", (1, 8, 32, 32)), ("TYX", (1, 32, 32)), ("CZYX", (1, 8, 32, 32))],
+    )
+    def test_a_single_timepoint_keeps_its_axis(self, order, shape):
+        """One timepoint is one spatial block, but stack[0] -- the T axis
+        indexed away.  Returning that block's result as the whole answer
+        saved a (1, Z, Y, X) stack as (Z, Y, X)."""
+        labels = self._per_frame_objects(shape)
+        resized = scipy_filters.resize_labels(
+            labels, scale_factor=0.5, dimension_order=order
+        )
+        layered = scipy_filters.subdivide_labels_3layers(
+            labels, dimension_order=order
+        )
+        assert resized.shape == labels.shape
+        assert layered.shape == labels.shape
+        np.testing.assert_array_equal(
+            resized[0],
+            scipy_filters.resize_labels(
+                labels[0], scale_factor=0.5, dimension_order=order[1:]
+            ),
+        )
+
     def test_2d_needs_no_hint(self):
         labels = np.zeros((16, 16), dtype=np.uint16)
         labels[4:12, 4:12] = 2
