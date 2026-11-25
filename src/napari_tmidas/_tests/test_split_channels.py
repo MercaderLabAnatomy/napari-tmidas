@@ -700,8 +700,13 @@ class TestLazyTiffLoading:
         from napari_tmidas._file_selector import ProcessingWorker
 
         rng = np.random.default_rng(6)
+        # Few large pages (64 x 512 KB), not many small ones: the lazy TIFF
+        # is one Dask task per page, and at 128x128 (32 KB) each task's
+        # graph and scheduler bookkeeping is as large as its pixels.  The
+        # peak then measured Dask, not data -- 0.44-0.67x on Linux, 1.0x on
+        # a macOS runner -- while the pipeline streamed correctly.
         data = rng.integers(
-            0, 4000, size=(30, 2, 8, 128, 128), dtype=np.uint16
+            0, 4000, size=(8, 2, 4, 512, 512), dtype=np.uint16
         )
         dense_bytes = data.nbytes
         src = tmp_path / "stack.tif"
@@ -751,13 +756,11 @@ class TestLazyTiffLoading:
             np.testing.assert_array_equal(
                 tifffile.imread(path), data[:, channel]
             )
-        # Forcing the dense path measures 2.0x.  Streaming measures 0.44-
-        # 0.67x: alone it is ~0.5x, but what ran earlier in the session
-        # moves it by +-25%, so the old 0.6x budget failed whole-suite runs
-        # (0.665x) while passing alone.  1.0x keeps ~50% headroom over the
-        # worst streaming figure and still fails a dense regression by 2x.
+        # At this geometry streaming measures 0.26-0.27x and holds ~9 MB
+        # however large the stack (0.15x at twice the size); forcing the
+        # dense path measures 1.8x.  0.6x sits well clear of both.
         assert (
-            peak < dense_bytes * 1.0
+            peak < dense_bytes * 0.6
         ), f"peak {peak/1e6:.1f} MB vs dense {dense_bytes/1e6:.1f} MB"
 
 
