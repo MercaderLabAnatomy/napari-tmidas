@@ -37,8 +37,11 @@ from napari_tmidas.processing_functions._chunked import (
 )
 
 # Dimension-order strings offered by the "dimension_order" dropdown widget.
+# Every order the batch widget's dropdown offers (DIMENSION_ORDER_OPTIONS,
+# minus "Auto").  CZYX was missing, so picking it made every function that
+# resolves axes through here refuse the run.
 _DIMENSION_ORDER_AXES = frozenset(
-    {"YX", "CYX", "TYX", "ZYX", "TCYX", "TZYX", "ZCYX", "TZCYX", "TCZYX"}
+    {"YX", "CYX", "TYX", "ZYX", "CZYX", "TCYX", "TZYX", "ZCYX", "TZCYX", "TCZYX"}
 )
 
 
