@@ -140,7 +140,10 @@ def load_and_validate_images(
     is_4d_input = False
     ndim = len(first_image.shape)
 
-    if dimension_order == "auto":
+    # Case-insensitive: the batch widget's dropdown sends "Auto", and
+    # comparing it against "auto" read the default setting as the 4-letter
+    # order "AUTO", failing every 3D series.
+    if str(dimension_order or "auto").lower() == "auto":
         # Auto-detect based on shape
         if ndim == 2:
             # 2D image (YX)
@@ -570,12 +573,22 @@ def merge_timepoint_folder_advanced(
             first_image = imread(image_files[0])
 
             # Determine dimension handling based on user specification
-            if dimension_order == "auto":
+            auto_order = str(dimension_order or "auto").lower() == "auto"
+            if auto_order:
                 # Auto-detect: 4D assumed to be TZYX
                 is_concatenate_time = len(first_image.shape) == 4
             else:
                 # User-specified: only TZYX needs time concatenation
                 is_concatenate_time = dimension_order.upper() == "TZYX"
+
+            # The merged series' axes, as load_and_validate_images reports
+            # them for the standard path.
+            if is_concatenate_time:
+                output_order = "TZYX"
+            elif auto_order:
+                output_order = {2: "TYX", 3: "TZYX"}.get(first_image.ndim)
+            else:
+                output_order = "T" + dimension_order.upper()
 
             if is_concatenate_time:
                 # 4D TZYX input - concatenate along time axis
@@ -651,9 +664,9 @@ def merge_timepoint_folder_advanced(
                 time_series = result
         else:
             # Use standard loading
-            time_series = load_and_validate_images(
+            time_series, output_order = load_and_validate_images(
                 image_files, dimension_order
-            )[0]
+            )
 
         # Save the advanced time series
         print(f"💾 Saving time series to: {output_path}")
@@ -661,9 +674,10 @@ def merge_timepoint_folder_advanced(
         size_gb = time_series.nbytes / (1024**3)
         use_bigtiff = size_gb > 2.0
 
-        # Axis 0 of time_series is always the newly-added Time axis (this
-        # function's whole job is stacking per-timepoint files along it).
-        merged_axes = {3: "TYX", 4: "TZYX", 5: "TCZYX"}.get(
+        # The merge's own output order: deriving the axes from ndim alone
+        # labelled a merged CYX series (TCYX) as TZYX, so its channels
+        # opened as Z slices.  ndim is only the fallback.
+        merged_axes = output_order or {3: "TYX", 4: "TZYX", 5: "TCZYX"}.get(
             time_series.ndim, "TYX"
         )
         ome_metadata = {"axes": merged_axes}

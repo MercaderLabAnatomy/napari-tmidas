@@ -285,3 +285,82 @@ class TestResetCache:
         reset_timepoint_merger_cache()
 
         assert len(timepoint_merger._PROCESSED_FOLDERS) == 0
+
+
+class TestDimensionOrderFromTheWidget:
+    """
+    Merge Timepoints run the way the batch widget runs it: through
+    ProcessingWorker, with the Dimension Order dropdown's own strings.
+    """
+
+    @staticmethod
+    def _series(folder, shape, n):
+        folder.mkdir()
+        for t in range(n):
+            tifffile.imwrite(
+                str(folder / f"img_t{t:03d}.tif"),
+                np.full(shape, t + 1, dtype=np.uint16),
+            )
+        return sorted(str(p) for p in folder.iterdir())
+
+    @staticmethod
+    def _merge_with_worker(files, params, out):
+        from napari_tmidas._file_selector import ProcessingWorker
+        from napari_tmidas._registry import BatchProcessingRegistry
+
+        reset_timepoint_merger_cache()
+        worker = ProcessingWorker(
+            file_list=files,
+            processing_func=BatchProcessingRegistry.get_function_info(
+                "Merge Timepoints"
+            )["func"],
+            param_values=params,
+            output_folder=str(out),
+            input_suffix=".tif",
+            output_suffix="_merged",
+            output_format="tiff",
+        )
+        worker.process_file(files[0])
+        (merged,) = out.iterdir()
+        return merged
+
+    def test_merge_accepts_the_dropdowns_auto(self, tmp_path):
+        """The widget sends "Auto"; the merger compared against "auto" and
+        failed every 3D series as the 4-letter order "AUTO"."""
+        files = self._series(tmp_path / "series", (3, 16, 16), 4)
+        out = tmp_path / "out"
+        out.mkdir()
+
+        merged = self._merge_with_worker(
+            files, {"dimension_order": "Auto"}, out
+        )
+        with tifffile.TiffFile(str(merged)) as tif:
+            assert tif.series[0].axes == "TZYX"
+            data = tif.series[0].asarray()
+        assert data.shape == (4, 3, 16, 16)
+        np.testing.assert_array_equal(data[:, 0, 0, 0], [1, 2, 3, 4])
+
+    @pytest.mark.parametrize(
+        "order,shape,axes",
+        [
+            ("CYX", (3, 16, 16), "TCYX"),
+            ("ZYX", (3, 16, 16), "TZYX"),
+            ("YX", (16, 16), "TYX"),
+            ("CZYX", (2, 3, 16, 16), "TCZYX"),
+            ("TZYX", (2, 3, 16, 16), "TZYX"),
+        ],
+    )
+    def test_merge_labels_its_axes_by_the_order(
+        self, tmp_path, order, shape, axes
+    ):
+        """Axes came from ndim alone, so a CYX series (TCYX) was saved as
+        TZYX and opened with its channels as Z slices."""
+        files = self._series(tmp_path / "series", shape, 3)
+        out = tmp_path / "out"
+        out.mkdir()
+
+        merged = self._merge_with_worker(
+            files, {"dimension_order": order}, out
+        )
+        with tifffile.TiffFile(str(merged)) as tif:
+            assert tif.series[0].axes == axes
