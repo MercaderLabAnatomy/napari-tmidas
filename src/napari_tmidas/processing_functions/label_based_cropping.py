@@ -21,6 +21,10 @@ import numpy as np
 from tqdm import tqdm
 
 from napari_tmidas._registry import BatchProcessingRegistry
+from napari_tmidas.processing_functions._chunked import (
+    _is_lazy,
+    lazy_capable,
+)
 
 # Lazy imports for optional heavy dependencies
 try:
@@ -274,6 +278,7 @@ def _infer_axes(image: np.ndarray, metadata: Optional[dict] = None) -> str:
         },
     },
 )
+@lazy_capable
 def label_based_cropping(
     image_array: np.ndarray,
     label_image_path: str = "",
@@ -325,13 +330,27 @@ def label_based_cropping(
     if not os.path.exists(label_image_path):
         raise FileNotFoundError(f"Label image not found: {label_image_path}")
 
-    # Load label image
-    label_array, label_axes = _load_image(label_image_path)
+    # A lazy image keeps its label lazy too when the label file is large
+    # enough to be opened page-wise (a full-size per-voxel label); a small
+    # 2D or per-frame label is simply read.
+    lazy = _is_lazy(image_array)
+    label_array = None
+    if lazy:
+        from napari_tmidas._file_selector import _lazy_load_tiff
+
+        label_array = _lazy_load_tiff(label_image_path)
+    if label_array is None:
+        label_array, _ = _load_image(label_image_path)
 
     # Get image axes
     image_axes = _infer_axes(image_array, metadata)
 
-    # Handle dimension mismatch
+    # Expand the label to the image by broadcasting, not np.repeat.  The
+    # repeat built a label as large as the whole image (2x a uint16 stack,
+    # for a uint32 label) only to compare it with zero; a broadcast mask
+    # gives the identical result with no copy, densely or lazily.
+    mask = label_array > 0
+    expanded_shape = tuple(label_array.shape)
     if image_array.ndim != label_array.ndim:
         # Label is 2D
         if label_array.ndim == 2 and image_array.ndim == 3:
@@ -340,8 +359,8 @@ def label_based_cropping(
                 raise ValueError(
                     "2D label provided for 3D image. Enable expand_z to repeat across Z."
                 )
-            z_size = image_array.shape[0]
-            label_array = _expand_label_to_3d(label_array, z_size)
+            mask = mask[np.newaxis, :, :]
+            expanded_shape = (image_array.shape[0],) + expanded_shape
 
         elif label_array.ndim == 2 and image_array.ndim == 4:
             # Image is (T, Z, Y, X)
@@ -349,12 +368,12 @@ def label_based_cropping(
                 raise ValueError(
                     "2D label provided for 4D image. Provide per-frame labels (T, Y, X) or enable expand_time."
                 )
-            t_size, z_size = image_array.shape[0], image_array.shape[1]
             if not expand_z:
                 raise ValueError(
                     "2D label expansion across time requires expand_z for 4D images. Enable expand_z."
                 )
-            label_array = _expand_label_to_time(label_array, t_size, z_size)
+            mask = mask[np.newaxis, np.newaxis, :, :]
+            expanded_shape = tuple(image_array.shape[:2]) + expanded_shape
 
         elif label_array.ndim == 3 and image_array.ndim == 4:
             # Expect per-frame labels (T, Y, X)
@@ -372,9 +391,8 @@ def label_based_cropping(
                 raise ValueError(
                     "Per-frame labels provided for 4D image. Enable expand_z to apply labels across Z."
                 )
-            label_array = np.repeat(
-                label_array[:, np.newaxis, :, :], z_size, axis=1
-            )
+            mask = mask[:, np.newaxis, :, :]
+            expanded_shape = (t_size, z_size) + expanded_shape[1:]
 
     # Check that spatial dimensions match
     if (
@@ -383,13 +401,20 @@ def label_based_cropping(
         raise ValueError(
             f"Label spatial dimensions {label_array.shape[-2:]} don't match image {image_array.shape[-2:]}"
         )
+    # The check _crop_image_with_label made on the repeated label.
+    if tuple(image_array.shape) != expanded_shape:
+        raise ValueError(
+            f"Image shape {tuple(image_array.shape)} does not match label shape {expanded_shape}"
+        )
 
-    # Crop and mask
-    cropped = _crop_image_with_label(
-        image_array, label_array, image_axes, label_axes
-    )
+    # Crop and mask: everything outside the label becomes 0, as in
+    # _crop_image_with_label.
+    zero = np.zeros((), dtype=image_array.dtype)
+    if lazy:
+        import dask.array as da
 
-    return cropped
+        return da.where(mask, image_array, zero)
+    return np.where(mask, image_array, zero)
 
 
 def batch_label_based_cropping(

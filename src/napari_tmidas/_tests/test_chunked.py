@@ -551,7 +551,15 @@ class TestWorkerStreamsRemaps:
     """
 
     @staticmethod
-    def _process(tmp_path, name, data, axes, params):
+    def _process(
+        tmp_path, name, data, axes, params, src_name="stack.tif", extras=()
+    ):
+        """
+        Run `name` on `data` through ProcessingWorker; return the saved
+        result and the peak traced memory.  `extras` are (filename, array,
+        axes) written next to the input first -- the paired files of
+        functions that read one.
+        """
         import gc
         import tracemalloc
 
@@ -562,15 +570,16 @@ class TestWorkerStreamsRemaps:
         import napari_tmidas.processing_functions.ome_output_utils as ou
         from napari_tmidas._file_selector import ProcessingWorker
 
-        src = tmp_path / "stack.tif"
-        tifffile.imwrite(
-            str(src),
-            data,
-            ome=True,
-            photometric="rgb" if axes.endswith("S") else "minisblack",
-            compression="zlib",
-            metadata={"axes": axes},
-        )
+        src = tmp_path / src_name
+        for path, array, array_axes in [(src_name, data, axes), *extras]:
+            tifffile.imwrite(
+                str(tmp_path / path),
+                array,
+                ome=True,
+                photometric="rgb" if array_axes.endswith("S") else "minisblack",
+                compression="zlib",
+                metadata={"axes": array_axes},
+            )
         out = tmp_path / "out"
         out.mkdir()
 
@@ -807,3 +816,301 @@ class TestWholeStackStatistic:
         assert (
             peak < data.nbytes * 0.3
         ), f"peak {peak/1e6:.1f} MB vs dense {data.nbytes/1e6:.1f} MB"
+
+
+class TestPairedFileFunctions:
+    """
+    Functions that combine the input with a second file -- Intersect Label
+    Images with its paired label, Label-Based Cropping with a label mask.
+    Both are per voxel once the two are aligned, so they stream; the second
+    file is opened lazily too where its format allows (memory-mapped .npy,
+    page-wise TIFF), and a 2D or per-frame label is broadcast, never
+    repeated up to the image's size.
+    """
+
+    @staticmethod
+    def _labels(shape, seed, dtype=np.uint32):
+        rng = np.random.default_rng(seed)
+        labels = np.zeros(shape, dtype=dtype)
+        for label in range(1, 9):
+            index = tuple(
+                slice(a, a + max(1, s // 3))
+                for a, s in zip(
+                    (int(rng.integers(0, max(1, s - s // 3))) for s in shape),
+                    shape,
+                )
+            )
+            labels[index] = label
+        return labels
+
+    # -- Intersect Label Images -------------------------------------------
+
+    @pytest.mark.parametrize("pair_ext", [".npy", ".tif"])
+    @pytest.mark.parametrize(
+        "pair_dtype", [np.uint32, np.uint16], ids=["u32", "u16"]
+    )
+    def test_intersect_matches_dense(self, tmp_path, pair_ext, pair_dtype):
+        import tifffile
+
+        primary = self._labels((6, 4, 32, 32), seed=0, dtype=np.uint16)
+        paired = self._labels((6, 4, 32, 32), seed=1, dtype=pair_dtype)
+        src = tmp_path / "cell_a.tif"
+        tifffile.imwrite(str(src), primary)
+        pair_path = tmp_path / f"cell_b{pair_ext}"
+        if pair_ext == ".npy":
+            np.save(str(pair_path), paired)
+        else:
+            tifffile.imwrite(str(pair_path), paired)
+        params = {"primary_suffix": "_a.tif", "secondary_suffix": "_b" + pair_ext}
+
+        func = _func("Intersect Label Images")
+        expected = func(primary, _source_filepath=str(src), **params)
+        lazy = da.from_array(primary, chunks=(1, 1, -1, -1))
+        result = func(lazy, _source_filepath=str(src), **params)
+
+        assert hasattr(result, "compute"), "lazy input must stay lazy"
+        assert result.dtype == expected.dtype == np.promote_types(
+            np.uint16, pair_dtype
+        )
+        np.testing.assert_array_equal(np.asarray(result.compute()), expected)
+        assert expected.any(), "fixture must actually overlap"
+
+    def test_intersect_squeezes_a_singleton_pair_lazily(self, tmp_path):
+        """_match_ndim used to np.asarray the pair, reading it whole."""
+        primary = self._labels((6, 32, 32), seed=2)
+        paired = self._labels((6, 32, 32), seed=3)[:, np.newaxis]
+        src = tmp_path / "x_a.tif"
+        np.save(str(tmp_path / "x_b.npy"), paired)
+        params = {"primary_suffix": "_a.tif", "secondary_suffix": "_b.npy"}
+
+        func = _func("Intersect Label Images")
+        lazy = da.from_array(primary, chunks=(1, -1, -1))
+        result = func(lazy, _source_filepath=str(src), **params)
+
+        assert hasattr(result, "compute")
+        np.testing.assert_array_equal(
+            result.compute(),
+            func(primary, _source_filepath=str(src), **params),
+        )
+
+    def test_intersect_with_differing_shapes_stays_correct(self, tmp_path):
+        """Alignment by object centres needs both arrays whole: dense."""
+        primary = self._labels((6, 32, 32), seed=4)
+        paired = self._labels((6, 28, 30), seed=5)
+        src = tmp_path / "y_a.tif"
+        np.save(str(tmp_path / "y_b.npy"), paired)
+        params = {"primary_suffix": "_a.tif", "secondary_suffix": "_b.npy"}
+
+        func = _func("Intersect Label Images")
+        lazy = da.from_array(primary, chunks=(1, -1, -1))
+        result = func(lazy, _source_filepath=str(src), **params)
+
+        assert not hasattr(result, "compute")
+        np.testing.assert_array_equal(
+            result, func(primary, _source_filepath=str(src), **params)
+        )
+
+    def test_intersect_uses_source_filepath_over_the_stack(self, tmp_path):
+        """The worker's _source_filepath must win over any `filepath` local
+        an unrelated caller frame happens to hold."""
+        primary = self._labels((4, 16, 16), seed=6)
+        np.save(str(tmp_path / "z_b.npy"), primary)
+        filepath = str(tmp_path / "unrelated_b.npy")  # noqa: F841
+        result = _func("Intersect Label Images")(
+            primary,
+            primary_suffix="_a.tif",
+            secondary_suffix="_b.npy",
+            _source_filepath=str(tmp_path / "z_a.tif"),
+        )
+        np.testing.assert_array_equal(result, primary)
+
+    def test_intersect_skips_the_secondary_lazily(self, tmp_path):
+        lazy = da.zeros((4, 8, 8), dtype=np.uint32, chunks=1)
+        with pytest.warns(UserWarning, match="Skipping secondary"):
+            result = _func("Intersect Label Images")(
+                lazy, _source_filepath=str(tmp_path / "c_b.tif")
+            )
+        assert result is None
+
+    # -- Label-Based Cropping ---------------------------------------------
+
+    CROP_CASES = [
+        # (image shape, label shape, params)
+        ((6, 4, 32, 32), (6, 4, 32, 32), {}),
+        ((5, 32, 32), (32, 32), {"expand_z": True}),
+        ((4, 3, 32, 32), (32, 32), {"expand_z": True, "expand_time": True}),
+        ((4, 3, 32, 32), (4, 32, 32), {"expand_z": True}),
+    ]
+
+    @pytest.mark.parametrize(
+        "image_shape,label_shape,params",
+        CROP_CASES,
+        ids=["same", "2d-on-zyx", "2d-on-tzyx", "per-frame"],
+    )
+    @pytest.mark.parametrize("dtype", [np.uint16, np.float32])
+    def test_cropping_matches_dense(
+        self, tmp_path, image_shape, label_shape, params, dtype
+    ):
+        import tifffile
+
+        from napari_tmidas.processing_functions.label_based_cropping import (
+            _crop_image_with_label,
+        )
+
+        rng = np.random.default_rng(7)
+        image = (rng.random(image_shape) * 4000).astype(dtype)
+        label = self._labels(label_shape, seed=8)
+        label_path = tmp_path / "mask.tif"
+        tifffile.imwrite(str(label_path), label)
+        params = {"label_image_path": str(label_path), **params}
+
+        func = _func("Label-Based Cropping")
+        expected = func(image, **params)
+        lazy = da.from_array(
+            image, chunks=(1,) * (len(image_shape) - 2) + (-1, -1)
+        )
+        result = func(lazy, _source_filepath="x.zarr", **params)
+
+        assert hasattr(result, "compute"), "lazy input must stay lazy"
+        assert result.numblocks[0] > 1
+        assert result.dtype == expected.dtype == image.dtype
+        np.testing.assert_array_equal(np.asarray(result.compute()), expected)
+
+        # Against the original repeat-then-mask behaviour, written out.
+        repeated = np.broadcast_to(
+            label.reshape(
+                {
+                    "same": label.shape,
+                    "2d-on-zyx": (1,) + label.shape,
+                    "2d-on-tzyx": (1, 1) + label.shape,
+                    "per-frame": (label.shape[0], 1) + label.shape[1:],
+                }[
+                    "same"
+                    if label.shape == image.shape
+                    else "2d-on-zyx"
+                    if image.ndim == 3
+                    else "2d-on-tzyx"
+                    if label.ndim == 2
+                    else "per-frame"
+                ]
+            ),
+            image.shape,
+        )
+        np.testing.assert_array_equal(
+            expected, _crop_image_with_label(image, np.array(repeated))
+        )
+
+    @pytest.mark.parametrize(
+        "image_shape,label_shape,params,match",
+        [
+            ((5, 32, 32), (32, 32), {}, "Enable expand_z"),
+            ((4, 3, 32, 32), (32, 32), {"expand_z": True}, "expand_time"),
+            ((4, 3, 32, 32), (5, 32, 32), {"expand_z": True}, "must match"),
+            ((5, 32, 32), (5, 32, 30), {}, "spatial dimensions"),
+            ((5, 32, 32), (4, 32, 32), {}, "does not match label shape"),
+        ],
+    )
+    def test_cropping_errors_are_unchanged(
+        self, tmp_path, image_shape, label_shape, params, match
+    ):
+        import tifffile
+
+        label_path = tmp_path / "mask.tif"
+        tifffile.imwrite(str(label_path), np.ones(label_shape, np.uint16))
+        for image in (
+            np.ones(image_shape, np.uint16),
+            da.ones(image_shape, dtype=np.uint16, chunks=1),
+        ):
+            with pytest.raises(ValueError, match=match):
+                _func("Label-Based Cropping")(
+                    image, label_image_path=str(label_path), **params
+                )
+
+    def test_dense_cropping_no_longer_repeats_the_label(self, tmp_path):
+        """
+        A 2D label on a TZYX stack was np.repeat-ed to the stack's full size
+        (uint32: 2x a uint16 stack) before masking.  Broadcasting leaves the
+        output as the only full-size allocation.
+        """
+        import gc
+        import tracemalloc
+
+        import tifffile
+
+        image = np.ones((16, 8, 128, 128), dtype=np.uint16)
+        label = np.zeros((128, 128), dtype=np.uint32)
+        label[20:100, 20:100] = 1
+        label_path = tmp_path / "mask.tif"
+        tifffile.imwrite(str(label_path), label)
+
+        gc.collect()
+        tracemalloc.start()
+        try:
+            _func("Label-Based Cropping")(
+                image,
+                label_image_path=str(label_path),
+                expand_z=True,
+                expand_time=True,
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < image.nbytes * 1.3, f"peak {peak / image.nbytes:.2f}x"
+
+    @pytest.mark.parametrize(
+        "name", ["Intersect Label Images", "Label-Based Cropping"]
+    )
+    def test_worker_sees_it_as_lazy_capable(self, name):
+        assert "_source_filepath" in inspect.signature(_func(name)).parameters
+
+    # -- End to end through the worker ------------------------------------
+
+    def test_worker_streams_intersect_with_a_large_pair(self, tmp_path):
+        """Both stacks above the lazy-TIFF threshold: neither is read whole."""
+        primary = self._labels((24, 8, 256, 256), seed=9)
+        paired = self._labels((24, 8, 256, 256), seed=10)
+        name = "Intersect Label Images"
+        params = {"primary_suffix": "_a.tif", "secondary_suffix": "_b.tif"}
+
+        got, peak = TestWorkerStreamsRemaps._process(
+            tmp_path,
+            name,
+            primary,
+            "TZYX",
+            params,
+            src_name="cell_a.tif",
+            extras=[("cell_b.tif", paired, "TZYX")],
+        )
+
+        expected = np.where((primary != 0) & (paired != 0), primary, 0)
+        np.testing.assert_array_equal(got, expected)
+        assert (
+            peak < primary.nbytes * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs one dense stack {primary.nbytes/1e6:.1f} MB"
+
+    @pytest.mark.parametrize(
+        "label_shape,params",
+        [((24, 8, 256, 256), {}), ((256, 256), {"expand_z": True, "expand_time": True})],
+        ids=["full-size-label", "2d-label"],
+    )
+    def test_worker_streams_cropping(self, tmp_path, label_shape, params):
+        rng = np.random.default_rng(11)
+        image = rng.integers(0, 4000, (24, 8, 256, 256), dtype=np.uint16)
+        label = self._labels(label_shape, seed=12)
+        label_axes = "TZYX" if len(label_shape) == 4 else "YX"
+        params = {"label_image_path": str(tmp_path / "mask.tif"), **params}
+
+        got, peak = TestWorkerStreamsRemaps._process(
+            tmp_path,
+            "Label-Based Cropping",
+            image,
+            "TZYX",
+            params,
+            extras=[("mask.tif", label, label_axes)],
+        )
+
+        mask = np.broadcast_to(label > 0, image.shape)
+        np.testing.assert_array_equal(got, np.where(mask, image, 0))
+        assert (
+            peak < image.nbytes * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs dense {image.nbytes/1e6:.1f} MB"
