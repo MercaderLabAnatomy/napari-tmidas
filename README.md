@@ -207,13 +207,20 @@ Most of this is done. Batch processing no longer materializes whole stacks: the 
 
 What is left:
 
-- **CAREamics denoising and VisCy virtual staining still run dense.** Both allocate the full output array and take the input as a NumPy array. Neither has been audited for real — that needs their dedicated virtualenvs installed.
-- **~14 registered functions still scale linearly with input size.** That is now a known list rather than an unknown one. Each needs either a `@chunked` conversion or a check that it cannot take one: functions using global statistics (`Convert to 8-bit` rescales by the whole-stack min/max) and functions with cross-block topology (`Mirror Labels`) both resist it.
+- **Four AI methods still run dense.** CAREamics denoising, Spotiflow spot detection and Ultrack tracking have no streaming path. VisCy virtual staining accepts `_source_filepath` but does not use it, and stacks every timepoint in memory before returning. CAREamics and VisCy have not been audited for real, which needs their dedicated virtualenvs installed.
+- **14 other registered functions still scale linearly with input size.** None of them is `@chunked`, sets `skip_load` or accepts `_source_filepath`:
+  - Image operations: `Convert to 8-bit (uint8)`, `Percentile Threshold (Keep Brightest)`, `Compress with Zstandard`
+  - Label operations: `Mirror Labels`, `Intersect Label Images`, `Resize Labels (Nearest, SciPy)`, `RGB to Labels`, `Subdivide Labels into 3 Layers`, `Keep Slice Range by Area`, `Label-Based Cropping`
+  - Measurements and QC: `Extract Regionprops to CSV`, `Regionprops Summary Statistics`, `Grid View: Intensity + Labels Overlay`
+  - Time series: `Merge Timepoints`
+
+  Each needs either a `@chunked` conversion or a check that it cannot take one: functions using global statistics (`Convert to 8-bit` rescales by the whole-stack min/max) and functions with cross-block topology (`Mirror Labels`) both resist it.
 - **The structural decision.** Dense functions opt into laziness one at a time, by accepting `_source_filepath`. Whether to keep converting them individually or change the worker's contract for all of them at once is still open.
 
 ### Other Known Issues
 
 - `Resize Zarr by YX Scale (OME-Zarr native)` writes **zarr v3** stores: attributes live in `zarr.json` (multiscales nested under an `ome` key), not in a v2 `.zattrs`. Anything downstream that reads `.zattrs` directly will find no file there — use [`ome_output_utils._read_root_attrs()`](src/napari_tmidas/processing_functions/ome_output_utils.py), which handles both layouts.
+- **Python 3.14 is not supported yet.** [pylibCZIrw](https://github.com/ZEISS/pylibczirw), used for CZI conversion, has no Python 3.14 wheel (6.1.0 ships wheels up to 3.13), and building it from source fails on 3.14. Once a wheel is published, add 3.14 to the CI matrix and the `pyproject.toml` classifiers.
 
 ## 🤝 Contributing
 
