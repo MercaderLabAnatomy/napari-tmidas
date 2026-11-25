@@ -3989,6 +3989,9 @@ class FileResultsWidget(QWidget):
         self.input_folder = input_folder
         self.input_suffix = input_suffix
         self.worker = None  # Will hold the processing worker
+        # Every started worker, held until its QThread.finished arrives;
+        # see start_batch_processing.
+        self._live_workers = set()
 
         # Create main layout
         layout = QVBoxLayout()
@@ -4692,6 +4695,12 @@ class FileResultsWidget(QWidget):
         # QThread.finished also fires when run() died on an exception and
         # never reached processing_finished.
         self.worker.finished.connect(self._on_worker_thread_finished)
+        # processing_finished is emitted from inside run(), so the thread
+        # is still running when that slot drops self.worker. Were that the
+        # last reference, PyQt would destroy a running QThread and Qt would
+        # abort the whole process ("QThread: Destroyed while thread is
+        # still running"). Hold it here until QThread.finished instead.
+        self._live_workers.add(self.worker)
 
         # Record the run before it starts, so a crash still leaves the
         # settings needed to repeat it.
@@ -4868,6 +4877,10 @@ class FileResultsWidget(QWidget):
     def _on_worker_thread_finished(self):
         # Only reached with the run still open when the worker raised.
         self._record_run_finished("failed")
+        worker = self.sender()
+        if worker in self._live_workers:
+            worker.wait()  # run() has returned; this only joins the thread
+            self._live_workers.discard(worker)
 
     def update_progress(self, value):
         """Update the progress bar"""
@@ -4911,7 +4924,8 @@ class FileResultsWidget(QWidget):
         self.batch_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
-        # Clean up worker
+        # Release the widget's handle; _live_workers keeps the thread
+        # object alive until it has actually stopped.
         self.worker = None
 
         self._record_run_finished("finished")
