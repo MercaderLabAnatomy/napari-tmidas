@@ -25,17 +25,17 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 - Auto-install in isolated environments • No dependency conflicts • GPU acceleration
 
 🔄 **Universal File Conversion**
-- Convert LIF, ND2, CZI, NDPI, Acquifer → TIFF or OME-Zarr
+- Convert LIF, ND2, CZI (including ZEN camera-streaming files), NDPI, Acquifer → TIFF or OME-Zarr
 - Preserve spatial metadata automatically
 
 ⚡ **Batch Processing**
 - Process entire folders with one click • 40+ processing functions • Progress tracking & quality control
 - One **Dimension Order** setting, shared by every function — set it once per batch, not per function
 
-� **Interactive Workflow**
+🔍 **Interactive Workflow**
 - Side-by-side table view of original and processed images • Click to instantly compare results • Quickly iterate parameter values • Real-time visual feedback
 
-�📊 **Complete Analysis Pipeline**
+📊 **Complete Analysis Pipeline**
 - Segmentation → Tracking → Quantification → Colocalization
 
 ## 🚀 Quick Start
@@ -147,6 +147,12 @@ uv pip show napari-tmidas
 
 `--upgrade` also brings napari-tmidas's dependencies (which can include napari) up to their newest compatible versions. To upgrade only napari-tmidas and leave everything else as it is, use `uv pip install --upgrade-package napari-tmidas napari-tmidas` instead. The AI methods' own environments in `~/.napari-tmidas/envs` are separate and are left as they are. If one misbehaves after an update, delete its folder (e.g. `~/.napari-tmidas/envs/cellpose`) and it is rebuilt the next time you use that method. To update uv itself, run `uv self update`.
 
+**Upgrading from v0.5.x or earlier:** v0.6 moved to PyQt6, but upgrading does not remove PyQt5, and napari's Qt layer (qtpy) uses PyQt5 whenever it is installed. Remove it once so napari runs on PyQt6:
+
+```sh
+uv pip uninstall pyqt5 pyqt5-qt5 pyqt5-sip
+```
+
 <details>
 <summary><b>Alternative: conda / mamba</b></summary>
 
@@ -197,7 +203,7 @@ Interactive object selection and cropping with SAM2.
 
 ### Memory-Efficient Streaming
 
-Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 15 functions map their existing body over blocks via the `@chunked` decorator, and 6 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. The mechanism is documented in [`_chunked.py`](src/napari_tmidas/processing_functions/_chunked.py), and the behaviour is pinned by `TestZarrOutputStreaming`, `TestSplitChannelsStreaming`, `TestLazyTiffLoading`, `TestCLAHEDaskMemory` and `TestRollingBallPerPlane`.
+Most of this is done. Batch processing no longer materializes whole stacks: the worker keeps large inputs lazy and streams results back to disk block by block (256 MB budget), 13 functions map their existing body over blocks via the `@chunked` decorator, and 7 more own their I/O outright via `skip_load`. Measured end to end on a real `(31, 2, 57, 2720, 2720)` uint16 acquisition — 52 GB dense — Gamma Correction peaks at **3.15 GB RSS** in 8.8 min, byte-identical to the dense path. Convpaint prediction, Cellpose segmentation and Trackastra tracking all write per-timepoint now. The mechanism is documented in [`_chunked.py`](src/napari_tmidas/processing_functions/_chunked.py), and the behaviour is pinned by `TestZarrOutputStreaming`, `TestSplitChannelsStreaming`, `TestLazyTiffLoading`, `TestCLAHEDaskMemory` and `TestRollingBallPerPlane`.
 
 What is left:
 
@@ -243,10 +249,3 @@ Built with [napari](https://github.com/napari/napari) and powered by:
 **File Format Support:**
 - [OME-Zarr](https://github.com/ome/ome-zarr-py) • [tifffile](https://github.com/cgohlke/tifffile) • [nd2](https://github.com/tlambert03/nd2) • [pylibCZIrw](https://github.com/ZEISS/pylibczirw) • [readlif](https://github.com/nimne/readlif)
 - ZEN camera-streaming CZIs, which libCZI cannot decode yet ([ZEISS/libczi#187](https://github.com/ZEISS/libczi/issues/187)), are read by a fallback reader written against the CZI (ZISRAW) file format specification from ZEISS and [libCZI](https://github.com/ZEISS/libczi).
-
----
-
-[PyPI]: https://pypi.org/project/napari-tmidas
-[pip]: https://pypi.org/project/pip/
-[tox]: https://tox.readthedocs.io/en/latest/
-

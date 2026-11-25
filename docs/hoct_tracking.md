@@ -40,8 +40,10 @@ warning) if the requested device is unavailable.
 Temporal window size for the frame dataset used during prediction.
 
 ### `max_distance` (float, default: 300.0)
-Maximum spatial distance (in pixels) allowed for candidate tracking edges
-between objects in neighboring frames.
+Maximum spatial distance allowed for candidate tracking edges between
+objects in neighboring frames. It is in µm when a voxel size is known, either
+from `scale` or from the raw image's metadata, and in pixels otherwise (see
+`scale` below).
 
 ### `neighbors` (int, default: 5)
 Maximum number of candidate neighbors considered per node when building the
@@ -59,9 +61,17 @@ Tiled inference mode for large volumes:
 - **`"off"`**: Never tile.
 
 ### `scale` (string, default: "")
-Optional physical voxel size as space-separated values, `"t y x"` for 2D+t
-data or `"t z y x"` for 3D+t data (e.g. `"1 0.5 0.2 0.2"`). Leave empty to
-track in pixel units.
+Physical voxel size as space-separated values, `"t y x"` for 2D+t data or
+`"t z y x"` for 3D+t data, in seconds and µm (e.g. `"12 3.84 1.3 1.3"`).
+
+- **Empty (default):** the voxel size is read from the raw image's metadata
+  (OME `PhysicalSize`/`TimeIncrement`, or the OME-Zarr scale), so
+  `max_distance` is in µm.
+- **`pixels`:** track in pixel and frame units, as before v0.6.
+
+> **Changed in v0.6:** an empty `scale` used to mean pixel units. If you
+> tuned `max_distance` in pixels, either type `pixels` here or convert the
+> value to µm.
 
 ### `gurobi_license` (string, default: "")
 Path to a Gurobi license file (`.lic`) used by HOCT's ILP solver. Leave
