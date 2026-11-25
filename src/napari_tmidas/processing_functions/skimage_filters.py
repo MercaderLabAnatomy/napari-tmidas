@@ -31,8 +31,10 @@ except ImportError:
 
 from napari_tmidas._registry import BatchProcessingRegistry
 from napari_tmidas.processing_functions._chunked import (
+    _is_lazy,
     chunked,
     independent_leading,
+    lazy_capable,
     plane_wise_only,
 )
 
@@ -1098,6 +1100,7 @@ def binary_to_labels(
         },
     },
 )
+@lazy_capable
 def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
     """
     Convert image data to 8-bit (uint8) format with proper scaling.
@@ -1121,16 +1124,42 @@ def convert_to_uint8(image: np.ndarray, channel: str = "all") -> np.ndarray:
     # voxel — ~6x the input in peak memory. Do the same arithmetic one YX plane
     # at a time into a pre-allocated uint8 result instead.  uint8 input is not
     # short-circuited: rescale_intensity stretches it to the full range too.
-    imin = float(image.min())
-    imax = float(image.max())
+    #
+    # The whole-stack min and max are the only coupling between planes, so a
+    # Dask input streams: one tree-reduction pass for both, then the same
+    # per-plane arithmetic mapped over blocks.
+    lazy = _is_lazy(image)
+    if lazy:
+        import dask.array as da
 
-    result = np.empty(image.shape, dtype=np.uint8)
+        imin, imax = (float(v) for v in da.compute(image.min(), image.max()))
+    else:
+        imin = float(image.min())
+        imax = float(image.max())
+
     if imax == imin:
         # Constant image: rescale_intensity clips the single value into the
         # output range, so 0 stays 0 and anything else saturates to 255.
-        result.fill(0 if imin <= 0 else 255)
+        fill = 0 if imin <= 0 else 255
+        if lazy:
+            return da.full(
+                image.shape, fill, dtype=np.uint8, chunks=image.chunks
+            )
+        result = np.empty(image.shape, dtype=np.uint8)
+        result.fill(fill)
         return result
 
+    if lazy:
+        return da.map_blocks(
+            _rescale_planes_to_uint8, image, imin, imax, dtype=np.uint8
+        )
+    return _rescale_planes_to_uint8(image, imin, imax)
+
+
+def _rescale_planes_to_uint8(image, imin: float, imax: float) -> np.ndarray:
+    """`convert_to_uint8`'s arithmetic for an array or one Dask block of it,
+    given the min and max of the *whole* stack."""
+    result = np.empty(image.shape, dtype=np.uint8)
     span = imax - imin
     leading = image.shape[:-2] if image.ndim > 2 else ()
     plane_shape = image.shape[-2:] if image.ndim >= 2 else image.shape
@@ -1764,6 +1793,102 @@ if SKIMAGE_AVAILABLE:
 # Bright Region Extraction Functions
 # ============================================================================
 
+# Dtypes whose full value range fits a histogram small enough to reduce over
+# blocks (at most 65,536 bins, 512 KB of int64 counts).
+_HISTOGRAM_PERCENTILE_DTYPES = frozenset(
+    np.dtype(t) for t in (np.uint8, np.uint16, np.int8, np.int16)
+)
+
+
+def _block_histogram(block, offset: int) -> np.ndarray:
+    """Counts of each value in `block`, indexed by ``value - offset``."""
+    values = block.ravel()
+    if offset:
+        values = values.astype(np.int64) - offset
+    return np.bincount(values)
+
+
+def _add_histograms(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Sum two histograms of possibly different lengths."""
+    if len(a) < len(b):
+        a, b = b, a
+    total = a.copy()
+    total[: len(b)] += b
+    return total
+
+
+def _exact_percentile_lazy(image, percentile):
+    """
+    ``np.percentile(image, percentile)`` for a Dask integer array, exactly.
+
+    ``da.percentile`` merges per-chunk estimates, so it is approximate -- and
+    a threshold that is off by one grey level changes which pixels survive.
+    For 8- and 16-bit integers the exact answer is still cheap: a histogram
+    of the whole stack, reduced over blocks, gives every order statistic.
+    The interpolation then repeats numpy's default ``method="linear"`` step
+    for step (numpy/lib/_function_base_impl.py: ``_QuantileMethods``,
+    ``_get_indexes``, ``_lerp``), including doing ``b - a`` in the input
+    dtype, so the threshold is the same float64 numpy would return.
+    """
+    import dask
+
+    if image.size == 0:
+        # Whatever numpy does with an empty array (it raises IndexError).
+        return np.percentile(np.asarray(image), percentile)
+
+    dtype = np.dtype(image.dtype)
+    offset = int(np.iinfo(dtype).min)
+
+    # One histogram per block, summed pairwise.  Two choices keep the
+    # reduction's memory a small constant rather than a multiple of 512 KB:
+    # each histogram is only as long as its block's largest value (12-bit
+    # camera data needs 4,096 bins, not 65,536), and the tree has fan-in 2
+    # -- Dask's own reductions concatenate ~16 inputs per combine step,
+    # measured at 22-31 full histograms alive at once.
+    level = [
+        dask.delayed(_block_histogram)(block, offset)
+        for block in image.to_delayed().ravel()
+    ]
+    while len(level) > 1:
+        paired = [
+            dask.delayed(_add_histograms)(level[i], level[i + 1])
+            for i in range(0, len(level) - 1, 2)
+        ]
+        if len(level) % 2:
+            paired.append(level[-1])
+        level = paired
+    (counts,) = dask.compute(level[0])
+    cumulative = np.cumsum(counts)
+    n = int(cumulative[-1])
+
+    def order_statistic(k):
+        # The k-th smallest value (0-based): the first bin whose running
+        # count passes k.
+        index = int(np.searchsorted(cumulative, k, side="right"))
+        return np.array(index + offset, dtype=dtype)
+
+    quantile = np.true_divide(percentile, 100)
+    if not 0 <= quantile <= 1:
+        raise ValueError("Percentiles must be in the range [0, 100]")
+    virtual_index = (n - 1) * quantile
+    if virtual_index >= n - 1:
+        return np.float64(order_statistic(n - 1))
+    previous = np.floor(virtual_index)
+    a = order_statistic(int(previous))
+    b = order_statistic(int(previous) + 1)
+    gamma = float(virtual_index - previous)
+
+    # numpy's _lerp, on 0-d arrays of the input dtype like numpy's own.
+    diff_b_a = b - a
+    if gamma >= 0.5:
+        threshold = np.subtract(
+            b, diff_b_a * (1 - gamma), dtype=np.float64, casting="unsafe"
+        )
+    else:
+        threshold = np.add(a, diff_b_a * gamma)
+    return np.float64(threshold)
+
+
 if SKIMAGE_AVAILABLE:
 
     @BatchProcessingRegistry.register(
@@ -1792,6 +1917,7 @@ if SKIMAGE_AVAILABLE:
             },
         },
     )
+    @lazy_capable
     def percentile_threshold(
         image: np.ndarray,
         percentile: float = 90.0,
@@ -1820,6 +1946,19 @@ if SKIMAGE_AVAILABLE:
         numpy.ndarray
             Image with only bright regions preserved
         """
+        if _is_lazy(image):
+            if np.dtype(image.dtype) in _HISTOGRAM_PERCENTILE_DTYPES:
+                import dask.array as da
+
+                threshold = _exact_percentile_lazy(image, percentile)
+                above = image > threshold
+                if output_type == "binary":
+                    return da.where(above, np.uint8(255), np.uint8(0))
+                return da.where(above, image, np.zeros((), image.dtype))
+            # No exact bounded-memory percentile for floats or wide integers
+            # (da.percentile is approximate), so those stay dense.
+            image = np.asarray(image)
+
         # Calculate the percentile threshold
         threshold = np.percentile(image, percentile)
 

@@ -651,3 +651,159 @@ class TestWorkerStreamsRemaps:
         assert (
             peak < dense * 0.3
         ), f"peak {peak/1e6:.1f} MB vs {dense/1e6:.1f} MB"
+
+
+class TestWholeStackStatistic:
+    """
+    Functions whose only coupling across planes is one whole-stack number
+    -- the min and max for Convert to 8-bit, a percentile for Percentile
+    Threshold.  They compute it in a reduction pass, then map per block.
+    The number has to be *exactly* the dense one: a threshold one grey level
+    off changes which pixels survive, with nothing to flag it.
+    """
+
+    @staticmethod
+    def _lazy_vs_dense(name, dense, chunks, **params):
+        expected = _func(name)(dense, **params)
+        lazy = da.from_array(dense, chunks=chunks)
+        result = _func(name)(lazy, _source_filepath="x.zarr", **params)
+        assert hasattr(result, "compute"), "lazy input must stay lazy"
+        assert result.dtype == expected.dtype
+        computed = np.asarray(result.compute())
+        assert computed.dtype == expected.dtype
+        np.testing.assert_array_equal(computed, expected)
+        return result
+
+    @pytest.mark.parametrize(
+        "dtype,low,high",
+        [
+            (np.uint16, 100, 4000),
+            (np.int16, -3000, 3000),
+            (np.uint8, 3, 200),
+            (np.float32, -1.5, 7.25),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "chunks", [(1, 1, -1, -1), (2, 3, 16, 64)], ids=["planes", "tiles"]
+    )
+    def test_uint8_conversion_matches_dense(self, dtype, low, high, chunks):
+        """'tiles' also splits YX: the arithmetic is per pixel, so blocks
+        need not hold whole planes once min and max are global."""
+        rng = np.random.default_rng(0)
+        image = rng.uniform(low, high, (4, 3, 32, 64)).astype(dtype)
+        result = self._lazy_vs_dense(
+            "Convert to 8-bit (uint8)", image, chunks
+        )
+        assert result.numblocks[0] > 1
+
+    @pytest.mark.parametrize("value,expected", [(0, 0), (-5, 0), (7, 255)])
+    def test_uint8_conversion_of_a_constant_image(self, value, expected):
+        image = np.full((4, 16, 16), value, dtype=np.int16)
+        result = self._lazy_vs_dense(
+            "Convert to 8-bit (uint8)", image, (1, -1, -1)
+        )
+        assert int(result[0, 0, 0].compute()) == expected
+
+    @pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.int8, np.int16])
+    @pytest.mark.parametrize("percentile", [0.0, 12.5, 50.0, 90.0, 99.9, 100.0])
+    @pytest.mark.parametrize("output_type", ["original", "binary"])
+    def test_percentile_matches_dense(self, dtype, percentile, output_type):
+        info = np.iinfo(dtype)
+        rng = np.random.default_rng(1)
+        image = rng.integers(
+            info.min, int(info.max) + 1, (5, 3, 24, 24), dtype=dtype
+        )
+        self._lazy_vs_dense(
+            "Percentile Threshold (Keep Brightest)",
+            image,
+            (1, 1, -1, -1),
+            percentile=percentile,
+            output_type=output_type,
+        )
+
+    def test_percentile_on_ties_and_rank_boundaries(self):
+        """
+        Few distinct values make most percentiles fall exactly on a tie or
+        between two equal order statistics -- where an off-by-one rank, or
+        interpolating from the wrong side, moves the cut.  n = 11 makes
+        (n - 1) * 0.9 a float that is not exactly 9.
+        """
+        from napari_tmidas.processing_functions.skimage_filters import (
+            _exact_percentile_lazy,
+        )
+
+        rng = np.random.default_rng(2)
+        for n in (1, 2, 11, 101, 4097):
+            data = rng.integers(0, 4, n).astype(np.uint16)
+            lazy = da.from_array(data, chunks=max(1, n // 4))
+            for q in (0, 10, 25, 33.3, 50, 66.6, 90, 100):
+                assert _exact_percentile_lazy(lazy, q) == np.percentile(
+                    data, q
+                ), (n, q)
+
+    def test_percentile_wraps_like_numpy_at_int8_extremes(self):
+        """numpy takes b - a in the input dtype, so -128..127 wraps; the
+        exact path must reproduce that, not 'fix' it."""
+        from napari_tmidas.processing_functions.skimage_filters import (
+            _exact_percentile_lazy,
+        )
+
+        data = np.array([-128, 127] * 8, dtype=np.int8)
+        lazy = da.from_array(data, chunks=4)
+        with np.errstate(over="ignore"):
+            for q in (10, 40, 50, 60, 90):
+                assert _exact_percentile_lazy(lazy, q) == np.percentile(
+                    data, q
+                )
+
+    def test_percentile_rejects_out_of_range(self):
+        lazy = da.zeros((4, 8, 8), dtype=np.uint16, chunks=1)
+        with pytest.raises(ValueError, match="range"):
+            _func("Percentile Threshold (Keep Brightest)")(
+                lazy, _source_filepath="x.zarr", percentile=101.0
+            )
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.uint32])
+    def test_percentile_without_an_exact_lazy_path_stays_correct(self, dtype):
+        """Floats and wide integers have no exact bounded-memory percentile,
+        so they take the dense path -- correct, just not streamed."""
+        rng = np.random.default_rng(3)
+        image = (rng.random((4, 16, 16)) * 1000).astype(dtype)
+        name = "Percentile Threshold (Keep Brightest)"
+        lazy = da.from_array(image, chunks=(1, -1, -1))
+        result = _func(name)(lazy, _source_filepath="x.zarr", percentile=75.0)
+        assert not hasattr(result, "compute")
+        np.testing.assert_array_equal(
+            result, _func(name)(image, percentile=75.0)
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Convert to 8-bit (uint8)", "Percentile Threshold (Keep Brightest)"],
+    )
+    def test_worker_sees_it_as_lazy_capable(self, name):
+        assert "_source_filepath" in inspect.signature(_func(name)).parameters
+
+    @pytest.mark.parametrize(
+        "name,params",
+        [
+            ("Convert to 8-bit (uint8)", {}),
+            ("Percentile Threshold (Keep Brightest)", {"percentile": 90.0}),
+            (
+                "Percentile Threshold (Keep Brightest)",
+                {"percentile": 90.0, "output_type": "binary"},
+            ),
+        ],
+    )
+    def test_worker_streams_it(self, tmp_path, name, params):
+        rng = np.random.default_rng(4)
+        data = rng.integers(0, 4000, (24, 8, 256, 256), dtype=np.uint16)
+
+        got, peak = TestWorkerStreamsRemaps._process(
+            tmp_path, name, data, "TZYX", params
+        )
+
+        np.testing.assert_array_equal(got, _func(name)(data, **params))
+        assert (
+            peak < data.nbytes * 0.3
+        ), f"peak {peak/1e6:.1f} MB vs dense {data.nbytes/1e6:.1f} MB"
