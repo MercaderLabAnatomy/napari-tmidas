@@ -15,7 +15,6 @@ decides whether a folder is processed at all.
 import os
 import runpy
 import sys
-import tempfile
 
 import numpy as np
 import pytest
@@ -652,59 +651,26 @@ class TestMergeFolderSkipping:
 
 class TestMemoryEfficientLoading:
     """
-    Above 100 files the merger switches to one-at-a-time loading into a
-    memory-mapped buffer. The result has to be indistinguishable from the
-    standard path, and the same shape validation has to apply.
+    Every merge now streams to disk one timepoint at a time, so
+    ``memory_efficient`` no longer selects a different path (the old one
+    filled a memmap and then copied it back into RAM before saving).  What
+    the flag used to promise still has to hold, with it on or off: the same
+    output, the same TZYX/CZYX handling, the same shape validation, and no
+    partial file left behind when validation fails partway.
     """
 
-    @pytest.fixture(autouse=True)
-    def _temp_dir_inside_tmp_path(self, monkeypatch, tmp_path):
-        """
-        The memmap buffer is created with ``delete=False``, so redirect
-        tempfile at tmp_path rather than leaking into the system temp dir.
-        """
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "scratch"))
-        (tmp_path / "scratch").mkdir()
-
-    def test_large_2d_series_is_stacked_via_memmap(self, tmp_path, capsys):
+    @pytest.mark.parametrize("memory_efficient", [False, True])
+    def test_large_2d_series_is_stacked(self, tmp_path, memory_efficient):
         folder = tmp_path / "series"
         _series(folder, (2, 3), 101, dtype=np.uint8)
         out = tmp_path / "out"
         out.mkdir()
 
-        _merge(folder, output_folder=out, memory_efficient=True)
+        _merge(folder, output_folder=out, memory_efficient=memory_efficient)
 
-        # Confirms the memmap branch actually ran rather than the regular-
-        # array fallback exercised by the next test - both produce the
-        # same shape/values, so the print is what tells them apart.
-        assert "Created memory-mapped array" in capsys.readouterr().out
         data = tifffile.imread(str(out / "series_merged_timepoints.tif"))
         assert data.shape == (101, 2, 3)
         assert data.dtype == np.uint8
-        np.testing.assert_array_equal(
-            data[:, 0, 0], np.arange(1, 102, dtype=np.uint8)
-        )
-
-    def test_memmap_failure_falls_back_to_a_plain_array(
-        self, tmp_path, capsys, monkeypatch
-    ):
-        folder = tmp_path / "series"
-        _series(folder, (2, 3), 101, dtype=np.uint8)
-        out = tmp_path / "out"
-        out.mkdir()
-
-        class _UnavailableMemmap(np.memmap):
-            """Still a type, so the later isinstance() check keeps working."""
-
-            def __new__(cls, *args, **kwargs):
-                raise OSError("no mmap here")
-
-        monkeypatch.setattr(np, "memmap", _UnavailableMemmap)
-        _merge(folder, output_folder=out, memory_efficient=True)
-
-        assert "Created regular array" in capsys.readouterr().out
-        data = tifffile.imread(str(out / "series_merged_timepoints.tif"))
-        assert data.shape == (101, 2, 3)
         np.testing.assert_array_equal(
             data[:, 0, 0], np.arange(1, 102, dtype=np.uint8)
         )
@@ -721,11 +687,9 @@ class TestMemoryEfficientLoading:
         assert data.shape == (202, 2, 3, 5)
         np.testing.assert_array_equal(data[:4, 0, 0, 0], [1, 1, 2, 2])
 
-    def test_explicit_tzyx_hint_forces_time_concatenation(self, tmp_path):
-        """
-        The hint, not the ndim, decides in the memory-efficient path; a 4D
-        stack declared CZYX gets a new time axis instead.
-        """
+    def test_explicit_czyx_hint_adds_a_time_axis(self, tmp_path):
+        """The hint, not the ndim, decides: a 4D stack declared CZYX gets
+        a new time axis instead of being concatenated along its first."""
         folder = tmp_path / "series"
         _series(folder, (2, 2, 3, 5), 101, dtype=np.uint8)
         out = tmp_path / "out"
@@ -742,58 +706,29 @@ class TestMemoryEfficientLoading:
         assert data.shape == (101, 2, 2, 3, 5)
         np.testing.assert_array_equal(data[:2, 0, 0, 0, 0], [1, 2])
 
-    def test_shape_mismatch_in_a_large_2d_series_raises(self, tmp_path):
+    @pytest.mark.parametrize(
+        "shape,bad_shape",
+        [((2, 3), (2, 4)), ((2, 2, 3, 5), (2, 2, 3, 6))],
+        ids=["2d", "4d"],
+    )
+    def test_a_late_shape_mismatch_leaves_no_output(
+        self, tmp_path, shape, bad_shape
+    ):
+        """
+        The mismatch is only seen at file 101, after 100 timepoints have
+        been streamed out.  The partial file is written beside the target
+        and must be removed, not left looking like a finished merge.
+        """
         folder = tmp_path / "series"
-        _series(folder, (2, 3), 100, dtype=np.uint8)
-        _write(folder / "t101.tif", (2, 4), 101, dtype=np.uint8)
+        _series(folder, shape, 100, dtype=np.uint8)
+        _write(folder / "t101.tif", bad_shape, 101, dtype=np.uint8)
         out = tmp_path / "out"
         out.mkdir()
 
-        with pytest.raises(ValueError, match="Shape mismatch at timepoint"):
+        with pytest.raises(ValueError, match="has shape"):
             _merge(folder, output_folder=out, memory_efficient=True)
 
         assert not list(out.iterdir())
-
-    def test_shape_mismatch_in_a_large_4d_series_raises(self, tmp_path):
-        folder = tmp_path / "series"
-        _series(folder, (2, 2, 3, 5), 100, dtype=np.uint8)
-        _write(folder / "t101.tif", (2, 2, 3, 6), 101, dtype=np.uint8)
-        out = tmp_path / "out"
-        out.mkdir()
-
-        with pytest.raises(ValueError, match="Shape mismatch at file"):
-            _merge(folder, output_folder=out, memory_efficient=True)
-
-    def test_memory_efficient_is_ignored_below_the_threshold(
-        self, tmp_path, monkeypatch
-    ):
-        """
-        The flag only switches paths for series longer than 100 files.
-
-        4 files is small enough that the standard and memory-efficient
-        loaders agree on the output byte-for-byte, so shape/value checks
-        alone would pass even if the ``len(image_files) > 100`` guard were
-        deleted outright. np.memmap is only ever called from the
-        memory-efficient branch, so failing loudly if it is touched is
-        what actually proves that branch was skipped.
-        """
-        folder = tmp_path / "series"
-        _series(folder, (2, 3), 4, dtype=np.uint8)
-        out = tmp_path / "out"
-        out.mkdir()
-
-        def _memmap_should_not_be_called(*args, **kwargs):
-            raise AssertionError(
-                "np.memmap was called below the memory-efficient threshold"
-            )
-
-        monkeypatch.setattr(np, "memmap", _memmap_should_not_be_called)
-
-        _merge(folder, output_folder=out, memory_efficient=True)
-
-        data = tifffile.imread(str(out / "series_merged_timepoints.tif"))
-        assert data.shape == (4, 2, 3)
-        np.testing.assert_array_equal(data[:, 0, 0], [1, 2, 3, 4])
 
 
 class TestCommandLineInterface:

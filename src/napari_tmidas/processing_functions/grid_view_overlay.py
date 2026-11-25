@@ -727,6 +727,14 @@ def create_grid_overlay(
     return grid
 
 
+# skip_load: the worker must not load the input for this function.  It reads
+# the files it needs itself and only ever returns the input as a "nothing to
+# save" signal -- so every call (one per file in the folder) loaded a file
+# just to discard it.  With skip_load it gets image=None, and returning None
+# skips the save the same way.
+create_grid_overlay.skip_load = True
+
+
 def reset_grid_cache():
     """Reset the grid creation cache for a new batch run."""
     global _grid_created, _cached_grid, _grid_saved, _grid_output_path
