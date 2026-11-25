@@ -241,7 +241,8 @@ Built with [napari](https://github.com/napari/napari) and powered by:
 - [NumPy](https://numpy.org/) • [scikit-image](https://scikit-image.org/) • [PyTorch](https://pytorch.org/)
 
 **File Format Support:**
-- [OME-Zarr](https://github.com/ome/ome-zarr-py) • [tifffile](https://github.com/cgohlke/tifffile) • [nd2](https://github.com/tlambert03/nd2) • [pylibCZIrw](https://github.com/ZEISS/pylibczi) • [readlif](https://github.com/nimne/readlif)
+- [OME-Zarr](https://github.com/ome/ome-zarr-py) • [tifffile](https://github.com/cgohlke/tifffile) • [nd2](https://github.com/tlambert03/nd2) • [pylibCZIrw](https://github.com/ZEISS/pylibczirw) • [readlif](https://github.com/nimne/readlif)
+- ZEN camera-streaming CZIs, which libCZI cannot decode yet ([ZEISS/libczi#187](https://github.com/ZEISS/libczi/issues/187)), are read by a fallback reader written against the CZI (ZISRAW) file format specification from ZEISS and [libCZI](https://github.com/ZEISS/libczi).
 
 ---
 
