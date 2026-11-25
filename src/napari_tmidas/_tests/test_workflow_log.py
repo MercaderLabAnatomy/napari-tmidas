@@ -436,6 +436,9 @@ class TestBatchWidgetHooks:
         assert len(records) == 2
         assert records[1]["status"] == "finished"
         assert len(records[1]["results"]) == 2
+        # The thread object outlives processing_finished, which runs while
+        # the thread is still going, and is released once it has stopped.
+        qtbot.waitUntil(lambda: not widget._live_workers, timeout=5000)
 
     def test_disabled_writes_nothing(self, home, qapp, registry, no_start):
         def identity(image, offset: int = 0):
