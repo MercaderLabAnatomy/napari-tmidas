@@ -481,7 +481,12 @@ class TestDimensionOrderHint:
 
 
 class TestApplyWorkflowRun:
-    def test_recorded_thread_count_is_restored(self, tmp_path, qapp, registry):
+    def test_recorded_thread_count_is_restored(
+        self, tmp_path, qapp, registry, monkeypatch
+    ):
+        # The spinbox allows up to half the CPUs; pin the count so the test
+        # does not depend on the machine (CI runners have 4).
+        monkeypatch.setattr(fs.os, "cpu_count", lambda: 16)
         _register(registry, "Identity")
         widget, viewer, _ = _results_widget(tmp_path)
         assert widget.thread_count.isEnabled()
@@ -493,6 +498,20 @@ class TestApplyWorkflowRun:
         assert applied is True
         assert widget.thread_count.value() == 3
         assert viewer.status == "Loaded the settings of run r1"
+
+    def test_a_recorded_thread_count_above_this_machines_limit_is_capped(
+        self, tmp_path, qapp, registry, monkeypatch
+    ):
+        # A run recorded on a bigger machine must not oversubscribe this one.
+        monkeypatch.setattr(fs.os, "cpu_count", lambda: 4)
+        _register(registry, "Identity")
+        widget, _, _ = _results_widget(tmp_path)
+
+        widget.apply_workflow_run(
+            {"run_id": "r1", "function": "Identity", "thread_count": 8}
+        )
+
+        assert widget.thread_count.value() == 2
 
 
 # ---------------------------------------------------------------------------
