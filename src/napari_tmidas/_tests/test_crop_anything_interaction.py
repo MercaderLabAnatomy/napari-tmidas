@@ -596,6 +596,24 @@ class TestOn3dLabelClicked:
         assert armed.label_layer.data is armed.segmentation_result
         assert int((armed.label_layer.data == 1).sum()) == 18
 
+    def test_the_new_objects_points_layer_listens_for_clicks(self, armed):
+        # Regression: the handler used to be removed-then-appended under one
+        # suppress(ValueError), so on a fresh layer the remove raised and the
+        # append never ran.
+        self.click(armed, (1, 3, 4))
+
+        points = armed.viewer.layers["Points for Object 1"]
+        assert points.mouse_drag_callbacks.count(armed._on_points_clicked) == 1
+
+    def test_object_1_prompts_never_land_in_object_10s_layer(self, armed):
+        armed.viewer.add_points(np.zeros((1, 3)), name="Points for Object 10")
+
+        self.click(armed, (1, 3, 4))
+
+        assert len(armed.viewer.layers["Points for Object 10"].data) == 1
+        points = armed.viewer.layers["Points for Object 1"]
+        np.testing.assert_array_equal(points.data, [[1, 3, 4]])
+
     def test_a_shift_click_refines_the_object_underneath(self, armed):
         self.click(armed, (1, 3, 4))
         armed.predictor.propagated = {}
@@ -1214,3 +1232,35 @@ class TestBatchCropAnythingEntry:
         assert isinstance(dock, ca.QScrollArea)
         assert dock.widgetResizable()
         assert dock.minimumHeight() == 500
+
+
+# --------------------------------------------------------------------------
+# deleting one label
+# --------------------------------------------------------------------------
+class TestDeleteOneLabelLeavesOtherObjects:
+    """Point layers are matched by exact name, so deleting label 1 does not
+    take "Points for Object 10" with it."""
+
+    def test_3d_delete_of_label_1_keeps_object_10s_points_layer(self, volume):
+        volume.segmentation_result[:, 0:2, 0:2] = 1
+        volume.segmentation_result[1, 5:7, 5:7] = 10
+        volume.viewer.add_points(np.zeros((1, 3)), name="Points for Object 1")
+        volume.viewer.add_points(np.zeros((1, 3)), name="Points for Object 10")
+
+        volume.clear_label_at_position_3d(2, 1, 1)
+
+        names = layer_names(volume.viewer)
+        assert "Points for Object 1" not in names
+        assert "Points for Object 10" in names
+
+    def test_2d_delete_of_label_1_keeps_object_10s_points_layer(self, scene):
+        scene.segmentation_result[0:2, 0:2] = 1
+        scene.segmentation_result[5:7, 5:7] = 10
+        scene.viewer.add_points(np.zeros((1, 2)), name="Points for Object 1")
+        scene.viewer.add_points(np.zeros((1, 2)), name="Points for Object 10")
+
+        scene.clear_label_at_position(0, 0)
+
+        names = layer_names(scene.viewer)
+        assert "Points for Object 1" not in names
+        assert "Points for Object 10" in names
