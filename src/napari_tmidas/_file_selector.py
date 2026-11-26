@@ -3006,42 +3006,72 @@ class ProcessingWorker(QThread):
                 for filepath in self.file_list
             }
 
-            # Process as they complete
-            for i, future in enumerate(
-                concurrent.futures.as_completed(future_to_file)
-            ):
-                # Check if cancellation was requested
-                if self.stop_requested:
-                    break
+            # Poll instead of blocking on as_completed, so a cancel is seen
+            # even while every running file is still busy. On cancel the
+            # queued files are dropped; files already running cannot be
+            # interrupted, so their results are still collected (they are
+            # written to disk either way).
+            pending = set(future_to_file)
+            done_count = 0
+            cancelled = False
+            while pending:
+                done, pending = concurrent.futures.wait(
+                    pending,
+                    timeout=0.2,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if self.stop_requested and not cancelled:
+                    cancelled = True
+                    for future in pending:
+                        future.cancel()
 
-                filepath = future_to_file[future]
-                try:
-                    result = future.result()
-                    # Only process result if it's not None (folder functions may return None)
-                    if result is not None:
-                        # An all-zero output almost always means the step
-                        # failed silently (wrong threshold, wrong channel).
-                        empty = all_zero_outputs(result_output_paths(result))
-                        if empty:
-                            result["all_zero_outputs"] = empty
-                        processed_files_info.append(result)
-                        self.file_processed.emit(result)
-                except (
-                    ValueError,
-                    TypeError,
-                    OSError,
-                    tifffile.TiffFileError,
-                ) as e:
-                    self.error_occurred.emit(filepath, str(e))
+                for future in done:
+                    if future.cancelled():
+                        continue
+                    filepath = future_to_file[future]
+                    try:
+                        result = future.result()
+                        # Only process result if it's not None (folder functions may return None)
+                        if result is not None:
+                            # An all-zero output almost always means the step
+                            # failed silently (wrong threshold, wrong channel).
+                            empty = all_zero_outputs(
+                                result_output_paths(result)
+                            )
+                            if empty:
+                                result["all_zero_outputs"] = empty
+                            processed_files_info.append(result)
+                            self.file_processed.emit(result)
+                    except (
+                        ValueError,
+                        TypeError,
+                        OSError,
+                        tifffile.TiffFileError,
+                    ) as e:
+                        self.error_occurred.emit(filepath, str(e))
+                    except Exception as e:
+                        # Cancelling kills external subprocesses (Cellpose),
+                        # so a running file failing is the expected outcome
+                        # of a stop, not a crash of the whole run.
+                        if not self.stop_requested:
+                            raise
+                        self.error_occurred.emit(filepath, str(e))
 
-                # Update progress
-                self.progress_updated.emit(int((i + 1) / total_files * 100))
+                    # Update progress
+                    done_count += 1
+                    self.progress_updated.emit(
+                        int(done_count / total_files * 100)
+                    )
 
         # Signal that processing is complete
         self.processing_finished.emit()
 
     def process_file(self, filepath):
         """Process one file; the result also records how long it took."""
+        # A pool thread can pick up the next queued file before run() gets
+        # to cancel it, so check here too.
+        if self.stop_requested:
+            return None
         t0 = time.monotonic()
         result = self._process_file_impl(filepath)
         if isinstance(result, dict):
@@ -4883,6 +4913,12 @@ class FileResultsWidget(QWidget):
         # Only reached with the run still open when the worker raised.
         self._record_run_finished("failed")
         worker = self.sender()
+        if worker is not None and worker is self.worker:
+            # run() died before processing_finished, which would otherwise
+            # leave Start disabled and a Cancel button with nothing to stop.
+            self.worker = None
+            self.batch_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
         if worker in self._live_workers:
             worker.wait()  # run() has returned; this only joins the thread
             self._live_workers.discard(worker)
@@ -4924,8 +4960,11 @@ class FileResultsWidget(QWidget):
 
     def processing_finished(self):
         """Handle processing completion"""
+        cancelled = getattr(self, "_workflow_cancel_requested", False)
+
         # Update UI
-        self.progress_bar.setValue(100)
+        if not cancelled:
+            self.progress_bar.setValue(100)
         self.batch_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
@@ -4936,6 +4975,12 @@ class FileResultsWidget(QWidget):
         self._record_run_finished("finished")
 
         # Update status
+        if cancelled:
+            self.viewer.status = (
+                f"Processing cancelled after "
+                f"{len(self.processed_files_info)} files"
+            )
+            return
         self.viewer.status = (
             f"Completed processing {len(self.processed_files_info)} files"
         )
@@ -5002,18 +5047,17 @@ class FileResultsWidget(QWidget):
             cancel_cellpose_processing()
 
         if self.worker and self.worker.isRunning():
+            # Do not wait() here: that blocks the GUI thread until every
+            # running file is done. The worker drops the queued files and
+            # emits processing_finished once the running ones have
+            # returned; the UI and the end record are reset there.
             self.worker.stop()
-            self.worker.wait()  # Wait for the thread to finish
-
-            # The worker's last file_processed signals and its
-            # processing_finished are still queued behind wait(); the end
-            # record is written there, after the last result has arrived.
             self._workflow_cancel_requested = True
-
-            # Update UI
-            self.batch_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
-            self.viewer.status = "Processing cancelled"
+            self.viewer.status = (
+                "Cancelling: waiting for the files already in progress "
+                "to finish"
+            )
 
 
 def napari_experimental_provide_dock_widget():

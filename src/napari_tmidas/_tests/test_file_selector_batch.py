@@ -1066,10 +1066,12 @@ class TestCancelProcessing:
         widget.cancel_processing()
 
         assert cellpose_cancels == [1]
-        assert worker.calls == ["stop", "wait"]
-        assert widget.batch_button.isEnabled()
+        # No wait(): joining the thread here would freeze the GUI.
+        assert worker.calls == ["stop"]
+        # Start stays disabled until the worker's processing_finished.
+        assert not widget.batch_button.isEnabled()
         assert not widget.cancel_button.isEnabled()
-        assert viewer.status == "Processing cancelled"
+        assert viewer.status.startswith("Cancelling")
 
     def test_cancel_without_running_worker(self, tmp_path, qapp, registry, monkeypatch):
         monkeypatch.setattr(fs, "cancel_cellpose_processing", None)
@@ -1086,8 +1088,8 @@ class TestCancelProcessing:
         widget.cancel_processing()  # no worker at all: still a no-op
         assert viewer.status == "idle"
 
-    def test_cancel_real_worker(self, tmp_path, qapp, registry, monkeypatch):
-        """A genuinely running QThread is stopped and joined."""
+    def test_cancel_real_worker(self, tmp_path, qtbot, registry, monkeypatch):
+        """A genuinely running QThread stops and the UI resets afterwards."""
         import threading
 
         monkeypatch.setattr(fs, "cancel_cellpose_processing", None)
@@ -1106,12 +1108,13 @@ class TestCancelProcessing:
         try:
             assert entered.wait(10), "worker never started"
             assert worker.isRunning()
-            gate.set()
             widget.cancel_processing()
             assert worker.stop_requested is True
-            assert worker.isFinished()
-            assert viewer.status == "Processing cancelled"
-            assert widget.batch_button.isEnabled()
+            assert worker.isRunning(), "cancel must not join the thread"
+            gate.set()
+            qtbot.waitUntil(worker.isFinished, timeout=10000)
+            qtbot.waitUntil(widget.batch_button.isEnabled, timeout=5000)
+            assert "cancelled" in viewer.status
         finally:
             gate.set()
             worker.wait(10000)
