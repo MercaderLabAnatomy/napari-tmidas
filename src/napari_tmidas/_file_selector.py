@@ -3573,6 +3573,20 @@ class ProcessingWorker(QThread):
                         processed_files.append(output_path)
                 else:
                     # Default behavior for other multi-output functions (e.g., channel splitting)
+                    # Most suffixes ("_split") carry no extension; append the
+                    # one for the output format, as the single-output path
+                    # does, so the recorded path is the file actually written.
+                    suffix_stem, suffix_ext = os.path.splitext(
+                        self.output_suffix
+                    )
+                    if suffix_ext.lower() not in (".tif", ".tiff", ".zarr"):
+                        suffix_stem, suffix_ext = self.output_suffix, ""
+                    if self.output_format == "zarr":
+                        multi_ext = ".zarr"
+                    elif suffix_ext.lower() in (".tif", ".tiff"):
+                        multi_ext = suffix_ext
+                    else:
+                        multi_ext = ".tif"
                     for idx, img in enumerate(processed_result):
                         if not isinstance(img, np.ndarray):
                             continue
@@ -3582,7 +3596,7 @@ class ProcessingWorker(QThread):
 
                         # Generate output filename
                         output_filename = (
-                            f"{base_name}_ch{idx + 1}{self.output_suffix}"
+                            f"{base_name}_ch{idx + 1}{suffix_stem}{multi_ext}"
                         )
                         output_path = os.path.join(
                             self.output_folder, output_filename
@@ -3725,6 +3739,8 @@ class ProcessingWorker(QThread):
             # Only split if dimension_order indicates channels (CYX, TCYX, etc. with C first)
             # or if Auto and shape suggests channels (2-4)
             is_multi_channel = False
+            # Axis of processed_image that holds the channels to split.
+            channel_split_axis = 0
             if function_name == "split_channels":
                 # split_channels() always moves the channel axis to
                 # position 0 of its returned array (see basic.py), no
@@ -3751,13 +3767,35 @@ class ProcessingWorker(QThread):
                 "TZCYX",
                 "TCZYX",
             ]:
-                # User explicitly said first dim is channels - split it
+                # The hint names where C sits. Only split along that axis:
+                # in TCYX/ZCYX/... axis 0 is T or Z, and splitting it would
+                # save timepoints or slices mislabelled as channels. Once a
+                # single channel was extracted upstream there is no C left.
+                if channel_axis_removed:
+                    channel_split_axis = None
+                elif processed_image.ndim == len(dimension_order_hint):
+                    channel_split_axis = dimension_order_hint.index("C")
+                elif dimension_order_hint.startswith("C"):
+                    channel_split_axis = 0
+                else:
+                    channel_split_axis = None
                 is_multi_channel = (
-                    processed_image.ndim > 2 and processed_image.shape[0] > 1
+                    channel_split_axis is not None
+                    and processed_image.ndim > 2
+                    and processed_image.shape[channel_split_axis] > 1
                 )
-                print(
-                    f"dimension_order='{dimension_order_hint}' indicates channels, will split {processed_image.shape[0]} channels"
-                )
+                if is_multi_channel:
+                    print(
+                        f"dimension_order='{dimension_order_hint}' indicates "
+                        f"channels at axis {channel_split_axis}, will split "
+                        f"{processed_image.shape[channel_split_axis]} channels"
+                    )
+                else:
+                    print(
+                        f"dimension_order='{dimension_order_hint}': no channel "
+                        f"axis left in output shape {processed_image.shape}, "
+                        "will NOT split channels"
+                    )
             elif dimension_order_hint in ["TYX", "ZYX", "TZYX"]:
                 # User explicitly said it's NOT channels (time or Z) - don't split
                 is_multi_channel = False
@@ -3827,9 +3865,9 @@ class ProcessingWorker(QThread):
             if is_multi_channel:
                 # Save each channel as a separate image
                 processed_files = []
-                num_channels = processed_image.shape[0]
+                num_channels = processed_image.shape[channel_split_axis]
                 print(
-                    f"Treating first dimension as channels. Saving {num_channels} separate channel files"
+                    f"Treating axis {channel_split_axis} as channels. Saving {num_channels} separate channel files"
                 )
 
                 for i in range(num_channels):
@@ -3839,7 +3877,9 @@ class ProcessingWorker(QThread):
                     )
 
                     # Extract channel data and remove any remaining singleton dimensions
-                    channel_image = np.squeeze(processed_image[i])
+                    channel_image = np.squeeze(
+                        np.take(processed_image, i, axis=channel_split_axis)
+                    )
 
                     print(f"Channel {i} shape: {channel_image.shape}")
 
@@ -3854,8 +3894,8 @@ class ProcessingWorker(QThread):
 
                     # Check if this is a label image based on dtype
                     is_label = is_label_image(channel_image)
-                    # Axis 0 (channel) was just stripped by indexing
-                    # processed_image[i] above, regardless of whether the
+                    # The channel axis was just stripped by taking
+                    # index i along it above, regardless of whether the
                     # input channel was already extracted upstream.
                     resolved_dim_order = _resolve_output_dim_order(
                         dimension_order_hint, True, channel_image.ndim

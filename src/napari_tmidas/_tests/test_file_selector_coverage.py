@@ -2362,3 +2362,110 @@ class TestConfirmDimensionOrder:
         info = {"func": lambda image, dimension_order="Auto": image}
         assert stub.confirm_dimension_order(info) is True
         assert calls == []
+
+# ---------------------------------------------------------------------------
+# multi-output naming and channel-split axis
+# ---------------------------------------------------------------------------
+class TestMultiOutputFileNames:
+    """A function returning several arrays must write files that exist under
+    the names the result records, with an extension napari can open."""
+
+    def _two_outputs(self, image):
+        return [np.full((4, 4), 3, np.uint16), np.full((4, 4), 7, np.uint16)]
+
+    def test_a_suffix_without_extension_still_writes_tiffs(self, tmp_path):
+        src = _write_tif(tmp_path / "a.tif", np.zeros((4, 4), np.uint16))
+
+        result = _worker(
+            tmp_path, self._two_outputs, [src], output_suffix="_split"
+        ).process_file(src)
+
+        names = [os.path.basename(p) for p in result["processed_files"]]
+        assert names == ["a_ch1_split.tif", "a_ch2_split.tif"]
+        assert [int(tifffile.imread(p)[0, 0]) for p in result["processed_files"]] == [3, 7]
+
+    def test_zarr_output_records_the_zarr_that_was_written(self, tmp_path):
+        src = _write_tif(tmp_path / "a.tif", np.zeros((4, 4), np.uint16))
+
+        result = _worker(
+            tmp_path,
+            self._two_outputs,
+            [src],
+            output_suffix="_split",
+            output_format="zarr",
+        ).process_file(src)
+
+        names = [os.path.basename(p) for p in result["processed_files"]]
+        assert names == ["a_ch1_split.zarr", "a_ch2_split.zarr"]
+        assert all(os.path.isdir(p) for p in result["processed_files"])
+
+    def test_a_tif_suffix_with_zarr_output_is_not_doubled(self, tmp_path):
+        src = _write_tif(tmp_path / "a.tif", np.zeros((4, 4), np.uint16))
+
+        result = _worker(
+            tmp_path,
+            self._two_outputs,
+            [src],
+            output_suffix="_out.tif",
+            output_format="zarr",
+        ).process_file(src)
+
+        names = [os.path.basename(p) for p in result["processed_files"]]
+        assert names == ["a_ch1_out.zarr", "a_ch2_out.zarr"]
+        assert all(os.path.isdir(p) for p in result["processed_files"])
+
+
+class TestChannelSplitFollowsTheHint:
+    """With C not first in the dimension order, channels are split along the
+    C axis, never along T or Z."""
+
+    @pytest.mark.parametrize(
+        "order, shape, c_axis",
+        [
+            ("TCYX", (3, 2, 8, 8), 1),
+            ("ZCYX", (3, 2, 8, 8), 1),
+            ("TZCYX", (3, 4, 2, 8, 8), 2),
+            ("TCZYX", (3, 2, 4, 8, 8), 1),
+        ],
+    )
+    def test_each_file_holds_one_channel_with_every_t_and_z(
+        self, tmp_path, order, shape, c_axis
+    ):
+        data = np.zeros(shape, np.uint16)
+        for c in range(shape[c_axis]):
+            idx = [slice(None)] * len(shape)
+            idx[c_axis] = c
+            data[tuple(idx)] = c + 1
+        src = _write_tif(tmp_path / "a.tif", data)
+
+        result = _worker(
+            tmp_path, lambda image: image, [src], param_values={"dimension_order": order}
+        ).process_file(src)
+
+        paths = sorted(result["processed_files"])
+        assert [os.path.basename(p) for p in paths] == [
+            "a_proc_channel_0.tif",
+            "a_proc_channel_1.tif",
+        ]
+        expected_shape = shape[:c_axis] + shape[c_axis + 1 :]
+        for c, path in enumerate(paths):
+            saved = tifffile.imread(path)
+            assert saved.shape == expected_shape
+            assert (saved == c + 1).all()
+            with tifffile.TiffFile(path) as tf:
+                assert tf.series[0].axes == order.replace("C", "")
+
+    def test_a_hint_whose_rank_does_not_match_is_not_split(self, tmp_path):
+        # A function that dropped an axis leaves the hint ambiguous; saving
+        # one file is safer than splitting the wrong axis.
+        src = _write_tif(tmp_path / "a.tif", np.zeros((3, 2, 8, 8), np.uint16))
+
+        result = _worker(
+            tmp_path,
+            lambda image: image.max(axis=0),
+            [src],
+            param_values={"dimension_order": "TCYX"},
+        ).process_file(src)
+
+        assert "processed_files" not in result
+        assert tifffile.imread(result["processed_file"]).shape == (2, 8, 8)
