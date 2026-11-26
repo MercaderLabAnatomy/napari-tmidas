@@ -53,21 +53,23 @@ napari-tmidas is a free, open-source plugin for the [napari](https://napari.org)
 📊 **Complete Analysis Pipeline**
 - Segmentation → Tracking → Quantification → Colocalization
 
-## 🚀 Quick Start
+## 🚀 Quick Start (macOS / Linux)
 
 
 Supports Python 3.11–3.13; commands below use Python 3.12. We recommend installing with [uv](https://docs.astral.sh/uv/), which downloads Python for you — no conda needed.
-
+#### 1. Install uv (one-time; Windows: see Installation below)
 ```sh
-# 1. Install uv (one-time; Windows: see Installation below)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Create an environment with napari and the plugin
+curl -LsSf https://astral.sh/uv/install.sh | sh 
+```
+#### 2. Create an environment with napari and the plugin
+```sh
 uv venv --python 3.12 ~/napari-tmidas-env
-source ~/napari-tmidas-env/bin/activate
+source ~/napari-tmidas-env/bin/activate 
 uv pip install "napari[all]" napari-tmidas
-
-# 3. Launch napari
+```
+#### 3. Launch napari in the activated environment
+```sh
+source ~/napari-tmidas-env/bin/activate 
 napari
 ```
 
@@ -115,11 +117,12 @@ Then find napari-tmidas in the **Plugins** menu. [Watch video tutorials →](htt
 
 **1. Install uv** (one-time). Close and reopen your terminal afterwards so `uv` is on your `PATH`.
 
+#### macOS / Linux
 ```sh
-# macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
+```
+#### Windows (PowerShell)
+```sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
