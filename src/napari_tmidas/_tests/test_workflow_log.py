@@ -440,6 +440,50 @@ class TestBatchWidgetHooks:
         # the thread is still going, and is released once it has stopped.
         qtbot.waitUntil(lambda: not widget._live_workers, timeout=5000)
 
+    @pytest.mark.parametrize("killed", [False, True])
+    def test_cancel_real_thread(self, home, log_on, qtbot, registry, killed):
+        """Cancel returns at once, skips queued files, and resets the UI.
+
+        ``killed`` mimics a Cellpose subprocess terminated by the cancel:
+        the running file then raises instead of returning.
+        """
+        import threading
+        import time
+
+        entered, release = threading.Event(), threading.Event()
+
+        def blocking(image, offset: int = 0):
+            entered.set()
+            assert release.wait(10)
+            if killed:
+                raise RuntimeError("Cellpose segmentation failed")
+            return image
+
+        ws = _mkdir(home / "ws")
+        widget, _ = _widget(ws, blocking)
+        widget.thread_count.setValue(1)
+        widget.start_batch_processing()
+        assert entered.wait(10)
+
+        t0 = time.monotonic()
+        widget.cancel_processing()
+        assert time.monotonic() - t0 < 1, "cancel must not block the GUI"
+        assert not widget.cancel_button.isEnabled()
+        assert not widget.batch_button.isEnabled()
+
+        release.set()
+        qtbot.waitUntil(lambda: len(_records(ws)) == 2, timeout=10000)
+        qtbot.waitUntil(lambda: not widget._live_workers, timeout=5000)
+
+        end = _records(ws)[-1]
+        assert end["status"] == "cancelled"
+        # img1 was still queued when cancel came and never ran.
+        assert [r["original_file"] for r in end["results"]] == (
+            [] if killed else ["img0.tif"]
+        )
+        assert widget.batch_button.isEnabled()
+        assert "cancelled" in widget.viewer.status
+
     def test_disabled_writes_nothing(self, home, qapp, registry, no_start):
         def identity(image, offset: int = 0):
             return image
