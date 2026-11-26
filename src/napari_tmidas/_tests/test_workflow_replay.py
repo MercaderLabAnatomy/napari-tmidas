@@ -371,3 +371,208 @@ class TestLoadSettingsButton:
         assert widget.workflow_run_selector.isHidden()
         assert widget.load_workflow_log(str(tmp_path / "nope.jsonl")) == 0
         assert "Could not read" in widget.viewer.status
+
+
+# ---------------------------------------------------------------------------
+# Edge cases of finding logs and resolving a recorded run
+# ---------------------------------------------------------------------------
+class TestResolutionEdges:
+    def test_unique_prefix_finds_the_run(self):
+        runs = [{"run_id": "20261001T1-aa"}, {"run_id": "20261002T1-bb"}]
+        assert wr.find_run(runs, "20261002")["run_id"] == "20261002T1-bb"
+
+    def test_search_up_to_the_root_falls_back_to_the_logs_below(
+        self, tmp_path, monkeypatch
+    ):
+        # Enough levels to reach "/" without meeting a log: the folder's own
+        # subtree is searched instead, and the root is never walked.
+        monkeypatch.setattr(wl, "MAX_ANCESTOR_LEVELS", 1000)
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / wl.LOG_NAME).write_text("")
+        assert wr.log_paths(str(tmp_path)) == [str(tmp_path / "sub" / wl.LOG_NAME)]
+
+    def test_missing_input_folder_is_reported(self, tmp_path):
+        run = {"files": ["gone.tif"], "input_suffix": ".tif"}
+        with pytest.raises(FileNotFoundError, match="Input folder not found"):
+            wr.resolve_files(run, str(tmp_path / "nowhere"), _quiet)
+
+    def test_output_folder_override_is_made_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        run = {"input_folder": "/a", "output_folder": "/a/out"}
+        assert wr.resolve_output_folder(run, "/b", "new_out") == str(tmp_path / "new_out")
+
+    def test_no_recorded_output_folder_writes_next_to_the_inputs(self):
+        assert wr.resolve_output_folder({"input_folder": "/a"}, "/b", None) == "/b"
+
+    def test_output_folder_outside_the_input_folder_stays_put(self):
+        run = {"input_folder": "/data/raw", "output_folder": "/scratch/out"}
+        assert wr.resolve_output_folder(run, "/moved/raw", None) == "/scratch/out"
+
+    def test_output_folder_equal_to_input_follows_a_moved_input(self):
+        run = {"input_folder": "/data/raw", "output_folder": "/data/raw"}
+        assert wr.resolve_output_folder(run, "/moved/raw", None) == "/moved/raw"
+
+
+class TestReplayOutcomes:
+    def test_no_input_files_at_all_refuses_to_run(self, tmp_path, registry):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _record_run(ws, [str(ws / "gone.tif")])
+        (run,) = wr.load_runs(str(ws))
+        with pytest.raises(FileNotFoundError, match="No input files"):
+            wr.replay_batch_run(run, on_progress=_quiet)
+        assert not (ws / "results").exists()
+
+    def test_per_file_errors_are_returned_and_recorded(self, tmp_path, registry):
+        def boom(image):
+            raise ValueError("bad pixels")
+
+        registry.register(name="Boom", suffix="_boom", parameters={})(boom)
+        ws, files = _workspace(tmp_path)
+        _record_run(ws, files, params={}, function="Boom")
+        (run,) = wr.load_runs(str(ws))
+        messages = []
+
+        outcome = wr.replay_batch_run(run, on_progress=messages.append)
+
+        assert outcome["status"] == "finished"
+        assert outcome["results"] == []
+        assert sorted(e["file"] for e in outcome["errors"]) == sorted(files)
+        assert all("bad pixels" in e["error"] for e in outcome["errors"])
+        assert any(m.startswith("  error: img0.tif") for m in messages)
+        replay = wr.load_runs(str(ws))[-1]
+        assert len(replay["errors"]) == 2
+
+    def test_a_crash_is_recorded_as_failed_and_raised(self, tmp_path, registry):
+        def crash(image):
+            raise RuntimeError("segfault-ish")
+
+        registry.register(name="Crash", suffix="_crash", parameters={})(crash)
+        ws, files = _workspace(tmp_path)
+        original = _record_run(ws, files, params={}, function="Crash")
+        (run,) = wr.load_runs(str(ws))
+        with pytest.raises(RuntimeError, match="segfault-ish"):
+            wr.replay_batch_run(run, on_progress=_quiet)
+        replay = wr.load_runs(str(ws))[-1]
+        assert replay["extra"] == {"replayed_from": original}
+        assert replay["status"] == "failed"
+
+    def test_grid_overlay_starts_from_an_empty_grid_cache(
+        self, tmp_path, registry, monkeypatch
+    ):
+        import napari_tmidas.processing_functions.grid_view_overlay as gvo
+
+        resets = []
+        monkeypatch.setattr(gvo, "reset_grid_cache", lambda: resets.append(True))
+
+        def create_grid_overlay(image):
+            assert resets, "the cache must be reset before the first file"
+            return image
+
+        registry.register(name="Grid", suffix="_grid", parameters={})(
+            create_grid_overlay
+        )
+        ws, files = _workspace(tmp_path)
+        _record_run(ws, files, params={}, function="Grid")
+        (run,) = wr.load_runs(str(ws))
+        outcome = wr.replay_batch_run(run, on_progress=_quiet)
+        assert outcome["errors"] == []
+        assert resets == [True]
+
+
+class TestCliEdges:
+    def test_list_of_an_empty_log(self, tmp_path, capsys):
+        (tmp_path / wl.LOG_NAME).write_text("")
+        assert main(["list", str(tmp_path)]) == 0
+        assert capsys.readouterr().out.strip() == "No runs recorded."
+
+    def test_list_marks_events_and_runs_that_cannot_be_replayed(
+        self, tmp_path, registry, capsys
+    ):
+        ws, files = _workspace(tmp_path)
+        log = wl.WorkflowLog(str(ws))
+        run_id = log.run_started(widget="label_inspection", files=files,
+                                 replayable=False)
+        log.run_finished(run_id, status="finished")
+        log.event(widget="crop_anything", file=files[0])
+
+        assert main(["list", str(ws)]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        run_row = next(line for line in lines if line.startswith(run_id))
+        assert "[label_inspection] (not replayable)" in run_row
+        assert run_row.split()[-2:] == ["finished", "2"]
+        event_row = lines[-1]
+        assert "[crop_anything] img0.tif" in event_row
+        assert event_row.endswith("event")
+
+    def test_replay_that_raises_exits_1_and_says_why(
+        self, tmp_path, registry, capsys
+    ):
+        ws, files = _workspace(tmp_path)
+        run_id = _record_run(ws, files, function="Renamed Away")
+        assert main(["replay", str(ws), "--run", run_id]) == 1
+        err = capsys.readouterr().err
+        assert f"Replay of {run_id} failed" in err
+        assert "Renamed Away" in err
+
+    def test_replay_with_per_file_errors_exits_1(self, tmp_path, registry, capsys):
+        def boom(image):
+            raise ValueError("bad pixels")
+
+        registry.register(name="Boom", suffix="_boom", parameters={})(boom)
+        ws, files = _workspace(tmp_path)
+        run_id = _record_run(ws, files, params={}, function="Boom")
+        assert main(["replay", str(ws), "--run", run_id]) == 1
+        assert "error: img1.tif: bad pixels" in capsys.readouterr().out
+
+    def test_module_runs_as_a_script(self, tmp_path, monkeypatch, capsys):
+        import runpy
+        import sys
+
+        (tmp_path / wl.LOG_NAME).write_text("")
+        monkeypatch.setattr(sys, "argv", ["napari-tmidas-workflow", "list", str(tmp_path)])
+        monkeypatch.delitem(sys.modules, "napari_tmidas._workflow_cli", raising=False)
+        with pytest.raises(SystemExit) as exit_info:
+            runpy.run_module("napari_tmidas._workflow_cli", run_name="__main__")
+        assert exit_info.value.code == 0
+        assert "No runs recorded." in capsys.readouterr().out
+
+
+class TestQtApplicationForHeadlessReplay:
+    def test_creates_a_core_application_when_none_exists(self, monkeypatch):
+        import qtpy.QtCore
+
+        import napari_tmidas._workflow_cli as cli
+
+        created = []
+
+        class FakeApp:
+            @staticmethod
+            def instance():
+                return None
+
+            def __init__(self, argv):
+                created.append(argv)
+
+        monkeypatch.setattr(qtpy.QtCore, "QCoreApplication", FakeApp)
+        app = cli._ensure_qt_core_app()
+        assert isinstance(app, FakeApp)
+        assert created == [cli.sys.argv[:1]]
+
+    def test_an_existing_application_is_reused(self, qapp):
+        import napari_tmidas._workflow_cli as cli
+
+        assert cli._ensure_qt_core_app() is None
+
+    def test_qt_trouble_does_not_stop_a_replay(self, monkeypatch):
+        import qtpy.QtCore
+
+        import napari_tmidas._workflow_cli as cli
+
+        class BrokenApp:
+            @staticmethod
+            def instance():
+                raise RuntimeError("no Qt platform plugin")
+
+        monkeypatch.setattr(qtpy.QtCore, "QCoreApplication", BrokenApp)
+        assert cli._ensure_qt_core_app() is None
