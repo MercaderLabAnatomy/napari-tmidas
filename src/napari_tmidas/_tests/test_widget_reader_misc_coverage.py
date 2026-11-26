@@ -350,6 +350,28 @@ class TestOmeScale:
             0.65,
         )
 
+    def test_a_multi_series_ome_tiff_uses_the_first_series_scale(
+        self, tmp_path
+    ):
+        # Regression: OME/Image is a list for >1 series, so the lookup
+        # raised and the layer opened without any physical scale.
+        path = tmp_path / "two_series.ome.tif"
+        with tifffile.TiffWriter(str(path), ome=True) as tw:
+            for _ in range(2):
+                tw.write(
+                    np.zeros((3, 8, 8), np.uint8),
+                    photometric="minisblack",
+                    metadata={
+                        "axes": "ZYX",
+                        "PhysicalSizeX": 0.65,
+                        "PhysicalSizeY": 0.65,
+                        "PhysicalSizeZ": 2.0,
+                    },
+                )
+        tf = reader._get_cached_tiff(str(path))
+
+        assert reader._ome_scale_for_series(tf, "ZYX") == (2.0, 0.65, 0.65)
+
     def test_a_plain_tiff_has_no_scale(self, tmp_path):
         path = _write_tiff(tmp_path / "plain.tif", np.zeros((4, 8, 8), "u1"))
         tf = reader._get_cached_tiff(str(path))

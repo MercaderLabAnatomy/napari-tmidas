@@ -519,3 +519,32 @@ class TestExtractSourceTimeInterval:
         path = self._zarr(tmp_path, {"ome": {"multiscales": multiscales}})
 
         assert ome_output_utils.extract_source_time_interval(path) is None
+
+
+class TestMultiSeriesOmeTiff:
+    def test_a_multi_series_ome_tiff_keeps_the_first_series_metadata(
+        self, tmp_path
+    ):
+        # Regression: OME/Image is a list for >1 series, and indexing it with
+        # "Pixels" raised a TypeError that was swallowed, so the interval and
+        # pixel sizes were silently lost.
+        path = tmp_path / "two_series.ome.tif"
+        with tifffile.TiffWriter(str(path), ome=True) as tw:
+            for _ in range(2):
+                tw.write(
+                    np.zeros((3, 4, 5), dtype=np.uint8),
+                    photometric="minisblack",
+                    metadata={
+                        "axes": "TYX",
+                        "TimeIncrement": 2.5,
+                        "TimeIncrementUnit": "s",
+                        "PhysicalSizeX": 0.5,
+                        "PhysicalSizeY": 0.5,
+                    },
+                )
+
+        assert ome_output_utils.extract_source_time_interval(str(path)) == 2.5
+        assert ome_output_utils._extract_tiff_physical_scale(str(path), "TYX") == {
+            "Y": 0.5,
+            "X": 0.5,
+        }
