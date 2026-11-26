@@ -137,10 +137,14 @@ def resolve_log_path(input_folder: str, output_folder: Optional[str] = None) -> 
         if not folder:
             continue
         folder = os.path.abspath(folder)
+        candidate = os.path.join(folder, LOG_NAME)
+        # A writable folder still can't take a log that is itself read-only.
+        if os.path.exists(candidate) and not os.access(candidate, os.W_OK):
+            continue
         if not forbidden(folder) and _is_writable_dir(folder):
             if folder != start:
                 print(f"Workflow log: {start} is not writable, using {folder}")
-            return os.path.join(folder, LOG_NAME)
+            return candidate
 
     path = _fallback_path(start)
     print(f"Workflow log: {start} is not writable, recording to {path}")
