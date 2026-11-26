@@ -152,6 +152,21 @@ def _get_multiscales(attrs: dict) -> list:
     return []
 
 
+def _first_ome_pixels(ome_xml: str):
+    """Return the first series' OME ``Pixels`` element as a dict.
+
+    ``Image`` (and, defensively, ``Pixels``) is a list once the file holds
+    more than one series; series 0 is what the reader shows by default.
+    """
+    image = tifffile.xml2dict(ome_xml)["OME"]["Image"]
+    if isinstance(image, list):
+        image = image[0]
+    pixels = image["Pixels"]
+    if isinstance(pixels, list):
+        pixels = pixels[0]
+    return pixels
+
+
 def _extract_tiff_physical_scale(source_path: str, axes: str) -> dict:
     """TIFF counterpart of the zarr branch in _extract_source_physical_scale
     below: reads OME PhysicalSize{X,Y,Z} from an OME-TIFF's own XML metadata
@@ -162,11 +177,7 @@ def _extract_tiff_physical_scale(source_path: str, axes: str) -> dict:
         with tifffile.TiffFile(source_path) as tf:
             if not getattr(tf, "is_ome", False) or not tf.ome_metadata:
                 return {}
-            pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"][
-                "Pixels"
-            ]
-            if isinstance(pixels, list):
-                pixels = pixels[0]
+            pixels = _first_ome_pixels(tf.ome_metadata)
     except Exception:
         return {}
     if not isinstance(pixels, dict):
@@ -226,9 +237,7 @@ def extract_source_time_interval(source_path: Optional[str]) -> Optional[float]:
             with tifffile.TiffFile(source_path) as tf:
                 if not getattr(tf, "is_ome", False) or not tf.ome_metadata:
                     return None
-                pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"][
-                    "Pixels"
-                ]
+                pixels = _first_ome_pixels(tf.ome_metadata)
         except (
             OSError,
             ValueError,

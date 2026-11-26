@@ -95,6 +95,50 @@ class TestResolveLogPath:
         finally:
             ws.chmod(0o700)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32" or getattr(os, "geteuid", lambda: 0)() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    def test_read_only_log_in_a_writable_input_folder_falls_back_to_output(
+        self, home, log_on
+    ):
+        # Regression: the folder was writable, so its read-only log was
+        # returned anyway and the run went unrecorded.
+        ws = _mkdir(home / "ws")
+        out = _mkdir(home / "out")
+        log = ws / wl.LOG_NAME
+        log.write_text("")
+        log.chmod(0o444)
+        try:
+            assert wl.resolve_log_path(str(ws), str(out)) == str(
+                out / wl.LOG_NAME
+            )
+            assert wl.resolve_log_path(str(ws)) == wl._fallback_path(
+                os.path.abspath(str(ws))
+            )
+        finally:
+            log.chmod(0o644)
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or getattr(os, "geteuid", lambda: 0)() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    def test_a_run_next_to_a_read_only_log_is_still_recorded(
+        self, home, log_on
+    ):
+        ws = _mkdir(home / "ws")
+        out = _mkdir(home / "out")
+        log = ws / wl.LOG_NAME
+        log.write_text("")
+        log.chmod(0o444)
+        try:
+            path = wl.resolve_log_path(str(ws), str(out))
+            with open(path, "a") as fh:
+                fh.write("{}\n")
+            assert (out / wl.LOG_NAME).read_text() == "{}\n"
+        finally:
+            log.chmod(0o644)
+
 
 # ---------------------------------------------------------------------------
 # Records

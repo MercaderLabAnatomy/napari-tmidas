@@ -1045,7 +1045,7 @@ class BatchCropAnything:
             # Find or create points layer for this object
             points_layer = None
             for layer in list(self.viewer.layers):
-                if f"Points for Object {ann_obj_id}" in layer.name:
+                if layer.name == f"Points for Object {ann_obj_id}":
                     points_layer = layer
                     break
 
@@ -1061,10 +1061,10 @@ class BatchCropAnything:
                     opacity=0.8,
                 )
 
-                with contextlib.suppress(AttributeError, ValueError):
-                    points_layer.mouse_drag_callbacks.remove(
-                        self._on_points_clicked
-                    )
+                if hasattr(points_layer, "mouse_drag_callbacks") and (
+                    self._on_points_clicked
+                    not in points_layer.mouse_drag_callbacks
+                ):
                     points_layer.mouse_drag_callbacks.append(
                         self._on_points_clicked
                     )
@@ -2647,7 +2647,7 @@ class BatchCropAnything:
 
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
-                if f"Points for Object {label_id}" in layer.name:
+                if layer.name == f"Points for Object {label_id}":
                     with contextlib.suppress(ValueError):
                         self.viewer.layers.remove(layer)
 
@@ -2686,7 +2686,7 @@ class BatchCropAnything:
 
             # Remove any object-specific point layers for this label
             for layer in list(self.viewer.layers):
-                if f"Points for Object {label_id}" in layer.name:
+                if layer.name == f"Points for Object {label_id}":
                     with contextlib.suppress(ValueError):
                         self.viewer.layers.remove(layer)
 

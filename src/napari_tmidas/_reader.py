@@ -65,7 +65,12 @@ def _ome_scale_for_series(tf, axes):
     try:
         import tifffile
 
-        pixels = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"]["Pixels"]
+        # Image is a list once the file holds several series; the reader
+        # shows series 0, so take its metadata.
+        image = tifffile.xml2dict(tf.ome_metadata)["OME"]["Image"]
+        if isinstance(image, list):
+            image = image[0]
+        pixels = image["Pixels"]
         if isinstance(pixels, list):
             pixels = pixels[0]
     except Exception:
