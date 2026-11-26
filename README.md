@@ -11,9 +11,24 @@
 [![codecov](https://codecov.io/gh/MercaderLabAnatomy/napari-tmidas/branch/main/graph/badge.svg)](https://codecov.io/gh/MercaderLabAnatomy/napari-tmidas)
 
 
-**Need fast batch processing for confocal & whole-slide microscopy images of biological cells and tissues?**
+**Analyse a whole folder of microscopy images the same way, without writing code.**
 
-This open-source napari plugin integrates state-of-the-art AI + analysis tools in an interactive GUI with side-by-side result comparison! Transform, analyze, and quantify microscopy data at scale including deep learning - from file conversion to segmentation, tracking, and analysis.
+napari-tmidas is a free, open-source plugin for the [napari](https://napari.org) image viewer. Set up an analysis on one image, check the result, then run it on every file in a folder: Z-stacks, time-lapse movies, well-plate screens or whole-slide scans, straight from Leica (.lif), Nikon (.nd2), Zeiss (.czi), Hamamatsu (.ndpi) and Acquifer files.
+
+**What you can do**
+- **Convert** microscope files to open formats (OME-TIFF, OME-Zarr), keeping pixel size, Z spacing and frame interval. Each converted file is checked against the original.
+- **Improve images**: remove noise (CAREamics), or predict nuclear and membrane stains from phase contrast or DIC (VisCy).
+- **Find objects**: outline cells and nuclei (Cellpose, Convpaint) and detect spots such as puncta or transcripts (Spotiflow).
+- **Follow cells over time** (Trackastra, HOCT, Ultrack), then check tracks, divisions and lineages.
+- **Fix mistakes by hand**: click to delete, merge, split or relabel objects, or let SAM2 complete a cell that was only partly found.
+- **Measure** size, shape, intensity and colocalization per object, saved as CSV tables.
+
+**Why it is practical**
+- **No programming.** The AI tools install themselves the first time you use them, each in its own environment so they don't interfere with each other.
+- **See before you commit.** A results table shows each original next to its result, so you can tune parameters on a few images before running the whole folder.
+- **Large files.** Images bigger than your computer's memory are processed piece by piece (every function except the AI tools).
+- **Reproducible.** Each run records the function, its settings and software versions in your data folder, ready for a methods section and rerunnable later.
+- **Local.** Everything runs on your own computer; your images are not uploaded.
 
 ![napari-tmidas-interactive-table-example](https://github.com/user-attachments/assets/1330cc6c-18de-46f4-a7ef-e1d7ffc3970e)
 
@@ -22,9 +37,9 @@ This open-source napari plugin integrates state-of-the-art AI + analysis tools i
 
 🤖 **AI Methods Built-In**
 - Virtual staining (VisCy) • Denoising (CAREamics) • Spot detection (Spotiflow) • Segmentation (Cellpose, Convpaint) • Tracking (Trackastra, HOCT, Ultrack)
-- Auto-install in isolated environments • No dependency conflicts • GPU acceleration
+- Auto-install in isolated environments, kept separate from napari and from each other • GPU acceleration
 
-🔄 **Universal File Conversion**
+🔄 **Microscopy File Conversion**
 - Convert LIF, ND2, CZI (including ZEN camera-streaming files), NDPI, Acquifer → TIFF or OME-Zarr
 - Preserve spatial metadata automatically
 
