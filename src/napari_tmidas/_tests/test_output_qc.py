@@ -5,6 +5,7 @@ import pytest
 import tifffile
 
 import napari_tmidas._file_selector as fs
+import napari_tmidas._output_qc as qc
 from napari_tmidas._output_qc import (
     all_zero_outputs,
     output_is_all_zero,
@@ -135,3 +136,47 @@ class TestWidgetWarning:
         widget._warn_about_all_zero_outputs()
         assert shown == []
         assert widget.viewer.status == ""
+
+
+# ---------------------------------------------------------------------------
+# Read-back check of converted files: pixel sizes
+# ---------------------------------------------------------------------------
+ZYX_MD = {"axes": "ZYX", "resolution": (2.0, 4.0), "spacing": 3.0}
+
+
+class TestConvertedPixelSizes:
+    def test_imagej_tiff_with_the_source_pixel_size_passes(self, tmp_path):
+        path = str(tmp_path / "ij.tif")
+        tifffile.imwrite(
+            path,
+            np.ones((4, 8, 8), np.uint16),
+            imagej=True,
+            resolution=(2.0, 4.0),
+            metadata={"axes": "ZYX", "spacing": 3.0, "unit": "um"},
+        )
+        assert qc.read_physical_sizes(path) == pytest.approx(
+            {"X": 0.5, "Y": 0.25, "Z": 3.0}
+        )
+        assert qc.check_converted_output(path, (4, 8, 8), np.uint16, ZYX_MD) == []
+
+    def test_unreadable_pixel_size_is_reported_not_raised(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "a.tif")
+        tifffile.imwrite(path, np.ones((4, 8, 8), np.uint16), imagej=True)
+
+        def broken(_path):
+            raise OSError("truncated tag")
+
+        monkeypatch.setattr(qc, "read_physical_sizes", broken)
+        problems = qc.check_converted_output(path, (4, 8, 8), np.uint16, ZYX_MD)
+        assert problems[0] == "pixel size cannot be read back (truncated tag)"
+        # Every expected size is then reported as missing.
+        assert problems[1:] == [
+            "X pixel size 0.5 µm was not written",
+            "Y pixel size 0.25 µm was not written",
+            "Z pixel size 3 µm was not written",
+        ]
+
+    @pytest.mark.parametrize("spacing", ["n/a", [1, 2]])
+    def test_a_z_step_that_is_not_a_number_is_ignored(self, spacing):
+        md = {"resolution": (2.0, 2.0), "spacing": spacing}
+        assert qc.expected_physical_sizes(md) == {"X": 0.5, "Y": 0.5}

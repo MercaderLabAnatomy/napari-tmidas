@@ -504,3 +504,191 @@ def test_records_are_single_json_lines(home, log_on):
     lines = (ws / wl.LOG_NAME).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["params"]["text"] == "two\nlines"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: the log must record what it can and never break a run
+# ---------------------------------------------------------------------------
+class TestLogLocationEdges:
+    def test_input_folder_that_cannot_be_created_uses_the_output_folder(
+        self, home, log_on, capsys
+    ):
+        blocker = home / "a_file"
+        blocker.write_text("not a folder")
+        out = _mkdir(home / "out")
+        path = wl.resolve_log_path(str(blocker / "ws"), str(out))
+        assert path == str(out / wl.LOG_NAME)
+        assert "is not writable, using" in capsys.readouterr().out
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or getattr(os, "geteuid", lambda: 0)() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    def test_read_only_ancestor_log_starts_a_new_log_in_the_input_folder(
+        self, home, log_on
+    ):
+        ws = _mkdir(home / "ws")
+        ancestor_log = ws / wl.LOG_NAME
+        ancestor_log.write_text("")
+        ancestor_log.chmod(0o444)
+        step = _mkdir(ws / "step2")
+        try:
+            assert wl.resolve_log_path(str(step)) == str(step / wl.LOG_NAME)
+        finally:
+            ancestor_log.chmod(0o644)
+
+
+class TestPluginVersion:
+    def _hide_version_module(self, monkeypatch):
+        import napari_tmidas
+
+        monkeypatch.delattr(napari_tmidas, "_version", raising=False)
+        monkeypatch.setitem(sys.modules, "napari_tmidas._version", None)
+
+    def test_falls_back_to_package_metadata(self, monkeypatch):
+        from importlib import metadata
+
+        self._hide_version_module(monkeypatch)
+        monkeypatch.setattr(metadata, "version", lambda name: "9.9.9")
+        assert wl._plugin_version() == {"napari_tmidas": "9.9.9", "commit": None}
+
+    def test_unknown_when_nothing_says_which_version(self, monkeypatch):
+        from importlib import metadata
+
+        def not_installed(name):
+            raise metadata.PackageNotFoundError(name)
+
+        self._hide_version_module(monkeypatch)
+        monkeypatch.setattr(metadata, "version", not_installed)
+        assert wl._plugin_version() == {"napari_tmidas": None, "commit": None}
+
+
+class TestDedicatedEnvEdges:
+    def test_name_comes_from_the_loaded_manager(self, home, monkeypatch):
+        from napari_tmidas._env_manager import BaseEnvironmentManager
+
+        class Manager(BaseEnvironmentManager):
+            def _install_dependencies(self, env_python):
+                pass
+
+            def is_package_installed(self):
+                return True
+
+        env_dir = _mkdir(home / ".napari-tmidas" / "envs" / "hoct-gpu")
+        (env_dir / "pyvenv.cfg").write_text("version = 3.10.4\n")
+        managers = types.ModuleType("someplugin.hoct_env_manager")
+        managers.manager = Manager("hoct-gpu")
+        monkeypatch.setitem(sys.modules, managers.__name__, managers)
+
+        def track(labels):
+            return labels
+
+        track.__module__ = "someplugin.hoct_tracking"
+        assert wl._dedicated_env(track) == {"name": "hoct-gpu", "python": "3.10.4"}
+
+    def test_default_name_when_no_manager_is_loaded(self, home):
+        def detect(image):
+            return image
+
+        # Neither this module nor its env manager sibling is imported.
+        detect.__module__ = "not_loaded_plugin.spotiflow_detection"
+        assert wl._dedicated_env(detect) == {"name": "spotiflow", "python": None}
+
+    def test_lookup_failure_leaves_the_environment_out(self, monkeypatch):
+        import napari_tmidas._env_manager as em
+
+        def broken(name):
+            raise RuntimeError("no home folder")
+
+        monkeypatch.setattr(em, "env_dir_for", broken)
+
+        def segment(image):
+            return image
+
+        segment.__module__ = "napari_tmidas.processing_functions.cellpose_segmentation"
+        assert wl._dedicated_env(segment) is None
+
+
+class TestJsonEncoding:
+    def test_values_json_cannot_store_are_written_readably(self, tmp_path):
+        import pathlib
+
+        class Opaque:
+            def __repr__(self):
+                return "<Opaque 7>"
+
+        path = tmp_path / "log.jsonl"
+        wl.write_record(str(path), {
+            "path": pathlib.Path("/data/a.tif"),
+            "labels": {3},
+            "frozen": frozenset(),
+            "dtype": np.uint16,
+            "thing": Opaque(),
+        })
+        (record,) = wl.read_records(str(path))
+        assert record == {
+            "path": "/data/a.tif",
+            "labels": [3],
+            "frozen": [],
+            "dtype": "uint16",
+            "thing": "<Opaque 7>",
+        }
+
+
+class TestFailuresNeverBreakARun:
+    def test_run_start_failure_writes_nothing(self, home, log_on, monkeypatch, capsys):
+        ws = _mkdir(home / "ws")
+        log = wl.WorkflowLog(str(ws))
+
+        def broken(func=None):
+            raise RuntimeError("platform probe failed")
+
+        monkeypatch.setattr(wl, "collect_environment", broken)
+        assert log.run_started(widget="batch_processing", function="x") is None
+        assert "could not record run start: platform probe failed" in (
+            capsys.readouterr().out
+        )
+        assert not (ws / wl.LOG_NAME).exists()
+
+    def test_markdown_failure_keeps_the_finish_record(
+        self, home, log_on, monkeypatch, capsys
+    ):
+        ws = _mkdir(home / "ws")
+        log = wl.WorkflowLog(str(ws))
+        run_id = log.run_started(widget="batch_processing", function="x")
+
+        def broken(path):
+            raise OSError("read-only markdown")
+
+        monkeypatch.setattr(wl, "render_markdown", broken)
+        log.run_finished(run_id, status="finished")
+        log.event(widget="label_inspection", file=str(ws / "a.tif"))
+        out = capsys.readouterr().out
+        assert "could not record run end: read-only markdown" in out
+        assert "could not record event: read-only markdown" in out
+        kinds = [r["record"] for r in wl.read_records(str(ws / wl.LOG_NAME))]
+        assert kinds == ["run_started", "run_finished", "event"]
+
+
+def test_markdown_lists_five_errors_and_counts_the_rest(home, log_on):
+    ws = _mkdir(home / "ws")
+    log = wl.WorkflowLog(str(ws))
+    run_id = log.run_started(widget="batch_processing", function="Many")
+    log.run_finished(
+        run_id,
+        status="finished",
+        errors=[{"file": str(ws / f"f{i}.tif"), "error": "bad"} for i in range(8)],
+    )
+    text = (ws / wl.MARKDOWN_NAME).read_text(encoding="utf-8")
+    assert "Errors (8):" in text
+    assert "`f4.tif`: bad" in text and "`f5.tif`" not in text
+    assert "- ... and 3 more" in text
+
+
+def test_event_keeps_its_extra_details(home, log_on):
+    ws = _mkdir(home / "ws")
+    wl.WorkflowLog(str(ws)).event(
+        widget="crop_anything", file=str(ws / "a.tif"), extra={"labels": [1, 4]}
+    )
+    (record,) = wl.read_records(str(ws / wl.LOG_NAME))
+    assert record["extra"] == {"labels": [1, 4]}
